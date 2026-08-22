@@ -79,6 +79,12 @@ sudo apt update
 sudo apt install -y build-essential cmake pkg-config libasound2-dev libdbus-1-dev
 ```
 
+### 依赖（Windows）
+
+请安装带 MSVC 目标的 stable Rust，并在 Visual Studio Developer PowerShell
+中构建。音频通过 `rodio` 使用 Windows 默认输出设备，Windows 不需要 Linux
+音频库或 `pkg-config`。
+
 ### 频谱可视化（`cava`）
 
 CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化。
@@ -86,7 +92,7 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 
 可执行文件的查找顺序如下：
 
-1. `TMPLAYER_CAVA`
+1. `TMPLAYER_CAVA`（或 `CNMPLAYER_CAVA`）
 2. `<可执行文件目录>/cava`
 3. `<可执行文件目录>/third_party/cava/cava`
 4. `<当前工作目录>/third_party/cava/cava`

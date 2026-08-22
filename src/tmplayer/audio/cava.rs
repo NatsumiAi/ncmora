@@ -5,7 +5,7 @@ use futures::stream::unfold;
 use futures::{Stream, StreamExt};
 use see::unsync::Receiver;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
@@ -66,7 +66,7 @@ pub struct CavaRunner {
     channels: CavaChannels,
     child: Child,
     _reader: thread::JoinHandle<()>,
-    cfg_path: String,
+    cfg_path: PathBuf,
 }
 
 pub fn is_available() -> bool {
@@ -89,16 +89,23 @@ impl CavaRunner {
             CavaChannels::Mono => "mono",
         };
         let reverse = if cfg.reverse { 1 } else { 0 };
+        let (cfg_path, pipe_name) = temp_cfg_path();
+        let raw_target = if cfg!(windows) {
+            format!("raw_target = {pipe_name}\n")
+        } else {
+            "raw_target = /dev/stdout\n".to_string()
+        };
         let cfg = format!(
-            "[general]\nframerate = {fr}\nbars = {bars}\nreverse = {reverse}\n\n[input]\n# Leave method/source unset: cava will pick the best supported backend (pipewire/pulse/etc).\n\n[output]\nmethod = raw\nchannels = {channels}\nraw_target = /dev/stdout\ndata_format = ascii\nascii_max_range = 1000\nbar_delimiter = 59\nframe_delimiter = 10\n",
+            "[general]\nframerate = {fr}\nbars = {bars}\nreverse = {reverse}\n\n[input]\n# Leave method/source unset: cava will pick the best supported backend.\n\n[output]\nmethod = raw\nchannels = {channels}\n{raw_target}data_format = ascii\nascii_max_range = 1000\nbar_delimiter = 59\nframe_delimiter = 10\n",
             fr = framerate_hz,
             bars = bars,
             reverse = reverse,
-            channels = channels_str
+            channels = channels_str,
+            raw_target = raw_target
         );
 
-        let cfg_path = temp_cfg_path();
-        fs::write(&cfg_path, cfg).with_context(|| format!("write cava config: {cfg_path}"))?;
+        fs::write(&cfg_path, cfg)
+            .with_context(|| format!("write cava config: {}", cfg_path.display()))?;
 
         let cava_exe = resolve_cava_executable()?;
         let mut child = Command::new(&cava_exe)
@@ -110,10 +117,24 @@ impl CavaRunner {
             .spawn()
             .with_context(|| format!("spawn cava: {}", cava_exe.display()))?;
 
-        let stdout = child
-            .stdout
-            .take()
-            .context("failed to capture cava stdout")?;
+        let output = if cfg!(windows) {
+            match open_cava_pipe(&pipe_name) {
+                Ok(output) => output,
+                Err(err) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = fs::remove_file(&cfg_path);
+                    return Err(err);
+                }
+            }
+        } else {
+            Box::new(
+                child
+                    .stdout
+                    .take()
+                    .context("failed to capture cava stdout")?,
+            ) as Box<dyn Read + Send>
+        };
 
         let left: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(vec![0.0; bars]));
         let right: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(vec![0.0; bars]));
@@ -121,7 +142,7 @@ impl CavaRunner {
         let right_cloned = Arc::clone(&right);
 
         let reader = thread::spawn(move || {
-            let mut br = BufReader::new(stdout);
+            let mut br = BufReader::new(output);
             let mut line = String::new();
             let mut next_is_left = true;
             loop {
@@ -207,7 +228,9 @@ fn find_cava_executable() -> Option<PathBuf> {
     // 1) env var override
     // 2) bundled next to our executable or in ./third_party/cava/
     // 3) PATH fallback
-    if let Some(p) = std::env::var_os("TMPLAYER_CAVA") {
+    if let Some(p) =
+        std::env::var_os("CNMPLAYER_CAVA").or_else(|| std::env::var_os("TMPLAYER_CAVA"))
+    {
         let p = PathBuf::from(p);
         if p.is_file() {
             return Some(p);
@@ -217,13 +240,17 @@ fn find_cava_executable() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            candidates.push(exe_dir.join("cava"));
-            candidates.push(exe_dir.join("third_party").join("cava").join("cava"));
+            for name in cava_binary_names() {
+                candidates.push(exe_dir.join(name));
+                candidates.push(exe_dir.join("third_party").join("cava").join(name));
+            }
         }
     }
 
     if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("third_party").join("cava").join("cava"));
+        for name in cava_binary_names() {
+            candidates.push(cwd.join("third_party").join("cava").join(name));
+        }
     }
 
     for p in candidates {
@@ -232,8 +259,10 @@ fn find_cava_executable() -> Option<PathBuf> {
         }
     }
 
-    if which_in_path("cava").is_some() {
-        return Some(PathBuf::from("cava"));
+    for name in cava_binary_names() {
+        if which_in_path(name).is_some() {
+            return Some(PathBuf::from(name));
+        }
     }
 
     None
@@ -256,6 +285,16 @@ fn which_in_path(bin: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(windows)]
+fn cava_binary_names() -> &'static [&'static str] {
+    &["cava.exe", "cava"]
+}
+
+#[cfg(not(windows))]
+fn cava_binary_names() -> &'static [&'static str] {
+    &["cava"]
 }
 
 impl Drop for CavaRunner {
@@ -297,11 +336,34 @@ fn parse_frames_ascii(s: &str, bars: usize) -> Vec<Vec<f32>> {
     out
 }
 
-fn temp_cfg_path() -> String {
+fn temp_cfg_path() -> (PathBuf, String) {
     let pid = std::process::id();
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    format!("/tmp/tmplayer-cava-{pid}-{ts}.conf")
+    let pipe_name = format!("cnmplayer-cava-{pid}-{ts}");
+    (
+        std::env::temp_dir().join(format!("{pipe_name}.conf")),
+        pipe_name,
+    )
+}
+
+#[cfg(windows)]
+fn open_cava_pipe(name: &str) -> Result<Box<dyn Read + Send>> {
+    let path = format!(r"\\.\pipe\{name}");
+    for _ in 0..200 {
+        match fs::OpenOptions::new().read(true).open(&path) {
+            Ok(file) => return Ok(Box::new(file)),
+            Err(_) => thread::sleep(Duration::from_millis(25)),
+        }
+    }
+    Err(anyhow::anyhow!(
+        "timed out connecting to cava named pipe: {path}"
+    ))
+}
+
+#[cfg(not(windows))]
+fn open_cava_pipe(_name: &str) -> Result<Box<dyn Read + Send>> {
+    unreachable!("cava named pipes are only used on Windows")
 }

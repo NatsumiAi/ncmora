@@ -2,7 +2,7 @@ use crate::STORAGE;
 use crate::app::streaming::StreamingReader;
 use crate::data::config::{CacheCleanStrategy, Config};
 use crate::tmplayer::app::state::{EQ_BANDS, EQ_FREQS_HZ, EqSettings};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rodio::cpal::Error;
 use rodio::decoder::DecoderBuilder;
 use rodio::source::SeekError;
@@ -28,8 +28,8 @@ pub enum AudioPlayerState {
 type MaybeError = Arc<Mutex<Option<Error>>>;
 
 pub struct AudioPlayer {
-    _device_sink: MixerDeviceSink,
-    player: Player,
+    _device_sink: Option<MixerDeviceSink>,
+    player: Option<Player>,
     error: MaybeError,
     cache_dir: PathBuf,
     total_duration: Option<Duration>,
@@ -53,27 +53,42 @@ fn build_player(error: MaybeError) -> Result<(Player, MixerDeviceSink)> {
 
 impl AudioPlayer {
     fn rebuild_on_error(&mut self) -> Result<()> {
-        let mut error = self.error.lock().unwrap();
-        if error.is_some() {
-            let (player, sink) = build_player(self.error.clone())?;
-            self._device_sink = sink;
-            self.player = player;
-            *error = None;
-        };
+        let should_rebuild = self.player.is_none() || self.error.lock().unwrap().is_some();
+        if !should_rebuild {
+            return Ok(());
+        }
+
+        match build_player(self.error.clone()) {
+            Ok((player, sink)) => {
+                self._device_sink = Some(sink);
+                self.player = Some(player);
+                *self.error.lock().unwrap() = None;
+            }
+            Err(err) => log::warn!("audio output unavailable: {err}"),
+        }
         Ok(())
     }
 
     fn clear_and_play(&mut self, src: impl Source + Send + 'static) -> Result<()> {
         self.rebuild_on_error()?;
-        self.player.stop();
-        self.player.append(src);
-        self.player.play();
+        let Some(player) = self.player.as_ref() else {
+            bail!("no audio output device is available");
+        };
+        player.stop();
+        player.append(src);
+        player.play();
         Ok(())
     }
 
     pub fn new(config: &Config) -> Result<Self> {
         let error = Arc::new(Mutex::new(None));
-        let (player, sink) = build_player(error.clone())?;
+        let (player, sink) = match build_player(error.clone()) {
+            Ok((player, sink)) => (Some(player), Some(sink)),
+            Err(err) => {
+                log::warn!("audio output unavailable at startup: {err}");
+                (None, None)
+            }
+        };
         let cache_root = resolve_cache_root(config);
         let cache_dir = cache_root.join("audio");
         let eq = EqSettings {
@@ -140,23 +155,31 @@ impl AudioPlayer {
     }
 
     pub fn toggle_play_pause(&mut self) {
-        if self.player.empty() {
+        let Some(player) = self.player.as_ref() else {
+            return;
+        };
+
+        if player.empty() {
             return;
         }
 
-        if self.player.is_paused() {
-            self.player.play();
+        if player.is_paused() {
+            player.play();
         } else {
-            self.player.pause();
+            player.pause();
         }
     }
 
     pub fn state(&self) -> AudioPlayerState {
-        if self.player.empty() {
+        let Some(player) = self.player.as_ref() else {
+            return AudioPlayerState::Stopped;
+        };
+
+        if player.empty() {
             return AudioPlayerState::Stopped;
         }
 
-        if self.player.is_paused() {
+        if player.is_paused() {
             AudioPlayerState::Paused
         } else {
             AudioPlayerState::Playing
@@ -164,18 +187,22 @@ impl AudioPlayer {
     }
 
     pub fn stop(&mut self) {
-        self.player.stop();
+        if let Some(player) = self.player.as_ref() {
+            player.stop();
+        }
         self.progress_rx = None;
         self.total_duration = None;
     }
 
     pub fn set_volume(&mut self, volume: f32) {
         let volume = volume.clamp(0.0, 1.0);
-        self.player.set_volume(volume);
+        if let Some(player) = self.player.as_ref() {
+            player.set_volume(volume);
+        }
     }
 
     pub fn volume(&self) -> f32 {
-        self.player.volume()
+        self.player.as_ref().map(Player::volume).unwrap_or(1.0)
     }
 
     pub fn duration(&self) -> Option<Duration> {
@@ -195,12 +222,17 @@ impl AudioPlayer {
 
         let target = Duration::from_secs_f32(total.as_secs_f32() * ratio.clamp(0.0, 1.0));
 
-        self.player.try_seek(target)?;
+        if let Some(player) = self.player.as_ref() {
+            player.try_seek(target)?;
+        }
         Ok(())
     }
 
     pub fn position(&self) -> Duration {
-        self.player.get_pos()
+        self.player
+            .as_ref()
+            .map(Player::get_pos)
+            .unwrap_or_default()
     }
 }
 

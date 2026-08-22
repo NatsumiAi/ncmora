@@ -79,6 +79,13 @@ sudo apt update
 sudo apt install -y build-essential cmake pkg-config libasound2-dev libdbus-1-dev
 ```
 
+### Requirements (Windows)
+
+Install the stable Rust toolchain with the MSVC target and build from a
+Visual Studio Developer PowerShell. Audio uses the Windows default output
+device through `rodio`/WASAPI; Linux audio libraries and `pkg-config` are not
+required on Windows.
+
 ### Spectrum Visualization (`cava`)
 
 CNMPlayer looks for an external `cava` binary for the live spectrum visualizer.
@@ -86,11 +93,11 @@ If `cava` is not available, the app still runs, but the bars and oscilloscope vi
 
 The executable lookup order is:
 
-1. `TMPLAYER_CAVA`
-2. `<executable dir>/cava`
+1. `TMPLAYER_CAVA` (or `CNMPLAYER_CAVA`)
+2. `<executable dir>/cava` (`cava.exe` on Windows)
 3. `<executable dir>/third_party/cava/cava`
 4. `<current working directory>/third_party/cava/cava`
-5. `cava` in `PATH`
+5. `cava` in `PATH` (`cava.exe` on Windows)
 
 ### Run
 
@@ -109,7 +116,7 @@ cargo build --release
 
 ### First Run and Asset Root
 
-On first run, the app creates its asset directory under your OS config directory; on Linux this is usually `~/.config/cnmplayer`.
+On first run, the app creates its asset directory under your OS config directory; on Linux this is usually `~/.config/cnmplayer`, and on Windows it is `%APPDATA%\\cnmplayer`.
 If `CNMPLAYER_ASSET_DIR` is set, that directory becomes the asset root instead.
 The app keeps `config/`, `themes/`, and `auth/` under that root.
 

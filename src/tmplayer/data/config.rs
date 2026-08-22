@@ -1,5 +1,5 @@
+use crate::data::assets;
 use crate::data::config::GraphicsProtocol;
-use crate::tmplayer::data::assets;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;

@@ -1,4 +1,4 @@
-use crate::tmplayer::data::assets;
+use crate::data::assets;
 use crate::tmplayer::ui::theme::{Theme, ThemeName, ThemePalette, detect_color_capability};
 use anyhow::Result;
 use serde::Deserialize;
