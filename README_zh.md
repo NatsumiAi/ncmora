@@ -14,20 +14,20 @@
     <img src="https://img.shields.io/badge/Language-Rust-orange?logo=rust&logoColor=white" alt="Rust">
     <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-informational?logo=linux&logoColor=white" alt="Platform">
     <img src="https://img.shields.io/badge/License-AGPL--3.0-blue?logo=opensourceinitiative&logoColor=white" alt="License">
-    <img src="https://img.shields.io/github/stars/professor-lee/CNMPlayer?style=flat&label=Stars&color=FFC700&logo=github&logoColor=white" alt="Stars">
-    <img src="https://img.shields.io/github/forks/professor-lee/CNMPlayer?style=flat&label=Forks&color=60adff&logo=git-fork&logoColor=white" alt="Forks">
-    <img src="https://img.shields.io/github/v/release/professor-lee/CNMPlayer?color=32cd32&label=Release&logo=github-actions&logoColor=white" alt="Release">
-    <img src="https://img.shields.io/github/last-commit/professor-lee/CNMPlayer?color=rebeccapurple&logo=git&logoColor=white" alt="Last Commit">
-	<img src="https://img.shields.io/github/commit-activity/m/professor-lee/CNMPlayer?style=flat&color=FF69B4&logo=github" alt="Commit Activity">
-	<img src="https://img.shields.io/github/languages/code-size/professor-lee/CNMPlayer?style=flat&color=blueviolet" alt="Code Size">
+    <img src="https://img.shields.io/github/stars/NatsumiAi/ncmora?style=flat&label=Stars&color=FFC700&logo=github&logoColor=white" alt="Stars">
+    <img src="https://img.shields.io/github/forks/NatsumiAi/ncmora?style=flat&label=Forks&color=60adff&logo=git-fork&logoColor=white" alt="Forks">
+    <img src="https://img.shields.io/github/v/release/NatsumiAi/ncmora?color=32cd32&label=Release&logo=github-actions&logoColor=white" alt="Release">
+    <img src="https://img.shields.io/github/last-commit/NatsumiAi/ncmora?color=rebeccapurple&logo=git&logoColor=white" alt="Last Commit">
+	<img src="https://img.shields.io/github/commit-activity/m/NatsumiAi/ncmora?style=flat&color=FF69B4&logo=github" alt="Commit Activity">
+	<img src="https://img.shields.io/github/languages/code-size/NatsumiAi/ncmora?style=flat&color=blueviolet" alt="Code Size">
 </p>
 
 ## 项目概述
 
-CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网易云音乐客户端。
+NCMora（Customized Netease Music Player）是一个运行在终端中的网易云音乐客户端。
 它支持二维码、账号（用户名/邮箱）和手机号验证码登录，启动时会自动恢复上次会话；
 可以浏览首页推荐、歌单/专辑结果、作者页和搜索页，并把歌曲流式播放到终端中，同时缓存音频到本地。
-切换到全屏播放时，CNMPlayer 会交给内置的 TMPlayer 全屏播放页。
+切换到全屏播放时，NCMora 会交给内置的 TMPlayer 全屏播放页。
 
 ## 主要功能
 
@@ -87,7 +87,7 @@ sudo apt install -y build-essential cmake pkg-config libasound2-dev libdbus-1-de
 
 ### 频谱可视化（`cava`）
 
-CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化。
+NCMora 会查找外部 `cava` 可执行文件来生成实时频谱可视化。
 如果系统里没有 `cava`，程序仍然可以运行，但条形频谱和示波器会自动关闭。
 
 可执行文件的查找顺序如下：
@@ -215,12 +215,12 @@ cargo build --release
 
 ## 相关项目
 
-- [TMPlayer](https://github.com/professor-lee/TMPlayer)：CNMPlayer 使用的全屏播放页实现
-- [ncm-api-rs](https://github.com/imsyy/ncm-api-rs)：CNMPlayer 使用的网易云音乐 API 客户端
+- [TMPlayer](https://github.com/professor-lee/TMPlayer)：NCMora 使用的全屏播放页实现
+- [ncm-api-rs](https://github.com/imsyy/ncm-api-rs)：NCMora 使用的网易云音乐 API 客户端
 
 ## 许可证
 
-CNMPlayer 采用 [AGPL-3.0-only](LICENSE) 许可证。
+NCMora 采用 [AGPL-3.0-only](LICENSE) 许可证。
 
 仓库内 vendored 代码的第三方归属与许可证声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
@@ -229,4 +229,4 @@ CNMPlayer 采用 [AGPL-3.0-only](LICENSE) 许可证。
 ---
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/image?repos=professor-lee/CNMPlayer&type=date&legend=top-left)](https://www.star-history.com/?repos=professor-lee%2FCNMPlayer&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/image?repos=NatsumiAi/ncmora&type=date&legend=top-left)](https://www.star-history.com/?repos=NatsumiAi%2Fncmora&type=date&legend=top-left)

@@ -14,20 +14,20 @@
     <img src="https://img.shields.io/badge/Language-Rust-orange?logo=rust&logoColor=white" alt="Rust">
     <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-informational?logo=linux&logoColor=white" alt="Platform">
     <img src="https://img.shields.io/badge/License-AGPL--3.0-blue?logo=opensourceinitiative&logoColor=white" alt="License">
-    <img src="https://img.shields.io/github/stars/professor-lee/CNMPlayer?style=flat&label=Stars&color=FFC700&logo=github&logoColor=white" alt="Stars">
-    <img src="https://img.shields.io/github/forks/professor-lee/CNMPlayer?style=flat&label=Forks&color=60adff&logo=git-fork&logoColor=white" alt="Forks">
-    <img src="https://img.shields.io/github/v/release/professor-lee/CNMPlayer?color=32cd32&label=Release&logo=github-actions&logoColor=white" alt="Release">
-    <img src="https://img.shields.io/github/last-commit/professor-lee/CNMPlayer?color=rebeccapurple&logo=git&logoColor=white" alt="Last Commit">
-	<img src="https://img.shields.io/github/commit-activity/m/professor-lee/CNMPlayer?style=flat&color=FF69B4&logo=github" alt="Commit Activity">
-	<img src="https://img.shields.io/github/languages/code-size/professor-lee/CNMPlayer?style=flat&color=blueviolet" alt="Code Size">
+    <img src="https://img.shields.io/github/stars/NatsumiAi/ncmora?style=flat&label=Stars&color=FFC700&logo=github&logoColor=white" alt="Stars">
+    <img src="https://img.shields.io/github/forks/NatsumiAi/ncmora?style=flat&label=Forks&color=60adff&logo=git-fork&logoColor=white" alt="Forks">
+    <img src="https://img.shields.io/github/v/release/NatsumiAi/ncmora?color=32cd32&label=Release&logo=github-actions&logoColor=white" alt="Release">
+    <img src="https://img.shields.io/github/last-commit/NatsumiAi/ncmora?color=rebeccapurple&logo=git&logoColor=white" alt="Last Commit">
+	<img src="https://img.shields.io/github/commit-activity/m/NatsumiAi/ncmora?style=flat&color=FF69B4&logo=github" alt="Commit Activity">
+	<img src="https://img.shields.io/github/languages/code-size/NatsumiAi/ncmora?style=flat&color=blueviolet" alt="Code Size">
 </p>
 
 ## Project Overview
 
-CNMPlayer (Customized Netease Music Player) is a terminal NetEase Cloud Music client.
+NCMora (Customized Netease Music Player) is a terminal NetEase Cloud Music client.
 It supports QR code, account (username/email), and phone verification-code login; automatically restores the last session on startup;
 browses home recommendations, playlist/album results, artist pages, and search pages; and streams songs in the terminal with local caching.
-When you switch into fullscreen playback, CNMPlayer hands control to the embedded TMPlayer fullscreen page.
+When you switch into fullscreen playback, NCMora hands control to the embedded TMPlayer fullscreen page.
 
 ## Main Features
 
@@ -88,7 +88,7 @@ required on Windows.
 
 ### Spectrum Visualization (`cava`)
 
-CNMPlayer looks for an external `cava` binary for the live spectrum visualizer.
+NCMora looks for an external `cava` binary for the live spectrum visualizer.
 If `cava` is not available, the app still runs, but the bars and oscilloscope visualizers are automatically disabled.
 
 The executable lookup order is:
@@ -155,7 +155,7 @@ Additional notes:
 - `visualize` supports `off`, `bars`, and `oscilloscope`; if `cava` is unavailable it falls back to `off`
 - `cache.clean_strategy` supports `size`, `age`, and `both`
 - `audio_quality` supports `standard`, `higher`, `exhigh`, `lossless`, `hires`, `jyeffect`, `sky`, `dolby`, and `jymaster`
-- If the current account does not have VIP access, CNMPlayer clamps the quality to the free range
+- If the current account does not have VIP access, NCMora clamps the quality to the free range
 
 ## Keyboard Shortcuts
 
@@ -216,12 +216,12 @@ Settings keybind page:
 
 ## Related Projects
 
-- [TMPlayer](https://github.com/professor-lee/TMPlayer): fullscreen playback UI used by CNMPlayer
-- [ncm-api-rs](https://github.com/imsyy/ncm-api-rs): NetEase Cloud Music API client used by CNMPlayer
+- [TMPlayer](https://github.com/professor-lee/TMPlayer): fullscreen playback UI used by NCMora
+- [ncm-api-rs](https://github.com/imsyy/ncm-api-rs): NetEase Cloud Music API client used by NCMora
 
 ## License
 
-CNMPlayer is licensed under [AGPL-3.0-only](LICENSE).
+NCMora is licensed under [AGPL-3.0-only](LICENSE).
 
 Third-party attributions and license notices for vendored code are documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
@@ -230,4 +230,4 @@ See [CITATION.cff](CITATION.cff) for the standard citation metadata and upstream
 ---
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/image?repos=professor-lee/CNMPlayer&type=date&legend=top-left)](https://www.star-history.com/?repos=professor-lee%2FCNMPlayer&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/image?repos=NatsumiAi/ncmora&type=date&legend=top-left)](https://www.star-history.com/?repos=NatsumiAi%2Fncmora&type=date&legend=top-left)
