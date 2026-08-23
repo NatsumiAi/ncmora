@@ -20,6 +20,9 @@ pub struct PlaybackSessionRecord {
     #[serde(default)]
     pub queue: Vec<PlaybackSessionTrack>,
     pub current_index: Option<usize>,
+    /// Last known position of the active track, in milliseconds.
+    #[serde(default)]
+    pub position_ms: Option<u64>,
     pub repeat_mode: Option<String>,
     pub updated_at: i64,
 }
@@ -69,4 +72,37 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_secs() as i64)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PlaybackSessionRecord;
+
+    #[test]
+    fn old_sessions_without_position_remain_loadable() {
+        let record: PlaybackSessionRecord = toml::from_str(
+            r#"
+                queue = []
+                current_index = 0
+                repeat_mode = "sequence"
+                updated_at = 0
+            "#,
+        )
+        .expect("legacy playback session should deserialize");
+
+        assert_eq!(record.position_ms, None);
+    }
+
+    #[test]
+    fn position_round_trips_in_session_format() {
+        let record = PlaybackSessionRecord {
+            position_ms: Some(12_345),
+            ..PlaybackSessionRecord::default()
+        };
+        let encoded = toml::to_string(&record).expect("session should serialize");
+        let decoded: PlaybackSessionRecord =
+            toml::from_str(&encoded).expect("session should deserialize");
+
+        assert_eq!(decoded.position_ms, Some(12_345));
+    }
 }

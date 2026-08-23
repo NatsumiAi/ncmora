@@ -36,7 +36,7 @@ When you switch into fullscreen playback, NCMora hands control to the embedded T
 - Home recommendations, playlist pages, artist pages, and search pages; `@album` search results reuse the playlist-page layout
 - Search suffixes: `@single`, `@album`, `@list`, `@author`, and the `@artist` alias; an empty `@author` query lists followed artists
 - Streaming playback with a local audio cache
-- Playback queue memory and local playback position restore
+- Playback queue memory and optional playback position restore
 - VIP-aware audio quality clamping
 - Page lyrics overlay on content pages
 - Theme switching, language switching, transparent background, hint toggles, and configurable keybinds
@@ -156,6 +156,7 @@ Additional notes:
 - `cache.clean_strategy` supports `size`, `age`, and `both`
 - `audio_quality` supports `standard`, `higher`, `exhigh`, `lossless`, `hires`, `jyeffect`, `sky`, `dolby`, and `jymaster`
 - If the current account does not have VIP access, NCMora clamps the quality to the free range
+- `resume_last_position` takes effect when `playback_memory` is enabled and restores the saved track position on startup
 
 ## Keyboard Shortcuts
 

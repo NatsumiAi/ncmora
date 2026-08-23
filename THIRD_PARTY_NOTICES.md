@@ -10,7 +10,7 @@ The notice below documents attribution and licensing for that code.
 - Local path in this repository: `ncm-api-rs/`
 - Declared upstream license: WTFPL (Version 2)
 - Upstream license file: `ncm-api-rs/LICENSE`
-- Usage in this project: NetEase Cloud Music API client used by CNMPlayer networking features
+- Usage in this project: NetEase Cloud Music API client used by NCMora networking features
 - Local modification status: copied from upstream source as-is for repository self-containment
 
 ### Upstream license text (WTFPL v2)

@@ -57,7 +57,7 @@ const SEARCH_RESULT_PAGE_SIZE: usize = 50;
 const SEARCH_BOX_TARGET_HEIGHT: u16 = 3;
 const HOME_SIDEBAR_PLAYLIST_LIMIT: usize = 100;
 const SETTINGS_ROOT_ITEMS: usize = 10;
-const SETTINGS_PLAYBACK_ITEMS: usize = 9;
+const SETTINGS_PLAYBACK_ITEMS: usize = 10;
 pub(crate) const SETTINGS_KEYBIND_ITEMS: usize = 19;
 const CONTENT_DOUBLE_CLICK_MS: u64 = 400;
 const GLOBAL_HOTKEY_COOLDOWN_MS: u64 = 120;
@@ -68,6 +68,7 @@ const RESERVED_RESET_KEYBIND: &str = "Ctrl+Alt+R";
 const COVER_CACHE_SUBDIR: &str = "cover";
 const COVER_FETCH_RETRY_MS: u64 = 1500;
 const LYRICS_FETCH_RETRY_MS: u64 = 1500;
+const PLAYBACK_SESSION_SAVE_INTERVAL_MS: u64 = 5000;
 
 const DEFAULT_KEYBIND_SEARCH_BOX: &str = "Ctrl+S";
 const DEFAULT_KEYBIND_FULLSCREEN: &str = "Ctrl+F";
@@ -251,6 +252,14 @@ type SharedFuture<T> = Shared<Pin<Box<dyn Future<Output = Option<T>>>>>;
 type CoverFuture = SharedFuture<Arc<DynamicImage>>;
 type AsciiFuture = SharedFuture<String>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoverImageState {
+    Missing,
+    Loading,
+    Failed,
+    Ready,
+}
+
 fn shot_and_share<F>(fut: F) -> Shared<F>
 where
     F: Future + Sized + 'static,
@@ -307,7 +316,12 @@ impl CoverFetchState {
 
         let (w, h) = (area.width, area.height);
         if draw_ascii {
-            let placeholder = move || placeholder_cover_ascii(w, h, '░');
+            let placeholder_char = if self.image_state() == CoverImageState::Failed {
+                'x'
+            } else {
+                '░'
+            };
+            let placeholder = move || placeholder_cover_ascii(w, h, placeholder_char);
             if self.ascii.is_none() || self.size != area.as_size() {
                 if let Some(bytes) = peek_shared_future(&self.image) {
                     self.ascii = Some(make_ascii_future(bytes.clone(), w, h));
@@ -321,6 +335,14 @@ impl CoverFetchState {
             frame.render_widget(Paragraph::new(ascii).style(text_style), area);
         } else {
             let Some(img) = peek_shared_future(&self.image) else {
+                let placeholder = match self.image_state() {
+                    CoverImageState::Failed => placeholder_cover_ascii(w, h, 'x'),
+                    CoverImageState::Loading => placeholder_cover_ascii(w, h, '░'),
+                    CoverImageState::Missing | CoverImageState::Ready => {
+                        placeholder_cover_ascii(w, h, ' ')
+                    }
+                };
+                frame.render_widget(Paragraph::new(placeholder).style(text_style), area);
                 return;
             };
             if self.protocol.is_none() || self.size != area.as_size() {
@@ -335,6 +357,18 @@ impl CoverFetchState {
                 let widget = StatefulImage::<StatefulProtocol>::default();
                 frame.render_stateful_widget(widget, area, &mut proto);
             }
+        }
+    }
+
+    fn image_state(&self) -> CoverImageState {
+        let Some(image) = self.image.as_ref() else {
+            return CoverImageState::Missing;
+        };
+
+        match image.peek() {
+            None => CoverImageState::Loading,
+            Some(None) => CoverImageState::Failed,
+            Some(Some(_)) => CoverImageState::Ready,
         }
     }
 }
@@ -1636,6 +1670,7 @@ pub struct App {
     startup_loading_complete_requested: bool,
     last_global_hotkey_at: Option<Instant>,
     last_content_click: Option<(Instant, Page, usize)>,
+    playback_session_last_saved_at: Option<Instant>,
     pub cava: Option<MiniCavaState>,
     cover_cache_dir: PathBuf,
     cover_fetch_tx: UnboundedSender<CoverFetchRequest>,
@@ -1741,6 +1776,7 @@ impl App {
             startup_loading_complete_requested: false,
             last_global_hotkey_at: None,
             last_content_click: None,
+            playback_session_last_saved_at: None,
             cava: None,
             cover_cache_dir,
             cover_fetch_tx,
@@ -2139,6 +2175,27 @@ impl App {
             .as_ref()
             .map(|track| Duration::from_millis(track.duration_ms.max(0) as u64));
         let _ = self.audio_player.seek_to_ratio(ratio, fallback_total);
+        self.playback_state = map_audio_state(self.audio_player.state());
+        self.persist_playback_memory();
+    }
+
+    fn seek_to_position_ms(&mut self, position_ms: u64) {
+        let Some(total) = self
+            .now_playing
+            .as_ref()
+            .map(|track| Duration::from_millis(track.duration_ms.max(0) as u64))
+        else {
+            return;
+        };
+
+        if total.is_zero() {
+            return;
+        }
+
+        let ratio = Duration::from_millis(position_ms).as_secs_f32() / total.as_secs_f32();
+        let _ = self
+            .audio_player
+            .seek_to_ratio(ratio.clamp(0.0, 1.0), Some(total));
         self.playback_state = map_audio_state(self.audio_player.state());
     }
 
@@ -2725,6 +2782,7 @@ impl App {
 
         self.audio_player.toggle_play_pause();
         self.playback_state = map_audio_state(self.audio_player.state());
+        self.persist_playback_memory();
     }
 
     async fn play_previous_hotkey(&mut self) {
@@ -2940,6 +2998,27 @@ impl App {
         }
 
         self.playback_state = runtime;
+        self.persist_playback_memory_if_due();
+    }
+
+    fn persist_playback_memory_if_due(&mut self) {
+        if !self.config.playback_memory
+            || self.playback_queue.is_empty()
+            || self.now_playing.is_none()
+        {
+            return;
+        }
+
+        let now = Instant::now();
+        let due = self
+            .playback_session_last_saved_at
+            .map(|last| {
+                now.duration_since(last) >= Duration::from_millis(PLAYBACK_SESSION_SAVE_INTERVAL_MS)
+            })
+            .unwrap_or(true);
+        if due {
+            self.persist_playback_memory();
+        }
     }
 
     async fn play_next_after_finish(&mut self) {
@@ -4177,6 +4256,10 @@ impl App {
                     self.clear_playback_memory();
                 }
             }
+            9 => {
+                self.config.resume_last_position = !self.config.resume_last_position;
+                let _ = self.config.save();
+            }
             _ => {}
         }
     }
@@ -4917,7 +5000,7 @@ impl App {
         self.search.status_line = text;
     }
 
-    pub fn persist_playback_memory_on_exit(&self) {
+    pub fn persist_playback_memory_on_exit(&mut self) {
         self.persist_playback_memory();
     }
 
@@ -4925,7 +5008,7 @@ impl App {
         let _ = playback_session::clear();
     }
 
-    fn persist_playback_memory(&self) {
+    fn persist_playback_memory(&mut self) {
         if !self.config.playback_memory || self.playback_queue.is_empty() {
             return;
         }
@@ -4946,11 +5029,16 @@ impl App {
         let record = playback_session::PlaybackSessionRecord {
             queue,
             current_index: self.playback_index,
+            position_ms: self
+                .now_playing
+                .as_ref()
+                .map(|_| self.playback_position().as_millis() as u64),
             repeat_mode: Some(playback_repeat_mode_key(self.playback_repeat_mode).to_string()),
             updated_at: 0,
         };
 
         let _ = playback_session::save(&record);
+        self.playback_session_last_saved_at = Some(Instant::now());
     }
 
     async fn try_restore_playback_memory(&mut self) {
@@ -5001,6 +5089,12 @@ impl App {
             .unwrap_or(0)
             .min(self.playback_queue.len().saturating_sub(1));
         self.play_queue_index(target, false).await;
+        if self.config.resume_last_position {
+            if let Some(position_ms) = record.position_ms {
+                self.seek_to_position_ms(position_ms);
+                self.persist_playback_memory();
+            }
+        }
         self.set_runtime_status(self.lang_text("已恢复播放记忆", "Playback memory restored"));
     }
 

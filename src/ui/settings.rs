@@ -197,6 +197,11 @@ fn draw_playback_settings(frame: &mut Frame, app: &App, inner: Rect) {
             l(app, "播放记忆", "Playback Memory"),
             on_off(app, app.config.playback_memory)
         ),
+        format!(
+            "{}: {}",
+            l(app, "恢复播放位置", "Resume Position"),
+            on_off(app, app.config.resume_last_position)
+        ),
     ];
 
     let lines: Vec<Line> = items

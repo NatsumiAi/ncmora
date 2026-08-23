@@ -36,7 +36,7 @@ NCMora（Customized Netease Music Player）是一个运行在终端中的网易�
 - 首页推荐、歌单页、作者页和搜索页；`@album` 搜索结果会以歌单页样式展示
 - 搜索后缀支持 `@single`、`@album`、`@list`、`@author`，以及 `@artist` 别名；空查询的 `@author` 会列出已关注作者
 - 流式播放，并带本地音频缓存
-- 支持播放队列记忆，以及本地播放位置恢复
+- 支持播放队列记忆，以及可选的播放位置恢复
 - 支持按 VIP 权限自动裁剪的音质选择
 - 内容页歌词浮层
 - 主题切换、语言切换、透明背景、提示开关和可配置快捷键
@@ -155,6 +155,7 @@ cargo build --release
 - `cache.clean_strategy` 支持 `size`、`age`、`both`
 - `audio_quality` 支持 `standard`、`higher`、`exhigh`、`lossless`、`hires`、`jyeffect`、`sky`、`dolby`、`jymaster`
 - 如果当前账号没有 VIP 权限，程序会把音质限制到免费档位
+- `resume_last_position` 需要同时开启 `playback_memory`，启动时才会恢复上次保存的歌曲位置
 
 ## 快捷键
 
