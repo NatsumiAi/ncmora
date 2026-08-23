@@ -15,7 +15,7 @@ use crate::render::cover_renderer::render_cover_ascii;
 use crate::render::graphics_overlay::cover_viewport;
 use crate::tmplayer::app::state::LyricLine;
 use crate::tmplayer::audio::cava::{CavaChannels, CavaConfig, MiniCavaState};
-use crate::tmplayer::playback::metadata::{parse_lrc, parse_plain_lyrics};
+use crate::tmplayer::playback::metadata::{enrich_lyrics, parse_lrc, parse_plain_lyrics};
 use crate::ui::theme::Theme;
 use anyhow::{Result, anyhow};
 use crossterm::event::{
@@ -1610,9 +1610,11 @@ async fn loop_lyric_fetch(
             api.set_cookie(cookie.to_string());
         }
 
-        let lyric = api.lyric(&req.song_id).await.ok()?;
-        let lrc = lyric.body.pointer("/lrc/lyric")?.as_str()?;
-        parse_lrc(lrc).or_else(|| parse_plain_lyrics(lrc))
+        let lyric = match api.lyric_new(&req.song_id).await {
+            Ok(response) => response,
+            Err(_) => api.lyric(&req.song_id).await.ok()?,
+        };
+        parse_lyric_body(&lyric.body)
     };
     while let Ok(req) = rx.recv().await {
         let lyrics = process_fn(&req).await;
@@ -1621,6 +1623,14 @@ async fn loop_lyric_fetch(
             lyrics,
         });
     }
+}
+
+fn parse_lyric_body(body: &Value) -> Option<Vec<LyricLine>> {
+    let lrc = body.pointer("/lrc/lyric").and_then(Value::as_str)?;
+    let lines = parse_lrc(lrc).or_else(|| parse_plain_lyrics(lrc))?;
+    let translated = body.pointer("/tlyric/lyric").and_then(Value::as_str);
+    let yrc = body.pointer("/yrc/lyric").and_then(Value::as_str);
+    Some(enrich_lyrics(lines, translated, yrc))
 }
 
 pub struct App {
@@ -3433,17 +3443,12 @@ impl App {
         }
 
         if allow_network && track.lyrics.is_none() {
-            if let Ok(lyric) = self.api.lyric(&track.song_id).await {
-                if let Some(raw_lrc) = lyric
-                    .body
-                    .pointer("/lrc/lyric")
-                    .and_then(|value| value.as_str())
-                {
-                    track.lyrics =
-                        crate::tmplayer::playback::metadata::parse_lrc(raw_lrc).or_else(|| {
-                            crate::tmplayer::playback::metadata::parse_plain_lyrics(raw_lrc)
-                        });
-                }
+            let lyric = match self.api.lyric_new(&track.song_id).await {
+                Ok(response) => Some(response),
+                Err(_) => self.api.lyric(&track.song_id).await.ok(),
+            };
+            if let Some(lyric) = lyric {
+                track.lyrics = parse_lyric_body(&lyric.body);
             }
         }
     }
@@ -4936,17 +4941,12 @@ impl App {
                 }
 
                 if seed.lyrics.is_none() {
-                    if let Ok(lyric) = self.api.lyric(&song_id).await {
-                        if let Some(raw_lrc) = lyric
-                            .body
-                            .pointer("/lrc/lyric")
-                            .and_then(|value| value.as_str())
-                        {
-                            seed.lyrics = crate::tmplayer::playback::metadata::parse_lrc(raw_lrc)
-                                .or_else(|| {
-                                    crate::tmplayer::playback::metadata::parse_plain_lyrics(raw_lrc)
-                                });
-                        }
+                    let lyric = match self.api.lyric_new(&song_id).await {
+                        Ok(response) => Some(response),
+                        Err(_) => self.api.lyric(&song_id).await.ok(),
+                    };
+                    if let Some(lyric) = lyric {
+                        seed.lyrics = parse_lyric_body(&lyric.body);
                     }
                 }
             }
@@ -5154,9 +5154,14 @@ impl App {
             .map(|line| line.text.clone())
             .unwrap_or_default();
         let next = lines
-            .get(idx + 1)
-            .map(|line| line.text.clone())
-            .unwrap_or_default();
+            .get(idx)
+            .and_then(|line| line.translation.clone())
+            .unwrap_or_else(|| {
+                lines
+                    .get(idx + 1)
+                    .map(|line| line.text.clone())
+                    .unwrap_or_default()
+            });
         (current, next)
     }
 

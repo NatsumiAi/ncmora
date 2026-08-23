@@ -85,9 +85,18 @@ impl EqSettings {
 }
 
 #[derive(Debug, Clone)]
+pub struct LyricWord {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct LyricLine {
     pub start_ms: u64,
     pub text: String,
+    pub translation: Option<String>,
+    pub words: Vec<LyricWord>,
 }
 
 #[derive(Debug, Clone)]

@@ -35,7 +35,7 @@ mpris-server = "0.10"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 souvlaki = { version = "0.8.3", default-features = false }
-windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_UI_Shell"] }
 
 [profile.release]
 codegen-units = 1

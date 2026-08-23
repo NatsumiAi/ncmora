@@ -292,6 +292,7 @@ mod imp {
     use std::sync::mpsc::{self as std_mpsc, Receiver, Sender};
     use std::time::Duration;
     use windows_sys::Win32::System::Console::GetConsoleWindow;
+    use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
     pub struct MprisBridge {
         controls: Option<MediaControls>,
@@ -370,6 +371,14 @@ mod imp {
     }
 
     fn create_controls(event_tx: Sender<MprisControlEvent>) -> Option<MediaControls> {
+        // Unpackaged Windows processes otherwise appear as "Unknown app" in
+        // the system media overlay. Set a stable AUMID before SMTC creation.
+        let app_id: Vec<u16> = "NCMora.NCMora\0".encode_utf16().collect();
+        let result = unsafe { SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr()) };
+        if result != 0 {
+            log::debug!("failed to set Windows app user model id: HRESULT 0x{result:08x}");
+        }
+
         let hwnd = unsafe { GetConsoleWindow() };
         if hwnd.is_null() {
             log::warn!("SMTC unavailable: console window handle is missing");

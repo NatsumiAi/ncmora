@@ -655,10 +655,12 @@ pub async fn run(
             needs_redraw = false;
         }
 
-        // frame pacing
+        // The fullscreen loop runs on compio's single-threaded runtime. Keep
+        // frame pacing cooperative so streaming downloads and decoders can
+        // continue while a newly selected song is buffering.
         let elapsed = frame_start.elapsed();
         if elapsed < frame_dt {
-            std::thread::sleep(frame_dt - elapsed);
+            compio::time::sleep(frame_dt - elapsed).await;
         }
 
         if tui.should_quit {
