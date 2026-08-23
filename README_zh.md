@@ -24,10 +24,10 @@
 
 ## 项目概述
 
-NCMora（Customized Netease Music Player）是一个运行在终端中的网易云音乐客户端。
+CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网易云音乐客户端。
 它支持二维码、账号（用户名/邮箱）和手机号验证码登录，启动时会自动恢复上次会话；
 可以浏览首页推荐、歌单/专辑结果、作者页和搜索页，并把歌曲流式播放到终端中，同时缓存音频到本地。
-切换到全屏播放时，NCMora 会交给内置的 TMPlayer 全屏播放页。
+切换到全屏播放时，CNMPlayer 会交给内置的 TMPlayer 全屏播放页。
 
 ## 主要功能
 
@@ -87,7 +87,7 @@ sudo apt install -y build-essential cmake pkg-config libasound2-dev libdbus-1-de
 
 ### 频谱可视化（`cava`）
 
-NCMora 会查找外部 `cava` 可执行文件来生成实时频谱可视化。
+CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化。
 如果系统里没有 `cava`，程序仍然可以运行，但条形频谱和示波器会自动关闭。
 
 可执行文件的查找顺序如下：
@@ -216,12 +216,12 @@ cargo build --release
 
 ## 相关项目
 
-- [TMPlayer](https://github.com/professor-lee/TMPlayer)：NCMora 使用的全屏播放页实现
-- [ncm-api-rs](https://github.com/imsyy/ncm-api-rs)：NCMora 使用的网易云音乐 API 客户端
+- [TMPlayer](https://github.com/professor-lee/TMPlayer)：CNMPlayer 使用的全屏播放页实现
+- [ncm-api-rs](https://github.com/imsyy/ncm-api-rs)：CNMPlayer 使用的网易云音乐 API 客户端
 
 ## 许可证
 
-NCMora 采用 [AGPL-3.0-only](LICENSE) 许可证。
+CNMPlayer 采用 [AGPL-3.0-only](LICENSE) 许可证。
 
 仓库内 vendored 代码的第三方归属与许可证声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 

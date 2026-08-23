@@ -24,10 +24,10 @@
 
 ## Project Overview
 
-NCMora (Customized Netease Music Player) is a terminal NetEase Cloud Music client.
+CNMPlayer (Customized Netease Music Player) is a terminal NetEase Cloud Music client.
 It supports QR code, account (username/email), and phone verification-code login; automatically restores the last session on startup;
 browses home recommendations, playlist/album results, artist pages, and search pages; and streams songs in the terminal with local caching.
-When you switch into fullscreen playback, NCMora hands control to the embedded TMPlayer fullscreen page.
+When you switch into fullscreen playback, CNMPlayer hands control to the embedded TMPlayer fullscreen page.
 
 ## Main Features
 
@@ -40,8 +40,8 @@ When you switch into fullscreen playback, NCMora hands control to the embedded T
 - VIP-aware audio quality clamping
 - Page lyrics overlay on content pages
 - Theme switching, language switching, transparent background, hint toggles, and configurable keybinds
-- Bars / oscilloscope visualization; if `cava` is not installed, visualization is automatically disabled
-- Embedded TMPlayer fullscreen page; the main UI's `cava` is paused/resumed when entering/leaving fullscreen
+- Built-in bars / oscilloscope visualization driven directly from playback samples
+- Embedded TMPlayer fullscreen page; the main UI visualizer is paused/resumed when entering/leaving fullscreen
 - Linux MPRIS sync
 - Audio cache cleanup controls
 
@@ -60,7 +60,7 @@ When you switch into fullscreen playback, NCMora hands control to the embedded T
 - Playback: rodio + symphonia + cpal
 - Metadata and artwork: lofty + image + qrcode
 - Image rendering: ratatui-image + chafa
-- Visualization: external `cava`
+- Visualization: built-in sample analyzer (no external executable required)
 - Fullscreen playback integration: TMPlayer
 - Linux media control: MPRIS
 
@@ -86,18 +86,10 @@ Visual Studio Developer PowerShell. Audio uses the Windows default output
 device through `rodio`/WASAPI; Linux audio libraries and `pkg-config` are not
 required on Windows.
 
-### Spectrum Visualization (`cava`)
+### Spectrum Visualization
 
-NCMora looks for an external `cava` binary for the live spectrum visualizer.
-If `cava` is not available, the app still runs, but the bars and oscilloscope visualizers are automatically disabled.
-
-The executable lookup order is:
-
-1. `TMPLAYER_CAVA` (or `CNMPLAYER_CAVA`)
-2. `<executable dir>/cava` (`cava.exe` on Windows)
-3. `<executable dir>/third_party/cava/cava`
-4. `<current working directory>/third_party/cava/cava`
-5. `cava` in `PATH` (`cava.exe` on Windows)
+NCMora analyzes samples already flowing through its `rodio` playback path.
+The analyzer is built into the application, so no external `cava` executable or audio-capture backend is required.
 
 ### Run
 
@@ -155,7 +147,7 @@ Additional notes:
 - `visualize` supports `off`, `bars`, and `oscilloscope`; if `cava` is unavailable it falls back to `off`
 - `cache.clean_strategy` supports `size`, `age`, and `both`
 - `audio_quality` supports `standard`, `higher`, `exhigh`, `lossless`, `hires`, `jyeffect`, `sky`, `dolby`, and `jymaster`
-- If the current account does not have VIP access, NCMora clamps the quality to the free range
+- If the current account does not have VIP access, CNMPlayer clamps the quality to the free range
 - `resume_last_position` takes effect when `playback_memory` is enabled and restores the saved track position on startup
 
 ## Keyboard Shortcuts
@@ -217,12 +209,12 @@ Settings keybind page:
 
 ## Related Projects
 
-- [TMPlayer](https://github.com/professor-lee/TMPlayer): fullscreen playback UI used by NCMora
-- [ncm-api-rs](https://github.com/imsyy/ncm-api-rs): NetEase Cloud Music API client used by NCMora
+- [TMPlayer](https://github.com/professor-lee/TMPlayer): fullscreen playback UI used by CNMPlayer
+- [ncm-api-rs](https://github.com/imsyy/ncm-api-rs): NetEase Cloud Music API client used by CNMPlayer
 
 ## License
 
-NCMora is licensed under [AGPL-3.0-only](LICENSE).
+CNMPlayer is licensed under [AGPL-3.0-only](LICENSE).
 
 Third-party attributions and license notices for vendored code are documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
