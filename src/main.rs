@@ -183,7 +183,7 @@ pub struct Storage {
 }
 
 fn try_get_storage() -> Option<Storage> {
-    let app = "cnmplayer";
+    let app = "ncmora";
     let base = BaseDirs::new()?;
     let cache = base.cache_dir().join(&app);
     let config = base.config_dir().join(&app);

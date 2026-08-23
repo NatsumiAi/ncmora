@@ -297,7 +297,7 @@ pub struct AppState {
 
     pub toast: Option<(String, Instant)>,
 
-    // Ask host CNMPlayer to open its settings after exiting fullscreen.
+    // Ask host NCMora to open its settings after exiting fullscreen.
     pub request_host_settings_open: bool,
 
     pub last_mouse_click: Option<(Instant, u16, u16)>,

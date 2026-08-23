@@ -49,7 +49,7 @@ mod imp {
             let cache_policy = cache_policy.clone();
 
             let task = async move {
-                let player = match Player::builder("cnmplayer")
+                let player = match Player::builder("ncmora")
                     .can_play(true)
                     .can_pause(true)
                     .can_seek(true)
@@ -377,8 +377,8 @@ mod imp {
         }
 
         let config = PlatformConfig {
-            display_name: "CNMPlayer",
-            dbus_name: "cnmplayer",
+            display_name: "NCMora",
+            dbus_name: "ncmora",
             hwnd: Some(hwnd as *mut c_void),
         };
         let mut controls = match MediaControls::new(config) {

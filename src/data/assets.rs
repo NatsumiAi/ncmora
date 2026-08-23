@@ -4,7 +4,8 @@ use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const ENV_ASSET_DIR: &str = "CNMPLAYER_ASSET_DIR";
+const ENV_ASSET_DIR: &str = "NCMORA_ASSET_DIR";
+const LEGACY_CNMPLAYER_ENV_ASSET_DIR: &str = "CNMPLAYER_ASSET_DIR";
 const LEGACY_ENV_ASSET_DIR: &str = "TMPLAYER_ASSET_DIR";
 
 const DEFAULT_CONFIG_TOML: &str = include_str!("../../config/default.toml");
@@ -17,6 +18,9 @@ const THEME_MOCHA_TOML: &str = include_str!("../../themes/catppuccin_mocha.toml"
 
 pub fn resolve_asset_root() -> Cow<'static, PathBuf> {
     if let Some(path) = std::env::var_os(ENV_ASSET_DIR) {
+        return Cow::Owned(PathBuf::from(path));
+    }
+    if let Some(path) = std::env::var_os(LEGACY_CNMPLAYER_ENV_ASSET_DIR) {
         return Cow::Owned(PathBuf::from(path));
     }
     // Keep the fullscreen module's historical override working while all

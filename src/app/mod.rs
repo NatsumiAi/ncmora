@@ -1702,7 +1702,7 @@ impl App {
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::USER_AGENT,
-            header::HeaderValue::from_static("Mozilla/5.0 CNMPlayer/0.1"),
+            header::HeaderValue::from_static("Mozilla/5.0 NCMora/0.1"),
         );
         headers.insert(
             header::REFERER,

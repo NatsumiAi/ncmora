@@ -499,36 +499,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
-name = "cnmplayer"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "compio",
- "crossterm",
- "cyper",
- "directories",
- "ftail",
- "futures",
- "http",
- "image",
- "log",
- "mpris-server",
- "ncm-api",
- "qrcode",
- "ratatui",
- "ratatui-image",
- "rodio",
- "see",
- "serde",
- "serde_json",
- "souvlaki",
- "symphonia",
- "toml",
- "unicode-width",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "cocoa"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2358,6 +2328,36 @@ dependencies = [
  "serde_urlencoded",
  "thiserror 2.0.19",
  "urlencoding",
+]
+
+[[package]]
+name = "ncmora"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "compio",
+ "crossterm",
+ "cyper",
+ "directories",
+ "ftail",
+ "futures",
+ "http",
+ "image",
+ "log",
+ "mpris-server",
+ "ncm-api",
+ "qrcode",
+ "ratatui",
+ "ratatui-image",
+ "rodio",
+ "see",
+ "serde",
+ "serde_json",
+ "souvlaki",
+ "symphonia",
+ "toml",
+ "unicode-width",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -1,226 +1,120 @@
-<h1 align="center"><img src="logo.svg"/></h1>
+<h1 align="center"><img src="logo.svg" alt="NCMora" /></h1>
 
 <p align="center">
-	<a href="README.md">English</a>
-	&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;
-	<a href="README_zh.md">简体中文</a>
+  <a href="README.md">English</a>
+  &nbsp;&nbsp;|&nbsp;&nbsp;
+  <a href="README_zh.md">简体中文</a>
 </p>
 
-<p align="center" style="color:gray;">
-	A Rust TUI client for NetEase Cloud Music, with an embedded fullscreen playback page.
-</p>
+<p align="center">A fast, keyboard-driven NetEase Cloud Music client for the terminal.</p>
 
 <p align="center">
-    <img src="https://img.shields.io/badge/Language-Rust-orange?logo=rust&logoColor=white" alt="Rust">
-    <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-informational?logo=linux&logoColor=white" alt="Platform">
-    <img src="https://img.shields.io/badge/License-AGPL--3.0-blue?logo=opensourceinitiative&logoColor=white" alt="License">
-    <img src="https://img.shields.io/github/stars/NatsumiAi/ncmora?style=flat&label=Stars&color=FFC700&logo=github&logoColor=white" alt="Stars">
-    <img src="https://img.shields.io/github/forks/NatsumiAi/ncmora?style=flat&label=Forks&color=60adff&logo=git-fork&logoColor=white" alt="Forks">
-    <img src="https://img.shields.io/github/v/release/NatsumiAi/ncmora?color=32cd32&label=Release&logo=github-actions&logoColor=white" alt="Release">
-    <img src="https://img.shields.io/github/last-commit/NatsumiAi/ncmora?color=rebeccapurple&logo=git&logoColor=white" alt="Last Commit">
-	<img src="https://img.shields.io/github/commit-activity/m/NatsumiAi/ncmora?style=flat&color=FF69B4&logo=github" alt="Commit Activity">
-	<img src="https://img.shields.io/github/languages/code-size/NatsumiAi/ncmora?style=flat&color=blueviolet" alt="Code Size">
+  <img src="https://img.shields.io/badge/Language-Rust-orange?logo=rust&logoColor=white" alt="Rust">
+  <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-informational?logo=linux&logoColor=white" alt="Platform">
+  <img src="https://img.shields.io/badge/License-AGPL--3.0-blue?logo=opensourceinitiative&logoColor=white" alt="License">
+  <a href="https://github.com/NatsumiAi/ncmora/releases"><img src="https://img.shields.io/github/v/release/NatsumiAi/ncmora?color=32cd32&logo=github" alt="Release"></a>
 </p>
 
-## Project Overview
+## What is NCMora?
 
-NCMora (Customized Netease Music Player) is a terminal NetEase Cloud Music client.
-It supports QR code, account (username/email), and phone verification-code login; automatically restores the last session on startup;
-browses home recommendations, playlist/album results, artist pages, and search pages; and streams songs in the terminal with local caching.
-When you switch into fullscreen playback, NCMora hands control to the embedded TMPlayer fullscreen page.
+NCMora is a Rust TUI for NetEase Cloud Music. It combines QR-code, account, and phone-code login with home recommendations, search, playlists, artists, lyrics, and streaming playback. Songs are cached locally, and the embedded TMPlayer view provides a full-screen playback experience without leaving the terminal.
 
-## Main Features
+## Features
 
-- QR code, account (username/email), and phone verification-code login
-- Automatic session restore on startup
-- Home recommendations, playlist pages, artist pages, and search pages; `@album` search results reuse the playlist-page layout
-- Search suffixes: `@single`, `@album`, `@list`, `@author`, and the `@artist` alias; an empty `@author` query lists followed artists
-- Streaming playback with a local audio cache
-- Playback queue memory and optional playback position restore
-- VIP-aware audio quality clamping
-- Page lyrics overlay on content pages
-- Theme switching, language switching, transparent background, hint toggles, and configurable keybinds
-- Built-in bars / oscilloscope visualization driven directly from playback samples
-- Embedded TMPlayer fullscreen page; the main UI visualizer is paused/resumed when entering/leaving fullscreen
-- Linux MPRIS sync
-- Audio cache cleanup controls
+- QR-code, username/email, and phone verification-code login
+- Automatic session restoration
+- Home recommendations, playlists, albums, artists, and search
+- Search filters: `@single`, `@album`, `@list`, `@author`, and `@artist`
+- Streaming playback with a persistent queue and optional position restore
+- VIP-aware audio quality selection
+- Lyrics overlay and album artwork
+- Themes, language switching, transparent backgrounds, hints, and configurable keybindings
+- Built-in spectrum and oscilloscope visualizations
+- Full-screen TMPlayer playback view
+- Linux MPRIS and Windows media-control integration
+- Configurable audio-cache cleanup
 
-## Notes
+## Install and Run
 
-- Current image protocol only implements `off` / `halfblocks`; legacy `auto`, `sixel`, `kitty`, and `iterm2` values are migrated to `halfblocks`
-- There is no dedicated album page; album search results are shown with the playlist-page layout
-- `Esc`, `Ctrl+K`, and `Ctrl+Up/Down` are fixed shortcuts and cannot be rebound
-- The app fills in missing config fields on startup and rewrites `config/default.toml` when needed
+### Pre-built releases
 
-## Tech Stack
+Download the archive for your platform from [Releases](https://github.com/NatsumiAi/ncmora/releases), extract it, and run `ncmora` (or `ncmora.exe` on Windows).
 
-- Rust 2024
-- TUI: ratatui + crossterm
-- Networking: compio + cyper + ncm-api-rs
-- Playback: rodio + symphonia + cpal
-- Metadata and artwork: lofty + image + qrcode
-- Image rendering: ratatui-image + chafa
-- Visualization: built-in sample analyzer (no external executable required)
-- Fullscreen playback integration: TMPlayer
-- Linux media control: MPRIS
+### Build from source
 
-## Development and Run
-
-### Terminal Font
-
-The UI uses icon glyphs in several places. A Nerd Font is strongly recommended; otherwise some icons may render as missing glyph boxes.
-
-### Requirements (Linux)
-
-Install the build dependencies provided by your distribution. On Debian/Ubuntu, this is usually enough:
+Install the stable Rust toolchain. Linux builds also need ALSA, D-Bus, CMake, and `pkg-config` development packages. On Debian or Ubuntu:
 
 ```bash
 sudo apt update
 sudo apt install -y build-essential cmake pkg-config libasound2-dev libdbus-1-dev
 ```
 
-### Requirements (Windows)
-
-Install the stable Rust toolchain with the MSVC target and build from a
-Visual Studio Developer PowerShell. Audio uses the Windows default output
-device through `rodio`/WASAPI; Linux audio libraries and `pkg-config` are not
-required on Windows.
-
-### Spectrum Visualization
-
-NCMora analyzes samples already flowing through its `rodio` playback path.
-The analyzer is built into the application, so no external `cava` executable or audio-capture backend is required.
-
-### Run
-
-For development:
+Then build and run:
 
 ```bash
-cargo run
+cargo run --release
 ```
 
-### Release build
+The release binary is written to `target/release/ncmora` (Windows: `target/release/ncmora.exe`). A Nerd Font is recommended for the icon glyphs used by the interface.
 
-```bash
-cargo build --release
-./target/release/cnmplayer
-```
+## First Run and Configuration
 
-### First Run and Asset Root
+NCMora creates its files in the platform configuration directory:
 
-On first run, the app creates its asset directory under your OS config directory; on Linux this is usually `~/.config/cnmplayer`, and on Windows it is `%APPDATA%\\cnmplayer`.
-If `CNMPLAYER_ASSET_DIR` is set, that directory becomes the asset root instead.
-The app keeps `config/`, `themes/`, and `auth/` under that root.
+- Linux: `~/.config/ncmora`
+- macOS: `~/Library/Application Support/ncmora`
+- Windows: `%APPDATA%\\ncmora`
 
-After the first run you will see:
+The directory contains `config/default.toml`, `themes/`, and `auth/session.toml`. Audio files use the platform cache directory by default; set `cache.path` in `config/default.toml` to choose another location.
 
-- `config/default.toml`
-- `themes/*.toml`
-- `auth/session.toml`
+Set `NCMORA_ASSET_DIR` to use a completely custom asset root. The previous `CNMPLAYER_ASSET_DIR` and `TMPLAYER_ASSET_DIR` variables are still accepted for backward compatibility.
 
-Audio cache files are stored under your OS cache directory unless you set `cache.path` in `config/default.toml`.
+Useful settings include:
 
-## Configuration
+- Interface: `theme`, `language`, `transparent_background`, `show_hints`
+- Playback: `audio_quality`, `playback_memory`, `resume_last_position`, `eq_bands_db`
+- Visualization: `visualize`, `spectrum_hz`, `bars_gap`, `bar_number`
+- Cache: `cache.path`, `cache.clean_strategy`, `cache.max_size_mb`, `cache.max_age_days`
+- Keybindings: `keybind_*` (editable from Settings)
 
-- `config/default.toml`: application settings, playback settings, keybinds, and cache policy
-- `themes/*.toml`: theme definitions
-- `auth/session.toml`: persisted login cookie
-- Cache root: OS cache directory by default, or `cache.path` if you set one
-
-The app fills in missing config fields on startup and rewrites `config/default.toml` when needed. Legacy `graphics_protocol` values `auto`, `sixel`, `kitty`, and `iterm2` are migrated to `halfblocks`.
-
-Important settings in `config/default.toml`:
-
-- Runtime: `ui_fps`, `spectrum_hz`, `mpris_poll_ms`
-- Interface: `theme`, `language`, `transparent_background`, `show_hints`, `home_more_recommend`, `album_border`
-- Login banner: `default_opening_title` (supports `\n` line breaks)
-- Image and visualization: `graphics_protocol`, `visualize`, `super_smooth_bar`, `bars_gap`, `bar_number`, `bar_channels`, `bar_channel_reverse`, `kitty_cover_scale_percent`
-- Playback behavior: `audio_quality`, `playback_memory`, `resume_last_position`, `eq_bands_db`
-- Lyrics and recognition: `page_lyrics`, `lyrics_cover_fetch`, `lyrics_cover_download`, `audio_fingerprint`, `acoustid_api_key`
-- Keybinds: `keybind_*` (see below; can be rebound in Settings)
-- Cache policy: `cache.path`, `cache.clean_strategy`, `cache.max_size_mb`, `cache.max_age_days`, `cache.clean_on_startup`
-
-Additional notes:
-
-- `theme` can be `system`, `latte`, `frappe`, `macchiato`, or `mocha`; the default is `frappe`
-- `graphics_protocol` currently only implements `off` / `halfblocks`
-- `visualize` supports `off`, `bars`, and `oscilloscope`; if `cava` is unavailable it falls back to `off`
-- `cache.clean_strategy` supports `size`, `age`, and `both`
-- `audio_quality` supports `standard`, `higher`, `exhigh`, `lossless`, `hires`, `jyeffect`, `sky`, `dolby`, and `jymaster`
-- If the current account does not have VIP access, NCMora clamps the quality to the free range
-- `resume_last_position` takes effect when `playback_memory` is enabled and restores the saved track position on startup
+Missing configuration fields are added automatically when the application starts. The supported graphics protocols are `off` and `halfblocks`; older values are migrated to `halfblocks`.
 
 ## Keyboard Shortcuts
 
-Configurable shortcuts (default bindings):
+The defaults are:
 
-- `Ctrl+S`: open the search box
-- `Ctrl+F`: open / return to fullscreen playback
-- `T`: open settings
-- `P`: toggle the sidebar
-- `Q`: quit the host app
-- `Alt+Space`: toggle play/pause
-- `Alt+Left`: previous track
-- `Alt+Right`: next track
-- `Alt+M`: toggle repeat mode
-- `Left`: fullscreen previous track
-- `Right`: fullscreen next track
-- `Space`: fullscreen play/pause
-- `M`: toggle fullscreen playback mode
-- `E`: toggle fullscreen EQ
-- `Alt+R`: reset fullscreen EQ
-- `L`: toggle like/unlike in fullscreen
-- `Alt+L`: toggle like/unlike in the collapsed player bar
+| Key | Action |
+| --- | --- |
+| `Ctrl+S` | Open search |
+| `Ctrl+F` | Enter or leave full-screen playback |
+| `T` | Open Settings |
+| `P` | Toggle the sidebar |
+| `Q` | Quit |
+| `Alt+Space` | Play or pause |
+| `Alt+Left` / `Alt+Right` | Previous / next track |
+| `Alt+M` | Change repeat mode |
+| `Ctrl+K` | Open help |
+| `Esc` | Close an overlay or go back |
 
-Fixed shortcuts:
+On the login page, `F1`, `F2`, and `F3` select QR, account, and phone login. Search and page navigation also support `Enter`, `Tab`, arrow keys, and `Esc`.
 
-- `Esc`: close overlays or go back from the current page
-- `Ctrl+Up` / `Ctrl+Down`: switch sidebar playlist section (Created / Collected) when the sidebar is expanded
-- `Ctrl+K`: open help
+## Development
 
-Login page:
+```bash
+cargo fmt --all -- --check
+cargo check --all-targets
+cargo test --all-targets
+```
 
-- `F1`: QR login
-- `F2`: account login (username / email)
-- `F3`: phone login
-- `Q`: quit the app
-- `Tab` / `Up` / `Down`: switch focus
-- `Enter`: confirm or submit
-
-Search box:
-
-- `Enter`: run the search
-- `Esc` / `Ctrl+S`: close the search box
-- `Backspace`: delete text
-- Arrow keys: move the cursor
-
-Search, playlist, and author pages:
-
-- `Enter`: open or play the focused item
-- `Esc` or `Left`: go back
-- `Tab` / `Down`: move to the next item
-- `Shift+Tab` / `Up`: move to the previous item
-
-Settings keybind page:
-
-- `Enter`: start rebinding the selected shortcut
-- `Ctrl+Alt+R`: reset keybinds to defaults
-- `Esc`: return
+NCMora uses Rust 2024, ratatui/crossterm for the TUI, compio/cyper for networking, ncm-api for NetEase Cloud Music APIs, rodio/symphonia for playback, and ratatui-image for artwork rendering.
 
 ## Related Projects
 
-- [TMPlayer](https://github.com/professor-lee/TMPlayer): fullscreen playback UI used by NCMora
-- [ncm-api-rs](https://github.com/imsyy/ncm-api-rs): NetEase Cloud Music API client used by NCMora
+- [TMPlayer](https://github.com/professor-lee/TMPlayer), the embedded full-screen playback view
+- [ncm-api-rs](https://github.com/imsyy/ncm-api-rs), the NetEase Cloud Music API client
 
 ## License
 
-NCMora is licensed under [AGPL-3.0-only](LICENSE).
-
-Third-party attributions and license notices for vendored code are documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-See [CITATION.cff](CITATION.cff) for the standard citation metadata and upstream references.
-
----
-## Star History
+NCMora is licensed under [AGPL-3.0-only](LICENSE). Third-party attribution details are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Citation metadata is available in [CITATION.cff](CITATION.cff).
 
 [![Star History Chart](https://api.star-history.com/image?repos=NatsumiAi/ncmora&type=date&legend=top-left)](https://www.star-history.com/?repos=NatsumiAi%2Fncmora&type=date&legend=top-left)

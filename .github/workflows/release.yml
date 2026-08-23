@@ -48,8 +48,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "staging/ncmora-${VERSION}-${TARGET}"
-          cp "target/${TARGET}/release/cnmplayer" "staging/ncmora-${VERSION}-${TARGET}/"
-          strip "staging/ncmora-${VERSION}-${TARGET}/cnmplayer" || true
+          cp "target/${TARGET}/release/ncmora" "staging/ncmora-${VERSION}-${TARGET}/"
+          strip "staging/ncmora-${VERSION}-${TARGET}/ncmora" || true
           tar -C staging -czf "ncmora-${VERSION}-${TARGET}.tar.gz" "ncmora-${VERSION}-${TARGET}"
 
       - name: Package Windows archive
@@ -61,7 +61,7 @@ jobs:
         run: |
           $folder = "ncmora-$env:VERSION-$env:TARGET"
           New-Item -ItemType Directory -Path "staging\$folder" -Force | Out-Null
-          Copy-Item "target\$env:TARGET\release\cnmplayer.exe" "staging\$folder\"
+          Copy-Item "target\$env:TARGET\release\ncmora.exe" "staging\$folder\"
           Compress-Archive -Path "staging\$folder" -DestinationPath "$folder.zip"
 
       - name: Upload build artifact

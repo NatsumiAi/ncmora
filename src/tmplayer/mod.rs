@@ -200,7 +200,7 @@ fn tm_config_from_host(host: &HostConfig) -> data::config::Config {
             HostBarChannels::Mono => data::config::BarChannels::Mono,
         },
         bar_channel_reverse: host.bar_channel_reverse,
-        // Fullscreen page data comes from CNMPlayer API flow; disable TMPlayer local fetch pipeline.
+        // Fullscreen page data comes from NCMora API flow; disable TMPlayer local fetch pipeline.
         lyrics_cover_fetch: false,
         lyrics_cover_download: false,
         audio_fingerprint: false,

@@ -158,7 +158,7 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay, config: &Config) -> Action {
 
     if ev.modifiers.contains(KeyModifiers::CONTROL) {
         match ev.code {
-            // In CNMPlayer embedded mode, Ctrl+F folds fullscreen back to the host UI.
+            // In NCMora embedded mode, Ctrl+F folds fullscreen back to the host UI.
             KeyCode::Char('f') | KeyCode::Char('F') => return Action::Quit,
             KeyCode::Char('k') | KeyCode::Char('K') => return Action::OpenHelpModal,
             _ => {}
