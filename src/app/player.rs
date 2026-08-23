@@ -360,6 +360,11 @@ where
     }
 }
 
+fn should_record_analyzer_sample(sample_index: usize, channels: usize) -> bool {
+    let channels = channels.max(1);
+    sample_index % channels == 0 && (sample_index / channels) % 8 == 0
+}
+
 impl<S> Iterator for EqSource<S>
 where
     S: Source<Item = f32>,
@@ -379,6 +384,7 @@ where
         let input = self.inner.next()?;
         let channel =
             (self.idx % (self.channels.get() as usize)).min(self.channels.get() as usize - 1);
+        let sample_index = self.idx;
         self.idx = self.idx.wrapping_add(1);
 
         let mut output = input;
@@ -386,8 +392,7 @@ where
             let state_idx = self.state_index(channel, band);
             output = biquad_process(&self.coeffs[band], &mut self.states[state_idx], output);
         }
-        let stride = self.channels.get() as usize * 8;
-        if self.idx % stride == 0 {
+        if should_record_analyzer_sample(sample_index, self.channels.get() as usize) {
             record_sample(
                 output,
                 self.inner.sample_rate().get() / 8,
@@ -396,6 +401,24 @@ where
             );
         }
         Some(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_record_analyzer_sample;
+
+    #[test]
+    fn analyzer_sampling_uses_first_channel_for_interleaved_audio() {
+        assert!(should_record_analyzer_sample(0, 1));
+        assert!(should_record_analyzer_sample(8, 1));
+        assert!(!should_record_analyzer_sample(7, 1));
+
+        assert!(should_record_analyzer_sample(0, 2));
+        assert!(!should_record_analyzer_sample(1, 2));
+        assert!(!should_record_analyzer_sample(15, 2));
+        assert!(should_record_analyzer_sample(16, 2));
+        assert!(!should_record_analyzer_sample(17, 2));
     }
 }
 

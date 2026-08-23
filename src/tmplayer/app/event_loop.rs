@@ -12,7 +12,7 @@ use crate::tmplayer::{
     HostPlaybackState, HostRepeatMode,
 };
 use anyhow::Result;
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
@@ -23,6 +23,10 @@ use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
 
 const HELP_MODAL_ITEMS: usize = 14;
+
+fn accept_key_event(kind: KeyEventKind) -> bool {
+    kind == KeyEventKind::Press
+}
 
 fn sync_playlists_when_viewing_playback(app: &mut AppState) {
     if app.local_view_album_folder.is_some() && app.local_folder.is_some() {
@@ -531,6 +535,9 @@ pub async fn run(
         while event::poll(Duration::from_millis(0))? {
             match event::read()? {
                 Event::Key(k) => {
+                    if !accept_key_event(k.kind) {
+                        continue;
+                    }
                     let action = map_key(k, app.overlay, &app.config);
                     handle_action(app, &mut host_bridge, action, &last_layout).await?;
                     state_changed = true;
@@ -1581,3 +1588,16 @@ fn pick_shuffle_index(pl: &crate::tmplayer::data::playlist::Playlist) -> Option<
 }
 
 // fallback bars removed (leave spectrum empty when unavailable)
+
+#[cfg(test)]
+mod tests {
+    use super::accept_key_event;
+    use crossterm::event::KeyEventKind;
+
+    #[test]
+    fn ignores_key_repeat_and_release_events() {
+        assert!(accept_key_event(KeyEventKind::Press));
+        assert!(!accept_key_event(KeyEventKind::Repeat));
+        assert!(!accept_key_event(KeyEventKind::Release));
+    }
+}
