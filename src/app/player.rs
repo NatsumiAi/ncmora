@@ -2,6 +2,7 @@ use crate::STORAGE;
 use crate::app::streaming::StreamingReader;
 use crate::data::config::{CacheCleanStrategy, Config};
 use crate::tmplayer::app::state::{EQ_BANDS, EQ_FREQS_HZ, EqSettings};
+use crate::tmplayer::audio::cava::record_sample;
 use anyhow::{Context, Result, bail};
 use rodio::cpal::Error;
 use rodio::decoder::DecoderBuilder;
@@ -384,6 +385,15 @@ where
         for band in 0..EQ_BANDS {
             let state_idx = self.state_index(channel, band);
             output = biquad_process(&self.coeffs[band], &mut self.states[state_idx], output);
+        }
+        let stride = self.channels.get() as usize * 8;
+        if self.idx % stride == 0 {
+            record_sample(
+                output,
+                self.inner.sample_rate().get() / 8,
+                self.channels.get(),
+                channel,
+            );
         }
         Some(output)
     }

@@ -24,10 +24,10 @@
 
 ## 项目概述
 
-CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网易云音乐客户端。
+NCMora（Customized Netease Music Player）是一个运行在终端中的网易云音乐客户端。
 它支持二维码、账号（用户名/邮箱）和手机号验证码登录，启动时会自动恢复上次会话；
 可以浏览首页推荐、歌单/专辑结果、作者页和搜索页，并把歌曲流式播放到终端中，同时缓存音频到本地。
-切换到全屏播放时，CNMPlayer 会交给内置的 TMPlayer 全屏播放页。
+切换到全屏播放时，NCMora 会交给内置的 TMPlayer 全屏播放页。
 
 ## 主要功能
 
@@ -40,8 +40,8 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 - 支持按 VIP 权限自动裁剪的音质选择
 - 内容页歌词浮层
 - 主题切换、语言切换、透明背景、提示开关和可配置快捷键
-- 频谱条 / 示波器可视化；如果系统里没有 `cava`，可视化会自动关闭
-- 内置 TMPlayer 全屏播放页，并会在进出全屏时自动暂停 / 恢复主界面的 `cava`
+- 内置频谱条 / 示波器可视化，直接分析播放样本，不需要外部程序
+- 内置 TMPlayer 全屏播放页，并会在进出全屏时自动暂停 / 恢复主界面可视化
 - Linux 下支持 MPRIS 媒体控制同步
 - 音频缓存清理控制
 
@@ -60,7 +60,7 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 - 播放：rodio + symphonia + cpal
 - 元数据与封面：lofty + image + qrcode
 - 图像渲染：ratatui-image + chafa
-- 可视化：外部 `cava`
+- 可视化：内置播放样本分析器（不需要外部可执行文件）
 - 全屏播放整合：TMPlayer
 - Linux 媒体控制：MPRIS
 
@@ -85,18 +85,10 @@ sudo apt install -y build-essential cmake pkg-config libasound2-dev libdbus-1-de
 中构建。音频通过 `rodio` 使用 Windows 默认输出设备，Windows 不需要 Linux
 音频库或 `pkg-config`。
 
-### 频谱可视化（`cava`）
+### 频谱可视化（内置分析器）
 
-CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化。
-如果系统里没有 `cava`，程序仍然可以运行，但条形频谱和示波器会自动关闭。
-
-可执行文件的查找顺序如下：
-
-1. `TMPLAYER_CAVA`（或 `CNMPLAYER_CAVA`）
-2. `<可执行文件目录>/cava`
-3. `<可执行文件目录>/third_party/cava/cava`
-4. `<当前工作目录>/third_party/cava/cava`
-5. `PATH` 里的 `cava`
+NCMora 直接分析 `rodio` 播放链路中的音频样本。
+分析器内置在程序中，不需要外部 `cava` 可执行文件或音频捕获后端。
 
 ### 运行
 
@@ -216,12 +208,12 @@ cargo build --release
 
 ## 相关项目
 
-- [TMPlayer](https://github.com/professor-lee/TMPlayer)：CNMPlayer 使用的全屏播放页实现
-- [ncm-api-rs](https://github.com/imsyy/ncm-api-rs)：CNMPlayer 使用的网易云音乐 API 客户端
+- [TMPlayer](https://github.com/professor-lee/TMPlayer)：NCMora 使用的全屏播放页实现
+- [ncm-api-rs](https://github.com/imsyy/ncm-api-rs)：NCMora 使用的网易云音乐 API 客户端
 
 ## 许可证
 
-CNMPlayer 采用 [AGPL-3.0-only](LICENSE) 许可证。
+NCMora 采用 [AGPL-3.0-only](LICENSE) 许可证。
 
 仓库内 vendored 代码的第三方归属与许可证声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 

@@ -480,8 +480,7 @@ pub async fn run(
     let mut tui = Tui::new(app)?;
     tui.enter()?;
 
-    // Prefer cava for system-wide visualization (keeps our renderer/style; cava only provides bars).
-    // If cava isn't installed, we leave the spectrum empty.
+    // Use the host playback sample analyzer while keeping the fullscreen renderer/style.
     let mut cava: Option<CavaRunner> = None;
     let mut cava_cfg: Option<CavaConfig> = None;
 
@@ -1527,7 +1526,7 @@ fn ensure_cava(
         }
         Err(e) => {
             if cfg.is_none() {
-                log::warn!("cava unavailable; leaving spectrum empty: {e}");
+                log::warn!("built-in spectrum analyzer unavailable; leaving spectrum empty: {e}");
             }
             *cava = None;
             *cfg = None;

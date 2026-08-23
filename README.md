@@ -24,10 +24,10 @@
 
 ## Project Overview
 
-CNMPlayer (Customized Netease Music Player) is a terminal NetEase Cloud Music client.
+NCMora (Customized Netease Music Player) is a terminal NetEase Cloud Music client.
 It supports QR code, account (username/email), and phone verification-code login; automatically restores the last session on startup;
 browses home recommendations, playlist/album results, artist pages, and search pages; and streams songs in the terminal with local caching.
-When you switch into fullscreen playback, CNMPlayer hands control to the embedded TMPlayer fullscreen page.
+When you switch into fullscreen playback, NCMora hands control to the embedded TMPlayer fullscreen page.
 
 ## Main Features
 
@@ -88,7 +88,7 @@ required on Windows.
 
 ### Spectrum Visualization
 
-CNMPlayer analyzes samples already flowing through its `rodio` playback path.
+NCMora analyzes samples already flowing through its `rodio` playback path.
 The analyzer is built into the application, so no external `cava` executable or audio-capture backend is required.
 
 ### Run
@@ -147,7 +147,7 @@ Additional notes:
 - `visualize` supports `off`, `bars`, and `oscilloscope`; if `cava` is unavailable it falls back to `off`
 - `cache.clean_strategy` supports `size`, `age`, and `both`
 - `audio_quality` supports `standard`, `higher`, `exhigh`, `lossless`, `hires`, `jyeffect`, `sky`, `dolby`, and `jymaster`
-- If the current account does not have VIP access, CNMPlayer clamps the quality to the free range
+- If the current account does not have VIP access, NCMora clamps the quality to the free range
 - `resume_last_position` takes effect when `playback_memory` is enabled and restores the saved track position on startup
 
 ## Keyboard Shortcuts
@@ -209,12 +209,12 @@ Settings keybind page:
 
 ## Related Projects
 
-- [TMPlayer](https://github.com/professor-lee/TMPlayer): fullscreen playback UI used by CNMPlayer
-- [ncm-api-rs](https://github.com/imsyy/ncm-api-rs): NetEase Cloud Music API client used by CNMPlayer
+- [TMPlayer](https://github.com/professor-lee/TMPlayer): fullscreen playback UI used by NCMora
+- [ncm-api-rs](https://github.com/imsyy/ncm-api-rs): NetEase Cloud Music API client used by NCMora
 
 ## License
 
-CNMPlayer is licensed under [AGPL-3.0-only](LICENSE).
+NCMora is licensed under [AGPL-3.0-only](LICENSE).
 
 Third-party attributions and license notices for vendored code are documented in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
