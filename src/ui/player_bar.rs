@@ -148,6 +148,16 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let mut hits = PlayerBarHitTargets::default();
 
+    // The heart is right-aligned in the now-playing text line.
+    if app.now_playing.is_some() && left_rect.width > 0 {
+        hits.favorite = Some(HitRect {
+            x: left_rect.x + left_rect.width - 1,
+            y: top.y,
+            width: 1,
+            height: 1,
+        });
+    }
+
     let controls_start = controls_rect.x + controls_rect.width.saturating_sub(controls_w) / 2;
     let prev_w = display_width(prev_label) as u16;
     let play_w = display_width(play_label) as u16;
@@ -172,6 +182,14 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         x,
         y: top.y,
         width: next_w,
+        height: 1,
+    });
+    x = x.saturating_add(next_w).saturating_add(1);
+    let mode_w = display_width(mode_symbol) as u16;
+    hits.repeat = Some(HitRect {
+        x,
+        y: top.y,
+        width: mode_w,
         height: 1,
     });
 

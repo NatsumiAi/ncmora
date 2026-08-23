@@ -1524,9 +1524,11 @@ impl HitRect {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PlayerBarHitTargets {
+    pub favorite: Option<HitRect>,
     pub prev: Option<HitRect>,
     pub play_pause: Option<HitRect>,
     pub next: Option<HitRect>,
+    pub repeat: Option<HitRect>,
     pub progress: Option<HitRect>,
 }
 
@@ -1943,6 +1945,12 @@ impl App {
                     return;
                 }
 
+                if let Some(rect) = self.player_bar_hits.favorite {
+                    if rect.contains(col, row) {
+                        self.toggle_like_hotkey().await;
+                        return;
+                    }
+                }
                 if let Some(rect) = self.player_bar_hits.prev {
                     if rect.contains(col, row) {
                         self.play_previous_hotkey().await;
@@ -1958,6 +1966,12 @@ impl App {
                 if let Some(rect) = self.player_bar_hits.next {
                     if rect.contains(col, row) {
                         self.play_next_hotkey().await;
+                        return;
+                    }
+                }
+                if let Some(rect) = self.player_bar_hits.repeat {
+                    if rect.contains(col, row) {
+                        self.cycle_repeat_mode_hotkey();
                         return;
                     }
                 }
@@ -1979,9 +1993,19 @@ impl App {
 
     fn player_bar_contains(&self, col: u16, row: u16) -> bool {
         self.player_bar_hits
-            .prev
+            .favorite
             .map(|rect| rect.contains(col, row))
             .unwrap_or(false)
+            || self
+                .player_bar_hits
+                .repeat
+                .map(|rect| rect.contains(col, row))
+                .unwrap_or(false)
+            || self
+                .player_bar_hits
+                .prev
+                .map(|rect| rect.contains(col, row))
+                .unwrap_or(false)
             || self
                 .player_bar_hits
                 .play_pause
