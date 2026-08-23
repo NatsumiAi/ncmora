@@ -88,7 +88,7 @@ required on Windows.
 
 ### Spectrum Visualization
 
-NCMora analyzes samples already flowing through its `rodio` playback path.
+CNMPlayer analyzes samples already flowing through its `rodio` playback path.
 The analyzer is built into the application, so no external `cava` executable or audio-capture backend is required.
 
 ### Run
