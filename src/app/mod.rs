@@ -7258,10 +7258,17 @@ fn cover_url_variants(url: &str) -> Vec<String> {
         }
     }
 
-    let mut unique = Vec::with_capacity(variants.len());
+    let mut unique = Vec::with_capacity(variants.len().saturating_mul(2));
     for variant in variants {
-        if !unique.iter().any(|existing| existing == &variant) {
-            unique.push(variant);
+        let sized = if variant.contains('?') {
+            format!("{variant}&param=200y200")
+        } else {
+            format!("{variant}?param=200y200")
+        };
+        for candidate in [sized, variant] {
+            if !unique.iter().any(|existing| existing == &candidate) {
+                unique.push(candidate);
+            }
         }
     }
     unique
