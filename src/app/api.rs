@@ -345,7 +345,15 @@ impl ApiState {
             return Ok(Vec::new());
         }
 
-        let response = self.http.get(url)?.send().await?;
+        // Netease still returns HTTP CDN URLs for some recommendation payloads.
+        // The CDN rejects those requests in current environments, while the
+        // same resource is available over HTTPS.
+        let request_url = url
+            .strip_prefix("http://")
+            .map(|rest| format!("https://{rest}"))
+            .unwrap_or_else(|| url.to_string());
+
+        let response = self.http.get(&request_url)?.send().await?;
         let response = error_for_status(response)?;
 
         if let Some(content_len) = response.content_length() {

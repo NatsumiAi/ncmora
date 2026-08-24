@@ -285,18 +285,36 @@ pub struct CoverFetchState {
 
 impl CoverFetchState {
     pub fn load(&mut self, api: ApiState, url: String) {
-        let cover_url = url.clone();
-        let fut = async move {
-            let bytes = api.fetch_cover_bytes(&cover_url).await.ok();
-            let flatten = bytes.filter(|x| !x.is_empty());
-            let image = flatten.and_then(|x| image::load_from_memory(&x).ok());
+        self.load_many(api, vec![url]);
+    }
 
-            // Downsampling to 500px to save memory.
-            image.map(|x| x.thumbnail(500, 500)).map(Arc::new)
+    pub fn load_many(&mut self, api: ApiState, urls: Vec<String>) {
+        let urls = urls
+            .into_iter()
+            .flat_map(|url| cover_url_variants(&url))
+            .collect::<Vec<_>>();
+        let display_url = urls.first().cloned();
+        let fut = async move {
+            for url in urls {
+                let Some(bytes) = api
+                    .fetch_cover_bytes(&url)
+                    .await
+                    .ok()
+                    .filter(|x| !x.is_empty())
+                else {
+                    continue;
+                };
+                if let Ok(image) = image::load_from_memory(&bytes) {
+                    // Downsampling to 500px to save memory.
+                    return Some(Arc::new(image.thumbnail(500, 500)));
+                }
+            }
+
+            None
         };
         let fut = Box::pin(fut);
         self.image = Some(shot_and_share(fut));
-        self.url = Some(url);
+        self.url = display_url;
         self.size = Size::ZERO;
         self.protocol = None;
     }
@@ -588,7 +606,8 @@ impl HomeState {
 }
 
 const HOME_DAILY_RECOMMEND_TILE_ID: &str = "__cnm_daily_recommend_songs__";
-const HOME_PINNED_TITLES: [&str; 3] = ["每日推荐", "私人雷达", "欧美私人雷达"];
+const HOME_PINNED_TITLES: [&str; 2] = ["每日推荐", "私人雷达"];
+const HOME_HIDDEN_TITLES: [&str; 1] = ["欧美私人雷达"];
 
 fn home_tile_real_to_virtual_index(index: usize, columns: usize) -> usize {
     let cols = columns.max(1);
@@ -5458,11 +5477,12 @@ impl App {
         if let Ok(response) = self.api.recommend_songs().await {
             if response_code(&response) == 200 {
                 if let Some(songs) = home_daily_song_items(&response.body) {
-                    if let Some(cover_url) = songs
+                    let cover_urls = songs
                         .iter()
-                        .find_map(|item| first_non_empty(item, &["/al/picUrl", "/album/picUrl"]))
-                    {
-                        daily_tile.cover.load(self.api.clone(), cover_url);
+                        .filter_map(|item| first_non_empty(item, &["/al/picUrl", "/album/picUrl"]))
+                        .collect::<Vec<_>>();
+                    if !cover_urls.is_empty() {
+                        daily_tile.cover.load_many(self.api.clone(), cover_urls);
                     }
                 }
             }
@@ -5484,8 +5504,12 @@ impl App {
         tiles.push(daily_tile);
 
         for card in cards {
+            if card.id.is_none() {
+                continue;
+            }
+
             let pinned_title = normalize_home_pinned_title(&card.title);
-            if pinned_title == Some("每日推荐") {
+            if pinned_title == Some("每日推荐") || pinned_title == Some("欧美私人雷达") {
                 continue;
             }
 
@@ -5510,7 +5534,6 @@ impl App {
         }
 
         self.home.set_tiles(prioritize_home_tiles(
-            &self.api,
             tiles,
             self.config.home_more_recommend,
         ));
@@ -6499,11 +6522,11 @@ fn normalize_home_pinned_title(title: &str) -> Option<&'static str> {
     None
 }
 
-fn prioritize_home_tiles(
-    api: &ApiState,
-    mut tiles: Vec<HomeTile>,
-    show_more: bool,
-) -> Vec<HomeTile> {
+fn prioritize_home_tiles(mut tiles: Vec<HomeTile>, show_more: bool) -> Vec<HomeTile> {
+    tiles.retain(|tile| match normalize_home_pinned_title(&tile.title) {
+        Some(title) => !HOME_HIDDEN_TITLES.contains(&title),
+        None => true,
+    });
     let mut pinned = Vec::with_capacity(HOME_PINNED_TITLES.len());
 
     for target in HOME_PINNED_TITLES {
@@ -6520,14 +6543,6 @@ fn prioritize_home_tiles(
 
         if target == "每日推荐" {
             pinned.push(HomeTile::placeholder_daily());
-        } else {
-            pinned.push(HomeTile::from_recommendation(
-                api,
-                None,
-                target.to_string(),
-                String::new(),
-                None,
-            ));
         }
     }
 
@@ -7213,6 +7228,43 @@ fn first_non_empty(value: &Value, pointers: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+fn cover_url_variants(url: &str) -> Vec<String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Vec::new();
+    }
+
+    let normalized = url
+        .strip_prefix("//")
+        .map(|rest| format!("https://{rest}"))
+        .unwrap_or_else(|| url.to_string());
+    let https = normalized
+        .strip_prefix("http://")
+        .map(|rest| format!("https://{rest}"))
+        .unwrap_or_else(|| normalized.clone());
+
+    let mut variants = vec![normalized, https];
+    if let Some(scheme_end) = variants[0].find("://") {
+        let scheme = variants[0][..scheme_end + 3].to_string();
+        let host_and_path = &variants[0][scheme_end + 3..];
+        if let Some(host_end) = host_and_path.find(".music.126.net/") {
+            let path = host_and_path[host_end + ".music.126.net".len()..].to_string();
+
+            for node in ["p1", "p2", "p3", "p4"] {
+                variants.push(format!("{scheme}{node}.music.126.net{path}"));
+            }
+        }
+    }
+
+    let mut unique = Vec::with_capacity(variants.len());
+    for variant in variants {
+        if !unique.iter().any(|existing| existing == &variant) {
+            unique.push(variant);
+        }
+    }
+    unique
 }
 
 fn response_indicates_vip(response: &ApiResponse) -> bool {

@@ -4,7 +4,7 @@ use crate::tmplayer::render::{oscilloscope_renderer, spectrum_renderer};
 use crate::tmplayer::ui::borders::SOLID_BORDER;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
@@ -139,8 +139,13 @@ fn centered_lyric_window(app: &AppState, visible_rows: usize) -> Vec<Line<'stati
             Style::default().fg(app.theme.color_subtext())
         };
         let row = line_row * line_height;
-        rows[row] = if lyric_idx as usize == current_idx && !lyric.words.is_empty() {
-            timed_line(lyric, pos_ms, app)
+        rows[row] = if lyric_idx as usize == current_idx {
+            progressive_line(
+                lyric,
+                lines.get(lyric_idx as usize + 1).map(|next| next.start_ms),
+                pos_ms,
+                app,
+            )
         } else {
             Line::from(Span::styled(lyric.text.clone(), style))
         };
@@ -201,28 +206,54 @@ fn current_line_widget(app: &AppState, text: &str) -> Line<'static> {
     let Some(line) = lines.get(idx) else {
         return Line::from(text.to_string());
     };
-    if line.words.is_empty() {
-        Line::from(text.to_string())
-    } else {
-        timed_line(line, app.player.position.as_millis() as u64, app)
-    }
+    progressive_line(
+        line,
+        lines.get(idx + 1).map(|next| next.start_ms),
+        app.player.position.as_millis() as u64,
+        app,
+    )
 }
 
-fn timed_line(line: &LyricLine, pos_ms: u64, app: &AppState) -> Line<'static> {
+fn progressive_line(
+    line: &LyricLine,
+    next_start_ms: Option<u64>,
+    pos_ms: u64,
+    app: &AppState,
+) -> Line<'static> {
+    let text = line.text.as_str();
+    if text.is_empty() {
+        return Line::default();
+    }
+
+    // The current line owns the interval until the next line, matching Pigma's
+    // smooth character-by-character highlight even when YRC word timing is absent.
+    let word_end_ms = line.words.iter().map(|word| word.end_ms).max();
+    let end_ms = next_start_ms
+        .filter(|next| *next > line.start_ms)
+        .or_else(|| word_end_ms.filter(|end| *end > line.start_ms))
+        .unwrap_or_else(|| line.start_ms.saturating_add(4_000));
+    let duration_ms = end_ms.saturating_sub(line.start_ms).max(1);
+    let progress =
+        (pos_ms.saturating_sub(line.start_ms) as f32 / duration_ms as f32).clamp(0.0, 1.0);
+    let total_chars = text.chars().count();
+    let split_at = ((total_chars as f32) * progress).floor() as usize;
+
     let mut rendered = Line::default();
-    for word in &line.words {
-        let style = if pos_ms >= word.end_ms {
+    for (index, (byte_start, ch)) in text.char_indices().enumerate() {
+        let byte_end = byte_start + ch.len_utf8();
+        let style = if index < split_at {
             Style::default().fg(app.theme.color_accent2())
-        } else if pos_ms >= word.start_ms {
+        } else if index == split_at {
             Style::default()
-                .fg(app.theme.color_accent2())
+                .fg(Color::White)
+                .bg(app.theme.color_accent())
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(app.theme.color_subtext())
         };
-        rendered.push_span(Span::styled(word.text.clone(), style));
+        rendered.push_span(Span::styled(text[byte_start..byte_end].to_string(), style));
     }
-    rendered
+    rendered.alignment(Alignment::Center)
 }
 
 fn current_lyric_index(lines: &[LyricLine], pos_ms: u64) -> usize {
