@@ -319,6 +319,14 @@ impl CoverFetchState {
         self.protocol = None;
     }
 
+    pub fn clear(&mut self) {
+        self.url = None;
+        self.image = None;
+        self.ascii = None;
+        self.size = Size::ZERO;
+        self.protocol = None;
+    }
+
     pub fn render(
         &mut self,
         frame: &mut Frame,
@@ -401,6 +409,7 @@ pub struct HomeTile {
     pub title: String,
     pub subtitle: String,
     pub cover: CoverFetchState,
+    cover_urls: Vec<String>,
 }
 
 impl HomeTile {
@@ -410,24 +419,37 @@ impl HomeTile {
             title: "每日推荐".to_string(),
             subtitle: String::new(),
             cover: CoverFetchState::default(),
+            cover_urls: Vec::new(),
         }
     }
 
     fn from_recommendation(
-        api: &ApiState,
         id: Option<String>,
         title: String,
         subtitle: String,
         cover_url: Option<String>,
     ) -> Self {
-        let mut cover = CoverFetchState::default();
-        cover_url.map(|x| cover.load(api.clone(), x));
         Self {
             id,
             title,
             subtitle,
-            cover,
+            cover: CoverFetchState::default(),
+            cover_urls: cover_url.into_iter().collect(),
         }
+    }
+
+    fn set_cover_urls(&mut self, urls: Vec<String>) {
+        self.cover_urls = urls;
+    }
+
+    fn ensure_cover_loaded(&mut self, api: &ApiState) {
+        if self.cover.image.is_none() && !self.cover_urls.is_empty() {
+            self.cover.load_many(api.clone(), self.cover_urls.clone());
+        }
+    }
+
+    fn clear_cover(&mut self) {
+        self.cover.clear();
     }
 }
 
@@ -3116,10 +3138,12 @@ impl App {
         let mut enriched = track.clone();
         // Switch UI state immediately and avoid blocking network fetches here.
         self.enrich_track_metadata(&mut enriched, false).await;
-        if let Some(slot) = self.playback_queue.get_mut(index) {
-            slot.cover = enriched.cover.clone();
-        }
         self.trim_non_current_cover_memory(index);
+        // The active track is owned by `now_playing`; keeping the same raw
+        // cover bytes in the queue would duplicate the largest allocation.
+        if let Some(slot) = self.playback_queue.get_mut(index) {
+            slot.cover = None;
+        }
         self.now_playing = Some(enriched.clone());
         self.refresh_now_playing_like_state().await;
         self.playback_index = Some(index);
@@ -3266,12 +3290,6 @@ impl App {
         if let Some(now_mut) = self.now_playing.as_mut() {
             now_mut.cover = Some(bytes.clone());
         }
-
-        if let Some(index) = self.playback_index {
-            if let Some(slot) = self.playback_queue.get_mut(index) {
-                slot.cover = Some(bytes);
-            }
-        }
     }
 
     fn maybe_schedule_now_playing_cover_fetch(&mut self) {
@@ -3294,11 +3312,6 @@ impl App {
         if let Some(bytes) = self.load_cover_from_disk_cache(&url) {
             if let Some(now_mut) = self.now_playing.as_mut() {
                 now_mut.cover = Some(bytes.clone());
-            }
-            if let Some(index) = self.playback_index {
-                if let Some(slot) = self.playback_queue.get_mut(index) {
-                    slot.cover = Some(bytes);
-                }
             }
             self.cover_fetch_inflight_url = None;
             return;
@@ -5472,6 +5485,18 @@ impl App {
             .map(|s| s.to_string())
     }
 
+    pub fn prepare_home_tile_covers(&mut self, visible_indices: &[usize]) {
+        let visible = visible_indices.iter().copied().collect::<HashSet<_>>();
+        let api = self.api.clone();
+        for (index, tile) in self.home.tiles.iter_mut().enumerate() {
+            if visible.contains(&index) {
+                tile.ensure_cover_loaded(&api);
+            } else {
+                tile.clear_cover();
+            }
+        }
+    }
+
     async fn load_home_recommendations(&mut self) -> Result<()> {
         let mut daily_tile = HomeTile::placeholder_daily();
         if let Ok(response) = self.api.recommend_songs().await {
@@ -5482,7 +5507,7 @@ impl App {
                         .filter_map(|item| first_non_empty(item, &["/al/picUrl", "/album/picUrl"]))
                         .collect::<Vec<_>>();
                     if !cover_urls.is_empty() {
-                        daily_tile.cover.load_many(self.api.clone(), cover_urls);
+                        daily_tile.set_cover_urls(cover_urls);
                     }
                 }
             }
@@ -5513,19 +5538,14 @@ impl App {
                 continue;
             }
 
-            let mut tile = HomeTile::from_recommendation(
-                &self.api,
-                card.id,
-                card.title,
-                card.subtitle,
-                card.cover_url,
-            );
+            let mut tile =
+                HomeTile::from_recommendation(card.id, card.title, card.subtitle, card.cover_url);
 
             if pinned_title == Some("私人雷达") {
                 if let Some(playlist_id) = tile.id.clone() {
                     if let Some(cover_url) = self.fetch_home_private_radar_cover(&playlist_id).await
                     {
-                        tile.cover.load(self.api.clone(), cover_url);
+                        tile.set_cover_urls(vec![cover_url]);
                     }
                 }
             }

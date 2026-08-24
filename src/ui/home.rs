@@ -82,6 +82,20 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
     app.home.set_visible_rows(visible_rows);
     let row_offset = app.home.effective_scroll_row_offset();
 
+    let mut visible_indices = Vec::new();
+    for index in 0..app.home.tiles.len() {
+        let virtual_index = home_real_to_virtual_index(index, columns);
+        let row = virtual_index / columns;
+        if row < row_offset {
+            continue;
+        }
+        let visual_row = row - row_offset;
+        if visual_row < visible_rows {
+            visible_indices.push(index);
+        }
+    }
+    app.prepare_home_tile_covers(&visible_indices);
+
     for index in 0..app.home.tiles.len() {
         let virtual_index = home_real_to_virtual_index(index, columns);
         let row = virtual_index / columns;
