@@ -17,22 +17,27 @@
 
 ## What is NCMora?
 
-NCMora is a Rust TUI for NetEase Cloud Music. It combines QR-code, account, and phone-code login with home recommendations, search, playlists, artists, lyrics, and streaming playback. Songs are cached locally, and the embedded TMPlayer view provides a full-screen playback experience without leaving the terminal.
+NCMora is a Rust TUI for NetEase Cloud Music. It combines QR-code, account, and phone-code login with home recommendations, search, playlists, artists, lyrics, and streaming playback. Songs and artwork are cached locally, and the embedded TMPlayer view provides a full-screen playback experience without leaving the terminal.
 
 ## Features
 
 - QR-code, username/email, and phone verification-code login
 - Automatic session restoration
-- Home recommendations, playlists, albums, artists, and search
+- Home recommendations, daily recommended songs, and Private Radar
+- Duplicate regional entries such as `欧美私人雷达` are hidden from the home page
+- Playlists, albums, artists, and search
 - Search filters: `@single`, `@album`, `@list`, `@author`, and `@artist`
 - Streaming playback with a persistent queue and optional position restore
 - VIP-aware audio quality selection
-- Lyrics overlay and album artwork
+- Lyrics overlay with translated lyrics and NetEase YRC word-level timing
+- Full-screen TMPlayer playback with smooth per-character lyric highlighting, inspired by [Pigma](https://github.com/akirco/pigma)
+- Album artwork with CDN fallback URLs and `param=200y200` thumbnail requests
+- Home artwork is loaded only for visible cards; artwork outside the visible area is released
+- The current playback cover is deduplicated from queued tracks to reduce memory usage
 - Themes, language switching, transparent backgrounds, hints, and configurable keybindings
 - Built-in spectrum and oscilloscope visualizations
-- Full-screen TMPlayer playback view
 - Linux MPRIS and Windows media-control integration
-- Configurable audio-cache cleanup
+- Configurable audio and artwork-cache cleanup
 
 ## Install and Run
 
