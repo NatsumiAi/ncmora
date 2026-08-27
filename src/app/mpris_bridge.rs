@@ -289,10 +289,23 @@ mod imp {
     use std::ffi::c_void;
     use std::fs;
     use std::hash::{Hash, Hasher};
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::path::PathBuf;
     use std::sync::mpsc::{self as std_mpsc, Receiver, Sender};
     use std::time::Duration;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        CoTaskMemFree, CoUninitialize, IPersistFile,
+    };
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, PROCESS_NAME_WIN32, QueryFullProcessImageNameW,
+    };
+    use windows::Win32::UI::Shell::{
+        FOLDERID_Programs, IShellLinkW, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellLink,
+    };
+    use windows::core::{Interface, PCWSTR, PWSTR};
     use windows_sys::Win32::System::Console::GetConsoleWindow;
-    use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
     pub struct MprisBridge {
         controls: Option<MediaControls>,
@@ -371,12 +384,8 @@ mod imp {
     }
 
     fn create_controls(event_tx: Sender<MprisControlEvent>) -> Option<MediaControls> {
-        // Unpackaged Windows processes otherwise appear as "Unknown app" in
-        // the system media overlay. Set a stable AUMID before SMTC creation.
-        let app_id: Vec<u16> = "NCMora.NCMora\0".encode_utf16().collect();
-        let result = unsafe { SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr()) };
-        if result != 0 {
-            log::debug!("failed to set Windows app user model id: HRESULT 0x{result:08x}");
+        if let Err(err) = ensure_start_menu_shortcut() {
+            log::warn!("failed to create the NCMora Start menu shortcut: {err}");
         }
 
         let hwnd = unsafe { GetConsoleWindow() };
@@ -408,6 +417,61 @@ mod imp {
         }
 
         Some(controls)
+    }
+
+    fn ensure_start_menu_shortcut() -> windows::core::Result<()> {
+        let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        initialized.ok()?;
+
+        let result = create_start_menu_shortcut();
+        unsafe { CoUninitialize() };
+        result
+    }
+
+    fn create_start_menu_shortcut() -> windows::core::Result<()> {
+        let exe_path = current_process_image_path()?;
+        let programs_raw = unsafe {
+            SHGetKnownFolderPath(&FOLDERID_Programs, KF_FLAG_DEFAULT, HANDLE::default())?
+        };
+        let programs = unsafe { programs_raw.to_string() };
+        unsafe { CoTaskMemFree(Some(programs_raw.as_ptr().cast())) };
+        let shortcut_path = PathBuf::from(programs?).join("NCMora.lnk");
+
+        let exe_wide = wide_nul(exe_path.as_os_str());
+        let shortcut_wide = wide_nul(shortcut_path.as_os_str());
+        let working_dir_wide = exe_path.parent().map(|path| wide_nul(path.as_os_str()));
+
+        let shell_link: IShellLinkW =
+            unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)? };
+        unsafe {
+            shell_link.SetPath(PCWSTR(exe_wide.as_ptr()))?;
+            shell_link.SetIconLocation(PCWSTR(exe_wide.as_ptr()), 0)?;
+            if let Some(working_dir) = working_dir_wide.as_ref() {
+                shell_link.SetWorkingDirectory(PCWSTR(working_dir.as_ptr()))?;
+            }
+            let persist: IPersistFile = shell_link.cast()?;
+            persist.Save(PCWSTR(shortcut_wide.as_ptr()), true)?;
+        }
+        Ok(())
+    }
+
+    fn current_process_image_path() -> windows::core::Result<PathBuf> {
+        let mut buffer = vec![0u16; 32_768];
+        let mut len = buffer.len() as u32;
+        unsafe {
+            QueryFullProcessImageNameW(
+                GetCurrentProcess(),
+                PROCESS_NAME_WIN32,
+                PWSTR(buffer.as_mut_ptr()),
+                &mut len,
+            )?;
+        }
+        buffer.truncate(len as usize);
+        Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer)))
+    }
+
+    fn wide_nul(value: &std::ffi::OsStr) -> Vec<u16> {
+        value.encode_wide().chain(Some(0)).collect()
     }
 
     fn map_control_event(event: MediaControlEvent) -> Option<MprisControlEvent> {
