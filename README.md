@@ -24,65 +24,140 @@
 
 ## Project Overview
 
-CNMPlayer (Customized Netease Music Player) is a terminal NetEase Cloud Music client.
-It supports QR code, account (username/email), and phone verification-code login; automatically restores the last session on startup;
-browses home recommendations, playlist/album results, artist pages, and search pages; and streams songs in the terminal with local caching.
-When you switch into fullscreen playback, CNMPlayer hands control to the embedded TMPlayer fullscreen page.
+CNMPlayer (Customized NetEase Music Player) is a NetEase Cloud Music client that runs in the terminal.
+A single process carries two UIs:
+
+- the **host UI** — login, home recommendations, playlist / artist / search pages, a sliding sidebar and a 5-row collapsed player bar;
+- the **embedded fullscreen playback page** (TMPlayer) — cover, lyrics, playlist overlay and a 10-band EQ. The fullscreen keybind (default `Ctrl+F`) hands playback over to it; inside, `Ctrl+F` or `Esc` returns to the host.
+
+Playback belongs to the host: streaming with a local cache, queue memory, private roam, VIP-aware audio quality, and the visualizers (cava bars, a real-PCM oscilloscope, a LUFS VU meter) that the other UIs draw.
 
 ## Main Features
 
-- QR code, account (username/email), and phone verification-code login
-- Automatic session restore on startup
-- Home recommendations, playlist pages, artist pages, and search pages; `@album` search results reuse the playlist-page layout
-- Search suffixes: `@single`, `@album`, `@list`, `@author`, and the `@artist` alias; an empty `@author` query lists followed artists
-- Streaming playback with a local audio cache
-- Playback queue memory and local playback position restore
-- VIP-aware audio quality clamping
-- Page lyrics overlay on content pages
-- Theme switching, language switching, transparent background, hint toggles, and configurable keybinds
-- Bars / oscilloscope visualization; if `cava` is not installed, visualization is automatically disabled
-- Embedded TMPlayer fullscreen page; the main UI's `cava` is paused/resumed when entering/leaving fullscreen
-- Linux MPRIS sync
-- Audio cache cleanup controls
+### Account
 
-## Notes
+- QR code (`F1`), username / email + password (`F2`) and phone + SMS code (`F3`) login
+- Session persisted to `auth/session.toml` and validated on the next start; cookies returned by later responses are merged automatically
+- Logout from the settings modal (clears the login cookie, playback memory and private-roam data)
 
-- Current image protocol only implements `off` / `halfblocks`; legacy `auto`, `sixel`, `kitty`, and `iterm2` values are migrated to `halfblocks`
-- There is no dedicated album page; album search results are shown with the playlist-page layout
-- `Esc`, `Ctrl+K`, and `Ctrl+Up/Down` are fixed shortcuts and cannot be rebound
-- The app fills in missing config fields on startup and rewrites `config/default.toml` when needed
+### Browsing
 
-## Tech Stack
+- Home: a recommendation tile grid whose first three slots are always `每日推荐` (Daily Recommendations), `私人雷达` (Private Radar) and `私人漫游` (Private Roam); `home_more_recommend` expands the remaining recommendations
+- Home sidebar (toggle keybind, default `P`): your created and collected playlists, up to 100 each; `Ctrl+Up/Down` switches section, Enter opens, Esc collapses
+- Playlist page — also used for albums, there is no separate album page; a header (cover, title, author, description, track count) above a virtualized track list
+- Artist page: avatar, name, hot-song / album / EP / single counts and a tile grid per section
+- Search page: 50 results per request, appended as you scroll further
+- Private roam: refreshed daily while keeping the last played track at the head; reaching the end of the list fetches more (each API call returns 3 songs, three calls are merged and de-duplicated) and appends them; the tile cover follows the currently playing roam song, and the queue origin survives a restart
+- Navigation: Enter opens or plays, Esc / Left goes back, Tab / Down and Shift+Tab / Up move, PageUp / PageDown jump one page
+- Mouse: the wheel scrolls, a single click focuses, a double click activates (400 ms window); the collapsed player bar's previous / play-pause / next buttons and its progress bar are clickable
 
-- Rust 2024
-- TUI: ratatui + crossterm
-- Networking: compio + cyper + ncm-api-rs
-- Playback: rodio + symphonia + cpal
-- Metadata and artwork: lofty + image + qrcode
-- Image rendering: ratatui-image + chafa
-- Visualization: external `cava`
-- Fullscreen playback integration: TMPlayer
-- Linux media control: MPRIS
+### Search syntax
 
-## Development and Run
+The search box (`Ctrl+S`) takes a trailing suffix; without one the search behaves like `@single`.
+`@author` and `@artist` are synonyms, and an empty keyword with `@author` lists the artists you follow.
 
-### Terminal Font
+| Query | Results | Enter |
+| --- | --- | --- |
+| `keyword`, `keyword@single` | songs | plays the song, queueing the result set from that row |
+| `keyword@album` | albums | opens the album in the playlist layout |
+| `keyword@list` | playlists | opens the playlist |
+| `keyword@author` / `keyword@artist` | artists | opens the artist page |
+| `@author` (no keyword) | followed artists | opens the artist page |
 
-The UI uses icon glyphs in several places. A Nerd Font is strongly recommended; otherwise some icons may render as missing glyph boxes.
+### Playback
 
-### Requirements (Linux)
+- Streaming: the song is downloaded while playing into `<cache>/audio/<song_id>__<quality>.part` and renamed to `.audio` once complete; a completed cache file is played straight from disk, and the buffered part of the progress bar is the download
+- Seeking from the progress bar or inside the fullscreen page, with a pulse animation while the position catches up
+- Queue memory (`playback_memory`): queue, current index, repeat mode and the queue's origin list are saved on every track change and restored after login — the restored track starts from the beginning
+- VIP-aware audio quality (`audio_quality`): 9 levels from `standard` to `jymaster`; a non-VIP account is clamped to `exhigh`
+- 10-band EQ, ±12 dB (`eq_bands_db`), edited from the fullscreen EQ modal and applied to the live stream
+- Like / unlike from the fullscreen page and from the collapsed player bar
+- Repeat modes: sequence → shuffle → loop all → loop one
+- Linux media control (MPRIS, player name `cnmplayer`) with metadata and cover art
 
-Install the build dependencies provided by your distribution. On Debian/Ubuntu, this is usually enough:
+### Visualization
+
+- `bars` — cava spectrum bars. Requires the external `cava` binary.
+- `oscilloscope` — a real PCM waveform tapped from the playback chain: rising-edge trigger, min/max peak extraction per sub-column and absolute amplitude mapping, so quiet passages hug the centre line and loud ones fill the panel. It does **not** need cava.
+- If cava is missing, the default becomes `oscilloscope` and cycling the setting skips `bars` instead of failing.
+- The collapsed player bar always draws a 10-cell braille mini spectrum; the narrow small window draws a stereo VU meter driven by a 400 ms momentary LUFS meter (display range −60…0 LUFS).
+
+### Small window mode
+
+Enabled by default (`small_window_display = false` turns it off). It applies to the host's content pages, and takes over as soon as the terminal drops below the thresholds:
+
+| Terminal size | Behavior |
+| --- | --- |
+| width ≥ 32 and height ≥ 12 | normal UI |
+| width ≥ 32, 5 ≤ height < 12 | flat layout: page lyrics on top, the 5-row collapsed player bar at the bottom |
+| width ≥ 32, height = 5 | flat layout, one panel at a time: the toggle keybind (default `Alt+X`) slides between the player bar and the lyrics |
+| width < 32, height ≥ 12 | narrow layout: full-width stereo LUFS VU bars |
+| both dimensions too small | `Terminal too small` |
+
+Entering the mode closes the sidebar and any open overlay. Settings, the search box and the sidebar cannot be opened while it is active, and only quit, previous, next, play-pause, repeat mode, like (collapsed) and the small-window toggle key still respond.
+The flat player bar keeps its mouse targets (previous, play-pause, next, progress seek).
+
+### Interface
+
+- Themes: `system`, `latte`, `frappe` (default), `macchiato`, `mocha`
+- UI language: `zh` / `en`
+- Transparent background, album-cover border and hint lines
+- 20 rebindable shortcuts with conflict detection; `Ctrl+Alt+R` restores the defaults
+- About modal with braille art, and a hidden easter egg inside it (the `easter-egg` cargo feature, compiled in by default and removable with `--no-default-features`)
+
+## Installation
+
+### Arch Linux (AUR)
+
+| Package | Contents |
+| --- | --- |
+| `cnmplayer-bin` | Prebuilt binary from the latest GitHub Release |
+| `cnmplayer` | Builds the latest release tag from source |
+| `cnmplayer-git` | Builds the `develop` branch |
+
+```bash
+# with paru
+paru -S cnmplayer-bin
+```
+
+### Prebuilt tarballs
+
+Every release publishes `CNMPlayer_vX.Y.Z_linux_amd64.tar.xz` and `CNMPlayer_vX.Y.Z_linux_aarch64.tar.xz` on the [Releases page](https://github.com/professor-lee/CNMPlayer/releases). Both are flat archives containing the `cnmplayer` binary and `LICENSE`:
+
+```bash
+tar -xJf CNMPlayer_vX.Y.Z_linux_amd64.tar.xz
+./cnmplayer
+```
+
+### Build from source
+
+```bash
+git clone https://github.com/professor-lee/CNMPlayer.git
+cd CNMPlayer
+cargo build --release
+./target/release/cnmplayer
+```
+
+Build dependencies on Debian/Ubuntu (the same list is used by CI):
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential cmake pkg-config libasound2-dev libdbus-1-dev
+sudo apt install -y build-essential cmake pkg-config \
+  libasound2-dev libchafa-dev libpipewire-0.3-dev libssl-dev libglib2.0-dev libclang-dev
 ```
 
-### Spectrum Visualization (`cava`)
+`libchafa-dev` must be chafa ≥ 1.8.0 (the image renderer probes it through `pkg-config`), and `libclang-dev` plus `libpipewire-0.3-dev` are needed because the PipeWire audio backend generates bindings at build time.
+
+### Requirements
+
+- Linux with ALSA or PipeWire for audio, and the chafa shared library at runtime
+- An optional `cava` binary for the `bars` visualizer
+- A Nerd Font is strongly recommended: the UI uses icon glyphs in several places, and without such a font some icons may render as missing-glyph boxes
+
+## cava
 
 CNMPlayer looks for an external `cava` binary for the live spectrum visualizer.
-If `cava` is not available, the app still runs, but the bars and oscilloscope visualizers are automatically disabled.
+If `cava` is not available, the app still runs: `bars` is unavailable and the default visualizer becomes the oscilloscope, which reads PCM from the playback chain and needs no external process.
 
 The executable lookup order is:
 
@@ -92,125 +167,180 @@ The executable lookup order is:
 4. `<current working directory>/third_party/cava/cava`
 5. `cava` in `PATH`
 
-### Run
+## First Run and Asset Root
 
-For development:
-
-```bash
-cargo run
-```
-
-### Release build
-
-```bash
-cargo build --release
-./target/release/cnmplayer
-```
-
-### First Run and Asset Root
-
-On first run, the app creates its asset directory under your OS config directory; on Linux this is usually `~/.config/cnmplayer`.
+On first run the app creates an asset directory under your OS config directory; on Linux this is usually `~/.config/cnmplayer`.
 If `CNMPLAYER_ASSET_DIR` is set, that directory becomes the asset root instead.
-The app keeps `config/`, `themes/`, and `auth/` under that root.
 
-After the first run you will see:
+After the first start the root contains:
 
-- `config/default.toml`
-- `themes/*.toml`
-- `auth/session.toml`
+- `config/default.toml` — application, playback, keybind and cache settings
+- `themes/*.toml` — `system`, `catppuccin_latte`, `catppuccin_frappe`, `catppuccin_macchiato`, `catppuccin_mocha`
+- `auth/session.toml` — the persisted login cookie
+- `playback/session.toml` — the remembered queue (written while `playback_memory` is on)
+- `private_roam/session.toml` — the private-roam list, its last played position and the cached cover
 
-Audio cache files are stored under your OS cache directory unless you set `cache.path` in `config/default.toml`.
+The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux) and can be moved with `cache.path`. It holds:
+
+- `audio/<song_id>__<quality>.audio` — finished downloads; a running download is a `.part` file and is discarded if it never completes
+- `cover/` — cover images fetched for the now-playing track
+- `mpris_art/` — cover files exported for the MPRIS player
+- `Player.log` and `Player.stderr.log` — application log and the native audio backends' stderr (both capped at 4 MB)
 
 ## Configuration
 
-- `config/default.toml`: application settings, playback settings, keybinds, and cache policy
-- `themes/*.toml`: theme definitions
-- `auth/session.toml`: persisted login cookie
-- Cache root: OS cache directory by default, or `cache.path` if you set one
+`config/default.toml` is rewritten on startup whenever a known field is missing, legacy values are found (`graphics_protocol = "auto|sixel|kitty|iterm2"`, the old `Alt+B` sidebar binding) or the saved visualizer is unavailable. A malformed file is replaced by the defaults, so keep a copy if you like to hand-edit it.
 
-The app fills in missing config fields on startup and rewrites `config/default.toml` when needed. Legacy `graphics_protocol` values `auto`, `sixel`, `kitty`, and `iterm2` are migrated to `halfblocks`.
+| Key | Default | Values / notes |
+| --- | --- | --- |
+| `theme` | `frappe` | `system`, `latte`, `frappe`, `macchiato`, `mocha` |
+| `language` | `zh` | `zh`, `en` |
+| `visualize` | cava present → `bars`, otherwise `oscilloscope` | `off`, `bars`, `oscilloscope`; only `bars` needs cava |
+| `graphics_protocol` | `halfblocks` | `off`, `halfblocks`; `off` draws covers as ASCII art |
+| `transparent_background` | `true` | Use the terminal background |
+| `album_border` | `true` | Border around the fullscreen cover |
+| `show_hints` | `true` | Hint line on the content pages and in the fullscreen page's panel border |
+| `page_lyrics` | `false` | Two-line lyrics panel over the content pages |
+| `small_window_display` | `true` | Compact layouts for small terminals |
+| `home_more_recommend` | `false` | Expand the home page beyond the three pinned tiles |
+| `default_opening_title` | `""` | Replaces the ASCII banner on the login and loading pages; supports `\n` |
+| `audio_quality` | `exhigh` | `standard`, `higher`, `exhigh`, `lossless`, `hires`, `jyeffect`, `sky`, `dolby`, `jymaster`; clamped to `exhigh` without VIP |
+| `playback_memory` | `false` | Persist and restore the queue, index and repeat mode |
+| `eq_bands_db` | 10 × `0.0` | EQ gains in dB, edited from the fullscreen EQ modal |
+| `bar_number` | `auto` | `auto`, `16`, `32`, `48`, `64`, `80`, `96` (fullscreen spectrum) |
+| `bar_channels` | `mono` | `stereo`, `mono` |
+| `bar_channel_reverse` | `false` | Draw the right channel on the left (fullscreen spectrum) |
+| `super_smooth_bar` | `false` | Sub-cell smoothed bars instead of density characters |
+| `bars_gap` | `false` | Leave a gap between bars |
+| `ui_fps` | `30` | Fullscreen page frame-rate cap |
+| `spectrum_hz` | `30` (shipped file says `60`) | Spectrum refresh rate; the host clamps its own cava to 1–30 Hz |
+| `mpris_poll_ms` | `100` | Fullscreen-side MPRIS poll interval |
+| `kitty_cover_scale_percent` | `100` | Fullscreen cover scale percentage |
+| `lyrics_cover_fetch` / `lyrics_cover_download` | `false` | Reserved for the standalone TMPlayer |
+| `audio_fingerprint` / `acoustid_api_key` | `false` / `""` | Reserved for the standalone TMPlayer |
+| `resume_last_position` | `false` | Declared but not implemented: playback memory restores the queue, not the position |
+| `cache.path` | unset | Cache directory override (defaults to the OS cache directory) |
+| `cache.clean_strategy` | `both` | `size`, `age`, `both` |
+| `cache.max_size_mb` | `500` | Size ceiling for the LRU pass |
+| `cache.max_age_days` | `7` | Age limit for the TTL pass |
+| `cache.clean_on_startup` | `true` | Run the cleanup while starting |
+| `keybind_*` | see below | 20 rebindable shortcuts |
 
-Important settings in `config/default.toml`:
-
-- Runtime: `ui_fps`, `spectrum_hz`, `mpris_poll_ms`
-- Interface: `theme`, `language`, `transparent_background`, `show_hints`, `home_more_recommend`, `album_border`
-- Login banner: `default_opening_title` (supports `\n` line breaks)
-- Image and visualization: `graphics_protocol`, `visualize`, `super_smooth_bar`, `bars_gap`, `bar_number`, `bar_channels`, `bar_channel_reverse`, `kitty_cover_scale_percent`
-- Playback behavior: `audio_quality`, `playback_memory`, `resume_last_position`, `eq_bands_db`
-- Lyrics and recognition: `page_lyrics`, `lyrics_cover_fetch`, `lyrics_cover_download`, `audio_fingerprint`, `acoustid_api_key`
-- Keybinds: `keybind_*` (see below; can be rebound in Settings)
-- Cache policy: `cache.path`, `cache.clean_strategy`, `cache.max_size_mb`, `cache.max_age_days`, `cache.clean_on_startup`
-
-Additional notes:
-
-- `theme` can be `system`, `latte`, `frappe`, `macchiato`, or `mocha`; the default is `frappe`
-- `graphics_protocol` currently only implements `off` / `halfblocks`
-- `visualize` supports `off`, `bars`, and `oscilloscope`; if `cava` is unavailable it falls back to `off`
-- `cache.clean_strategy` supports `size`, `age`, and `both`
-- `audio_quality` supports `standard`, `higher`, `exhigh`, `lossless`, `hires`, `jyeffect`, `sky`, `dolby`, and `jymaster`
-- If the current account does not have VIP access, CNMPlayer clamps the quality to the free range
+Cleanup runs as an age pass followed by a size LRU pass, and only looks at files directly inside the directory.
 
 ## Keyboard Shortcuts
 
-Configurable shortcuts (default bindings):
+### Rebindable
 
-- `Ctrl+S`: open the search box
-- `Ctrl+F`: open / return to fullscreen playback
-- `T`: open settings
-- `P`: toggle the sidebar
-- `Q`: quit the host app
-- `Alt+Space`: toggle play/pause
-- `Alt+Left`: previous track
-- `Alt+Right`: next track
-- `Alt+M`: toggle repeat mode
-- `Left`: fullscreen previous track
-- `Right`: fullscreen next track
-- `Space`: fullscreen play/pause
-- `M`: toggle fullscreen playback mode
-- `E`: toggle fullscreen EQ
-- `Alt+R`: reset fullscreen EQ
-- `L`: toggle like/unlike in fullscreen
-- `Alt+L`: toggle like/unlike in the collapsed player bar
+Rebinding syntax: optional `Ctrl` / `Alt` / `Shift`, then a key name (`Esc`, `Enter`, `Space`, `Tab`, `BackTab`, arrows, `Home`, `End`, `PageUp`/`PgUp`, `PageDown`/`PgDn`, `Insert`, `Delete`, `Backspace`, `Plus`, `F1`–`F12`) or a single character.
+A binding that collides with another slot is rejected, and `Ctrl+Alt+R` inside the keybind modal restores every default.
 
-Fixed shortcuts:
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `keybind_search_box` | `Ctrl+S` | Open the search box |
+| `keybind_fullscreen` | `Ctrl+F` | Enter the fullscreen page, or return to the host from it |
+| `keybind_settings` | `T` | Open the settings modal (also closes it) |
+| `keybind_sidebar` | `P` | Toggle the home sidebar / the fullscreen playlist overlay |
+| `keybind_quit` | `Q` | Quit |
+| `keybind_page_up` | `pageUP` | Scroll one page up (search, playlist) |
+| `keybind_page_down` | `pageDown` | Scroll one page down (search, playlist) |
+| `keybind_prev` | `Alt+Left` | Previous track |
+| `keybind_next` | `Alt+Right` | Next track |
+| `keybind_toggle_play_pause` | `Alt+Space` | Play / pause |
+| `keybind_toggle_mode` | `Alt+M` | Cycle the repeat mode (host) |
+| `keybind_fullscreen_prev` | `Left` | Previous track (fullscreen page only) |
+| `keybind_fullscreen_next` | `Right` | Next track (fullscreen page only) |
+| `keybind_fullscreen_toggle_play_pause` | `Space` | Play / pause (fullscreen page only) |
+| `keybind_fullscreen_toggle_mode` | `M` | Cycle the repeat mode (fullscreen page only) |
+| `keybind_fullscreen_eq` | `E` | Open the EQ modal (fullscreen page only) |
+| `keybind_fullscreen_eq_reset` | `Alt+R` | Reset the EQ (fullscreen page only) |
+| `keybind_toggle_like_fullscreen` | `L` | Like / unlike (fullscreen page only) |
+| `keybind_toggle_like_collapsed` | `Alt+L` | Like / unlike from the collapsed player bar |
+| `keybind_small_window_toggle` | `Alt+X` | Switch between the flat small-window panels |
 
-- `Esc`: close overlays or go back from the current page
-- `Ctrl+Up` / `Ctrl+Down`: switch sidebar playlist section (Created / Collected) when the sidebar is expanded
-- `Ctrl+K`: open help
+The fullscreen-only slots are inert in the host: there they fall through to page navigation instead.
+
+### Fixed shortcuts
+
+- `Esc` — close the current overlay, or go back from the current page
+- `Ctrl+C` — quit from any state
+- `Ctrl+K` — open the keybind list
+- `Ctrl+Up` / `Ctrl+Down` — switch the sidebar playlist section (Created / Collected) while the sidebar is open
+- `Ctrl+Alt+R` — restore the default keybinds (inside the keybind modal)
+- `F1` / `F2` / `F3` — login method (QR / account / phone)
+
+### Per page
 
 Login page:
 
-- `F1`: QR login
-- `F2`: account login (username / email)
-- `F3`: phone login
-- `Q`: quit the app
-- `Tab` / `Up` / `Down`: switch focus
-- `Enter`: confirm or submit
+- `F1` refresh the QR code, `F2` account login, `F3` phone login
+- `Tab` / `Down` next field, `Shift+Tab` / `Up` previous field, `Enter` confirm or submit
+- `Q` quits while no username / password field is focused
 
 Search box:
 
-- `Enter`: run the search
-- `Esc` / `Ctrl+S`: close the search box
-- `Backspace`: delete text
-- Arrow keys: move the cursor
+- `Enter` runs the search, `Esc` / `Ctrl+S` closes it
+- `Home` / `End` / `Left` / `Right` / `Backspace` / `Delete` edit the query; clicking positions the caret
 
-Search, playlist, and author pages:
+Search, playlist and artist pages:
 
-- `Enter`: open or play the focused item
-- `Esc` or `Left`: go back
-- `Tab` / `Down`: move to the next item
-- `Shift+Tab` / `Up`: move to the previous item
+- `Enter` opens or plays the focused item, `Esc` or `Left` goes back
+- `Tab` / `Down` next item, `Shift+Tab` / `Up` previous item
+- `PageUp` / `PageDown` move a whole page (search and playlist pages)
 
-Settings keybind page:
+Settings modal:
 
-- `Enter`: start rebinding the selected shortcut
-- `Ctrl+Alt+R`: reset keybinds to defaults
-- `Esc`: return
+- `Up` / `Down` / `Tab` / `Shift+Tab` move, `Left` / `Right` / `Enter` change a value, `Esc` steps back
+- Keybind modal: `Enter` starts rebinding, `Esc` cancels it while waiting for input
+
+Fullscreen page:
+
+- The host ignores the entry keybind while the terminal is narrower than 50 columns
+- `P` opens the playlist overlay, `Up` / `Down` select, `Enter` plays, `Esc` closes it
+- `T` opens the settings modal, `Ctrl+K` the keybind list, `About` is reachable from the settings modal
+- `E` opens the EQ modal; arrows move and adjust a band, `Alt+R` resets it, `Esc` / `E` closes it
+- `Up` / `Down` adjust the volume, `Left` / `Right` change track, `Space` plays or pauses, `M` cycles the repeat mode, `L` likes the song
+- `Ctrl+F` or `Esc` returns to the host; the mouse clicks the control buttons, the progress bar, the volume bar and the playlist rows
+- If `small_window_display` is on and the terminal drops below 50 columns or 12 rows, the fullscreen page returns to the host by itself
+
+## Notes
+
+- There are no command line flags. The environment variables are `CNMPLAYER_ASSET_DIR` (asset root), `TMPLAYER_CAVA` (explicit cava binary) and `COLORTERM` / `TERM` (color capability detection).
+- `graphics_protocol` only implements `off` and `halfblocks`; the legacy `auto`, `sixel`, `kitty` and `iterm2` values are migrated to `halfblocks`.
+- There is no dedicated album page; album search results and artist-page albums are shown with the playlist-page layout.
+- Several settings are only consumed by the fullscreen page or are placeholders: `ui_fps`, `mpris_poll_ms`, `kitty_cover_scale_percent`, `lyrics_cover_fetch`, `lyrics_cover_download`, `audio_fingerprint`, `acoustid_api_key` and `resume_last_position`.
+- Native audio backends write warnings straight to stderr; CNMPlayer redirects fd 2 into `Player.stderr.log` so those messages cannot smear the TUI.
+- Prebuilt artifacts and AUR packages are produced for Linux `amd64` and `aarch64` only. MPRIS is Linux-only as well.
+
+## Tech Stack
+
+- Rust 2024
+- TUI: ratatui + crossterm
+- Async and networking: compio + cyper
+- NetEase API client: `ncm-api` (vendored from [ncm-api-rs](https://github.com/imsyy/ncm-api-rs) into `ncm-api-rs/` as a path dependency)
+- Playback: rodio + symphonia (mp3 / flac) over ALSA or PipeWire
+- Metadata and artwork: image + qrcode
+- Image rendering: ratatui-image + chafa
+- Visualization: external `cava`, plus an internal PCM tap that feeds the oscilloscope and the LUFS meter
+- Linux media control: mpris-server
+- Fullscreen playback integration: TMPlayer
+
+## Development
+
+```bash
+cargo run                 # development build
+cargo build --release     # release build
+cargo test                # unit tests
+cargo check --locked --all-targets   # what CI runs on pull requests
+```
+
+CI (`ci.yml`) runs `cargo check --locked --all-targets` on pull requests against `main` / `develop` and on pushes to `develop`.
+Release (`release.yml`) triggers on a `v*` tag: it verifies that the tag matches the `Cargo.toml` version, builds `x86_64` and `aarch64` tarballs, creates the GitHub Release and syncs the `cnmplayer` and `cnmplayer-bin` AUR packages.
 
 ## Related Projects
 
-- [TMPlayer](https://github.com/professor-lee/TMPlayer): fullscreen playback UI used by CNMPlayer
-- [ncm-api-rs](https://github.com/imsyy/ncm-api-rs): NetEase Cloud Music API client used by CNMPlayer
+- [TMPlayer](https://github.com/professor-lee/TMPlayer): the fullscreen playback UI, embedded into CNMPlayer
+- [ncm-api-rs](https://github.com/imsyy/ncm-api-rs): the NetEase Cloud Music API client vendored in `ncm-api-rs/`
 
 ## License
 
