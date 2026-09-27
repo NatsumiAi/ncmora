@@ -5216,12 +5216,15 @@ impl App {
 
     fn handle_settings_lyrics_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc | KeyCode::Left => self.overlay = Some(Overlay::Settings),
+            // 三行都是开关（值行）：与播放设置页同构，Left/Right 都用来改值，
+            // 返回上一级只走 Esc。
+            KeyCode::Esc => self.overlay = Some(Overlay::Settings),
             KeyCode::Char('t') | KeyCode::Char('T') => {
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
                     self.close_overlay();
                 }
             }
+            KeyCode::Left => self.apply_settings_lyrics_delta(-1),
             KeyCode::Right | KeyCode::Enter => self.apply_settings_lyrics_delta(1),
             KeyCode::Up | KeyCode::BackTab => {
                 if self.settings_lyrics_selected == 0 {
