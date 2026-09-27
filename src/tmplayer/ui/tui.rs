@@ -437,7 +437,8 @@ impl ModalRows {
         (index < self.len).then(|| self.rows[index])
     }
 
-    /// 已登记的行数。
+    /// 已登记的行数（只在测试里用，release 构建不该带上）。
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.len
     }
@@ -1831,9 +1832,15 @@ pub fn wheel_over_playlist(layout: &UiLayout, app: &AppState, col: u16, row: u16
     app.overlay == Overlay::Playlist && contains(layout.playlist_rect, col, row)
 }
 
-/// 音量条上某列对应的音量（0..=1）；不在条内时返回 `None`。
+/// 音量条上某列对应的音量（0..=1）；不在条内时返回 `None`（点击用）。
 pub fn volume_at(layout: &UiLayout, col: u16, row: u16) -> Option<f32> {
     contains(layout.info_volume, col, row).then(|| ratio_in_bar(layout.info_volume, col))
+}
+
+/// 按住拖动时的音量换算：列超出条子按端点钳制、不再要求落在条内，
+/// 这样"起点在条内、拖出条外"仍持续生效。
+pub fn volume_for_drag(layout: &UiLayout, col: u16) -> Option<f32> {
+    (layout.info_volume.width > 2).then(|| ratio_in_bar(layout.info_volume, col))
 }
 
 fn contains(r: Rect, col: u16, row: u16) -> bool {
@@ -2128,6 +2135,29 @@ mod tests {
         assert_eq!(volume_at(&layout, 6, 2), Some(0.5));
         assert_eq!(volume_at(&layout, 12, 2), None, "条外不响应");
         assert_eq!(volume_at(&layout, 6, 3), None, "行外不响应");
+    }
+
+    /// 拖动一旦从条内开始就不再要求光标留在条上：拖出左右边界按端点钳制，
+    /// 上下拖出行也照样生效。
+    #[test]
+    fn volume_drag_clamps_outside_the_bar() {
+        let layout = UiLayout {
+            info_volume: rect(0, 2, 12, 1),
+            ..UiLayout::default()
+        };
+
+        assert_eq!(volume_for_drag(&layout, 0), Some(0.0));
+        assert_eq!(volume_for_drag(&layout, 11), Some(1.0));
+        assert_eq!(
+            volume_for_drag(&layout, 200),
+            Some(1.0),
+            "拖到右边之外仍生效"
+        );
+        assert_eq!(volume_for_drag(&layout, 6), Some(0.5));
+
+        // 音量条没有绘制（宽度退化）时不改音量。
+        let empty = UiLayout::default();
+        assert_eq!(volume_for_drag(&empty, 3), None);
     }
 
     /// 按键提示弹窗的条目数必须由列表本身决定：写死会让末尾几行选不中

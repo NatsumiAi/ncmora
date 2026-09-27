@@ -1319,10 +1319,11 @@ async fn handle_action(
                 Box::pin(handle_action(app, host_bridge, action, layout)).await?;
             }
         }
-        Action::MouseDrag { col, row } => {
-            // 按住音量条拖动：连续改音量（不松手也跟随）。
+        Action::MouseDrag { col, .. } => {
+            // 按住音量条拖动：只要起点落在条内，之后拖着走（哪怕拖出条外）
+            // 都继续改音量，不在拖动中途要求光标还在条上。
             if app.volume_drag
-                && let Some(volume) = crate::tmplayer::ui::tui::volume_at(layout, col, row)
+                && let Some(volume) = crate::tmplayer::ui::tui::volume_for_drag(layout, col)
             {
                 app.player.volume = volume;
                 if let Some(bridge) = host_bridge.as_mut() {
