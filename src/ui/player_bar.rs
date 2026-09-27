@@ -46,7 +46,7 @@ fn control_hit_rects(controls_rect: Rect, labels: [&str; 4]) -> PlayerBarHitTarg
     };
 
     let right = controls_rect.x.saturating_add(controls_rect.width);
-    let mut place = |x: u16, width: u16| -> Option<HitRect> {
+    let place = |x: u16, width: u16| -> Option<HitRect> {
         (width > 0 && x.saturating_add(width) <= right).then(|| rect_at(x, width))
     };
 

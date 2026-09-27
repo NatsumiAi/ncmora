@@ -1588,6 +1588,13 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
         }
     }
 
+    // 其余弹窗盖住整页：未命中弹窗自身的点击一律吞掉，不许穿透到底层的
+    // 进度条/音量/控制/播放列表（否则在设置弹窗上点一下就可能误播、
+    // 误 seek、误改音量）。播放列表面板只占左栏，不在拦截范围内。
+    if app.overlay != Overlay::None && app.overlay != Overlay::Playlist {
+        return None;
+    }
+
     if contains(layout.info_controls, col, row) {
         return control_buttons::hit_test(layout.info_controls, app, col, row);
     }
@@ -1669,6 +1676,7 @@ fn lang_on_off(app: &AppState, enabled: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tmplayer::ui::theme::{ColorCapability, Theme, ThemeName, ThemePalette};
 
     fn rect(x: u16, y: u16, width: u16, height: u16) -> Rect {
         Rect {
@@ -1677,6 +1685,94 @@ mod tests {
             width,
             height,
         }
+    }
+
+    fn state(overlay: Overlay) -> AppState {
+        let theme = Theme {
+            name: ThemeName::System,
+            palette: ThemePalette {
+                text: (255, 255, 255),
+                subtext: (128, 128, 128),
+                base: (0, 0, 0),
+                surface: (16, 16, 16),
+                buff: (64, 64, 64),
+                accent: (255, 0, 0),
+                accent2: (0, 255, 0),
+                accent3: (0, 0, 255),
+            },
+            capability: ColorCapability::TrueColor,
+        };
+        let mut app = AppState::new(
+            crate::tmplayer::data::config::Config::default(),
+            theme,
+            crate::data::config::Language::Zh,
+        );
+        app.overlay = overlay;
+        app
+    }
+
+    /// 控件矩形都在左栏同一列上，互不重叠；用于验证"点击到底落在哪"。
+    fn page_layout() -> UiLayout {
+        UiLayout {
+            info_controls: rect(0, 0, 30, 1),
+            info_progress: rect(0, 1, 30, 1),
+            info_volume: rect(0, 2, 30, 1),
+            playlist_list_inner: rect(0, 3, 30, 4),
+            ..UiLayout::default()
+        }
+    }
+
+    /// 弹窗盖住整页：未命中弹窗自身的点击必须被吞掉，不许穿透到底层控件。
+    #[test]
+    fn modal_overlays_swallow_page_clicks() {
+        let layout = page_layout();
+        let plain = state(Overlay::None);
+
+        // 先确认坐标确实压在活控件上，否则下面的断言是空的
+        assert!(matches!(
+            hit_test(&layout, &plain, 0, 1),
+            Some(Action::SeekToFraction(_))
+        ));
+        assert!(matches!(
+            hit_test(&layout, &plain, 0, 2),
+            Some(Action::SetVolume(_))
+        ));
+        assert!(matches!(
+            hit_test(&layout, &plain, 0, 3),
+            Some(Action::PlaylistSelect(_))
+        ));
+
+        for overlay in [
+            Overlay::SettingsModal,
+            Overlay::BarSettingsModal,
+            Overlay::LocalAudioSettingsModal,
+            Overlay::AboutModal,
+            Overlay::AcoustIdModal,
+            Overlay::HelpModal,
+            Overlay::EqModal,
+        ] {
+            let app = state(overlay);
+            for row in [0u16, 1, 2, 3] {
+                assert_eq!(
+                    hit_test(&layout, &app, 0, row),
+                    None,
+                    "{overlay:?} 在 ({0},{row}) 的点击应被吞掉",
+                    0
+                );
+            }
+        }
+    }
+
+    /// 播放列表面板只占左栏，不拦整页。
+    #[test]
+    fn playlist_overlay_keeps_the_page_clickable() {
+        let layout = page_layout();
+        let app = state(Overlay::Playlist);
+
+        assert_eq!(
+            hit_test(&layout, &app, 0, 1),
+            Some(Action::SeekToFraction(0.0))
+        );
     }
 
     /// 爱心落在标题行（meta 块首行）最后一格，不是块内任意一行。
@@ -1701,5 +1797,30 @@ mod tests {
     #[test]
     fn heart_cell_handles_a_single_cell_row() {
         assert_eq!(heart_cell(rect(0, 0, 1, 1)), Some((0, 0)));
+    }
+
+    /// 标题行的点击落在爱心那一格才切收藏，其余位置不误触。
+    #[test]
+    fn clicking_the_heart_cell_toggles_favorite() {
+        let layout = UiLayout {
+            info_meta: rect(2, 5, 20, 3),
+            ..UiLayout::default()
+        };
+        let app = state(Overlay::None);
+
+        assert_eq!(
+            hit_test(&layout, &app, 2 + 20 - 1, 5),
+            Some(Action::ToggleFavorite)
+        );
+        assert_eq!(
+            hit_test(&layout, &app, 2 + 20 - 2, 5),
+            None,
+            "标题文字不算爱心"
+        );
+        assert_eq!(
+            hit_test(&layout, &app, 2 + 20 - 1, 6),
+            None,
+            "专辑行没有爱心"
+        );
     }
 }
