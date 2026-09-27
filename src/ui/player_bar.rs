@@ -18,6 +18,63 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub const PLAYER_BAR_HEIGHT: u16 = 5;
 
+/// 收藏爱心（Nerd Font PUA）：实心 = 已收藏，空心 = 未收藏。
+/// 用码位转义书写，免得复制粘贴时被编辑器换成别的字形。
+const HEART_LIKED: &str = "\u{f004}";
+const HEART_UNLIKED: &str = "\u{f08a}";
+
+/// 控制行 `{prev} {play} {next} {mode}` 的命中区。
+///
+/// 串以空格分隔、在 `controls_rect` 内居中（`Alignment::Center`），
+/// 因此各 token 的起点等于「串首 + 前缀显示宽度」——与 render 同源。
+/// 串被窗口裁掉时模式符号不登记，免得留下点不动的隐形按钮。
+fn control_hit_rects(controls_rect: Rect, labels: [&str; 4]) -> PlayerBarHitTargets {
+    let y = controls_rect.y;
+    let widths: [u16; 4] = labels.map(|label| display_width(label) as u16);
+    let total_w: u16 = widths.iter().sum::<u16>() + 3;
+
+    let start = controls_rect.x + controls_rect.width.saturating_sub(total_w) / 2;
+    let second = start.saturating_add(widths[0]).saturating_add(1);
+    let third = second.saturating_add(widths[1]).saturating_add(1);
+    let fourth = third.saturating_add(widths[2]).saturating_add(1);
+
+    let rect_at = |x: u16, width: u16| HitRect {
+        x,
+        y,
+        width,
+        height: 1,
+    };
+
+    let right = controls_rect.x.saturating_add(controls_rect.width);
+    let mut place = |x: u16, width: u16| -> Option<HitRect> {
+        (width > 0 && x.saturating_add(width) <= right).then(|| rect_at(x, width))
+    };
+
+    let mut hits = PlayerBarHitTargets::default();
+    hits.prev = place(start, widths[0]);
+    hits.play_pause = place(second, widths[1]);
+    hits.next = place(third, widths[2]);
+    hits.mode = place(fourth, widths[3]);
+
+    hits
+}
+
+/// 爱心命中区：爱心贴左列右端（与 `compose_left_right_line` 的右对齐同源），
+/// 宽度不足时不登记，避免留下点不动的隐形按钮。
+fn heart_hit_rect(left_rect: Rect, heart: &str) -> Option<HitRect> {
+    let width = display_width(heart) as u16;
+    if width == 0 || left_rect.width < width {
+        return None;
+    }
+
+    Some(HitRect {
+        x: left_rect.x + left_rect.width - width,
+        y: left_rect.y,
+        width,
+        height: 1,
+    })
+}
+
 pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(
         Block::default()
@@ -55,7 +112,7 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         "[]"
     };
     let next_label = "[]";
-    let mode_symbol = playback_repeat_symbol(app);
+    let mode_symbol = app.playback_repeat_mode.symbol();
     let controls = format!("{prev_label} {play_label} {next_label} {mode_symbol}");
 
     let spectrum =
@@ -113,8 +170,16 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         Style::default().fg(app.theme.color_subtext())
     };
 
+    // 爱心由 compose_left_right_line 贴左列右端，命中区用同一算法倒推，
+    // 免得两处各写一份宽度计算。
+    let mut like_hit = None;
     let left_render = if app.now_playing.is_some() {
-        let heart = if app.now_playing_liked { "" } else { "" };
+        let heart = if app.now_playing_liked {
+            HEART_LIKED
+        } else {
+            HEART_UNLIKED
+        };
+        like_hit = heart_hit_rect(left_rect, heart);
         compose_left_right_line(&left_text, heart, left_rect.width as usize)
     } else {
         clip_to_display_width(&left_text, left_rect.width as usize)
@@ -155,34 +220,11 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         height: 1,
     };
 
-    let mut hits = PlayerBarHitTargets::default();
-
-    let controls_start = controls_rect.x + controls_rect.width.saturating_sub(controls_w) / 2;
-    let prev_w = display_width(prev_label) as u16;
-    let play_w = display_width(play_label) as u16;
-    let next_w = display_width(next_label) as u16;
-
-    let mut x = controls_start;
-    hits.prev = Some(HitRect {
-        x,
-        y: top.y,
-        width: prev_w,
-        height: 1,
-    });
-    x = x.saturating_add(prev_w).saturating_add(1);
-    hits.play_pause = Some(HitRect {
-        x,
-        y: top.y,
-        width: play_w,
-        height: 1,
-    });
-    x = x.saturating_add(play_w).saturating_add(1);
-    hits.next = Some(HitRect {
-        x,
-        y: top.y,
-        width: next_w,
-        height: 1,
-    });
+    let mut hits = control_hit_rects(
+        controls_rect,
+        [prev_label, play_label, next_label, mode_symbol],
+    );
+    hits.like = like_hit;
 
     if progress_w > 0 {
         let ratio = progress_ratio(position, duration);
@@ -356,11 +398,103 @@ fn compose_left_right_line(left: &str, right: &str, width: usize) -> String {
     format!("{left_text}{}{right}", " ".repeat(pad))
 }
 
-fn playback_repeat_symbol(app: &App) -> &'static str {
-    match app.playback_repeat_mode {
-        crate::app::PlaybackRepeatMode::Sequence => "",
-        crate::app::PlaybackRepeatMode::Shuffle => "",
-        crate::app::PlaybackRepeatMode::LoopAll => "",
-        crate::app::PlaybackRepeatMode::LoopOne => "",
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(x: u16, width: u16) -> Rect {
+        Rect {
+            x,
+            y: 3,
+            width,
+            height: 1,
+        }
+    }
+
+    /// 爱心命中区必须正好落在 `compose_left_right_line` 画出的那一格上。
+    #[test]
+    fn heart_hit_rect_matches_the_right_aligned_glyph() {
+        for width in 1..14u16 {
+            let area = row(7, width);
+            for heart in [HEART_LIKED, HEART_UNLIKED] {
+                let line = compose_left_right_line("a fairly long title", heart, width as usize);
+                let hit = heart_hit_rect(area, heart).expect("宽度够时应登记命中区");
+
+                assert!(line.ends_with(heart), "爱心贴右端，实际是 {line:?}");
+                assert_eq!(display_width(&line), width as usize, "整行宽度不变");
+                assert_eq!(hit.x, area.x + width - 1, "命中区落在串尾那一格");
+                assert_eq!(hit.width, 1);
+            }
+        }
+    }
+
+    /// 左列宽度为 0（极窄窗口）时不登记，避免出现点不动的隐形按钮。
+    #[test]
+    fn heart_hit_rect_is_absent_when_the_column_is_blank() {
+        assert!(heart_hit_rect(row(0, 0), HEART_LIKED).is_none());
+    }
+
+    /// 符号被吞成空串时播放栏会错位并留下点不到的按钮——这条直接兜住。
+    #[test]
+    fn player_bar_glyphs_are_single_cell() {
+        for heart in [HEART_LIKED, HEART_UNLIKED] {
+            assert_eq!(display_width(heart), 1, "爱心应为 1 格宽：{heart:?}");
+        }
+        for mode in [
+            crate::app::PlaybackRepeatMode::Sequence,
+            crate::app::PlaybackRepeatMode::Shuffle,
+            crate::app::PlaybackRepeatMode::LoopAll,
+            crate::app::PlaybackRepeatMode::LoopOne,
+        ] {
+            let symbol = mode.symbol();
+            assert_eq!(display_width(symbol), 1, "模式符号应为 1 格宽：{symbol:?}");
+        }
+    }
+
+    /// 控制行命中区与 render 的居中串同源：各段起点 = 串首 + 前缀显示宽度，
+    /// 末段右端 = 整串右端。
+    #[test]
+    fn control_hit_rects_track_the_centered_label_row() {
+        let labels = ["[<]", "[>]", "[>]", "M"];
+        let area = row(4, 30);
+        let hits = control_hit_rects(area, labels);
+
+        let joined = labels.join(" ");
+        let row_w = display_width(&joined) as u16;
+        let start = area.x + (area.width - row_w) / 2;
+
+        let prev = hits.prev.expect("prev 命中区");
+        let play = hits.play_pause.expect("play 命中区");
+        let next = hits.next.expect("next 命中区");
+        let mode = hits.mode.expect("mode 命中区");
+
+        assert_eq!(prev.x, start);
+        assert_eq!(play.x, start + display_width("[<] ") as u16);
+        assert_eq!(next.x, start + display_width("[<] [>] ") as u16);
+        assert_eq!(mode.x, start + display_width("[<] [>] [>] ") as u16);
+        assert_eq!(
+            mode.x + mode.width,
+            start + row_w,
+            "命中区不多不少覆盖控制串"
+        );
+        for hit in [prev, play, next, mode] {
+            assert_eq!(hit.y, area.y);
+            assert_eq!(hit.height, 1);
+            assert!(hit.width > 0);
+        }
+    }
+
+    /// 窗口比控制串窄时整段越界的 token 不登记（否则会在频谱列上留下幽灵按钮）。
+    #[test]
+    fn control_hit_rects_skip_tokens_clipped_by_a_narrow_row() {
+        let labels = ["[<]", "[>]", "[>]", "M"];
+        let row_w = display_width(&labels.join(" ")) as u16;
+
+        let fits = control_hit_rects(row(0, row_w), labels);
+        assert!(fits.mode.is_some(), "刚好放得下时应登记模式命中区");
+
+        let clipped = control_hit_rects(row(0, row_w - 1), labels);
+        assert!(clipped.mode.is_none(), "末段越界时不登记");
+        assert!(clipped.prev.is_some(), "首段仍在区域内");
     }
 }

@@ -25,6 +25,8 @@ pub struct UiLayout {
     pub info_progress: Rect,
     pub info_volume: Rect,
     pub info_controls: Rect,
+    /// 标题/爱心行（爱心贴该行右端）。
+    pub info_meta: Rect,
 
     pub info_cover_image: Rect,
 
@@ -174,6 +176,11 @@ impl Tui {
             layout_out.info_progress = info_l.progress;
             layout_out.info_volume = info_l.volume;
             layout_out.info_controls = info_l.controls;
+            layout_out.info_meta = if info_panel::core_rows_visible(&info_l) {
+                info_l.meta
+            } else {
+                Rect::default()
+            };
 
             // For kitty graphics, we draw into the inner area (optional border).
             layout_out.info_cover_image = info_l.cover.inner(ratatui::layout::Margin {
@@ -1477,6 +1484,17 @@ fn render_eq_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
     );
 }
 
+/// 标题行爱心所在的单元格（`compose_left_right_line` 把爱心右对齐到该行最后一格）。
+///
+/// `meta` 为 3 行块，只有首行画标题与爱心；未绘制（尺寸为 0）时返回 `None`。
+fn heart_cell(meta: Rect) -> Option<(u16, u16)> {
+    if meta.width == 0 || meta.height == 0 {
+        return None;
+    }
+
+    Some((meta.x + meta.width - 1, meta.y))
+}
+
 pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option<Action> {
     // Eq modal consumes clicks first
     if app.overlay == Overlay::EqModal {
@@ -1574,6 +1592,13 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
         return control_buttons::hit_test(layout.info_controls, app, col, row);
     }
 
+    // 爱心贴标题行右端，只有那一格可点；meta 下面的艺术字/专辑行没有爱心。
+    if let Some((heart_x, heart_y)) = heart_cell(layout.info_meta) {
+        if col == heart_x && row == heart_y {
+            return Some(Action::ToggleFavorite);
+        }
+    }
+
     if contains(layout.info_volume, col, row) {
         return Some(Action::SetVolume(ratio_in_bar(layout.info_volume, col)));
     }
@@ -1638,5 +1663,43 @@ fn lang_on_off(app: &AppState, enabled: bool) -> &'static str {
                 "Off"
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x: u16, y: u16, width: u16, height: u16) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// 爱心落在标题行（meta 块首行）最后一格，不是块内任意一行。
+    #[test]
+    fn heart_cell_is_the_last_column_of_the_first_meta_row() {
+        let meta = rect(10, 4, 26, 3);
+
+        assert_eq!(heart_cell(meta), Some((10 + 26 - 1, 4)));
+        // 同一列的下面两行是艺术字/专辑，不是爱心
+        assert_ne!(heart_cell(meta), Some((35, 5)));
+        assert_ne!(heart_cell(meta), Some((35, 6)));
+    }
+
+    #[test]
+    fn heart_cell_is_absent_when_the_row_is_not_drawn() {
+        assert_eq!(heart_cell(Rect::default()), None);
+        assert_eq!(heart_cell(rect(3, 7, 0, 3)), None);
+        assert_eq!(heart_cell(rect(3, 7, 12, 0)), None);
+    }
+
+    /// 1 格宽的 meta 行：爱心就在那一格。
+    #[test]
+    fn heart_cell_handles_a_single_cell_row() {
+        assert_eq!(heart_cell(rect(0, 0, 1, 1)), Some((0, 0)));
     }
 }

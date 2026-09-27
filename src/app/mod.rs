@@ -1775,6 +1775,19 @@ impl PlaybackRepeatMode {
             Self::LoopOne => Self::Sequence,
         }
     }
+
+    /// 播放模式符号（Nerd Font PUA）。
+    ///
+    /// 用码位转义书写：直接粘贴字形会被复制/编辑流程吞掉，源码看不出异常，
+    /// 运行时却变成空串——播放栏会因此错位，并留下"点不动"的按钮。
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Sequence => "\u{f08f}",
+            Self::Shuffle => "\u{f074}",
+            Self::LoopAll => "\u{f0b6}",
+            Self::LoopOne => "\u{f01e}",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1908,6 +1921,10 @@ pub struct PlayerBarHitTargets {
     pub play_pause: Option<HitRect>,
     pub next: Option<HitRect>,
     pub progress: Option<HitRect>,
+    /// 收藏爱心（左列右端）。
+    pub like: Option<HitRect>,
+    /// 播放模式符号（控制串最后一个字符）。
+    pub mode: Option<HitRect>,
 }
 
 #[derive(Debug, Clone)]
@@ -2392,41 +2409,8 @@ impl App {
 
         if self.is_small_window_context() {
             if matches!(mouse.kind, MouseEventKind::Down(_)) {
-                let col = mouse.column;
-                let row = mouse.row;
-                let hits = self.player_bar_hits;
-                if hits
-                    .prev
-                    .map(|rect| rect.contains(col, row))
-                    .unwrap_or(false)
-                {
-                    self.play_previous_hotkey().await;
-                } else if hits
-                    .play_pause
-                    .map(|rect| rect.contains(col, row))
-                    .unwrap_or(false)
-                {
-                    self.toggle_play_pause_hotkey().await;
-                } else if hits
-                    .next
-                    .map(|rect| rect.contains(col, row))
-                    .unwrap_or(false)
-                {
-                    self.play_next_hotkey().await;
-                } else if hits
-                    .progress
-                    .map(|rect| rect.contains(col, row))
-                    .unwrap_or(false)
-                {
-                    let rect = hits.progress.unwrap_or_default();
-                    let relative_x = col.saturating_sub(rect.x) as f32;
-                    let ratio = if rect.width <= 1 {
-                        0.0
-                    } else {
-                        (relative_x / (rect.width - 1) as f32).clamp(0.0, 1.0)
-                    };
-                    self.seek_to_ratio(ratio);
-                }
+                self.dispatch_player_bar_click(mouse.column, mouse.row)
+                    .await;
             }
             return;
         }
@@ -2461,60 +2445,65 @@ impl App {
                     return;
                 }
 
-                if let Some(rect) = self.player_bar_hits.prev {
-                    if rect.contains(col, row) {
-                        self.play_previous_hotkey().await;
-                        return;
-                    }
-                }
-                if let Some(rect) = self.player_bar_hits.play_pause {
-                    if rect.contains(col, row) {
-                        self.toggle_play_pause_hotkey().await;
-                        return;
-                    }
-                }
-                if let Some(rect) = self.player_bar_hits.next {
-                    if rect.contains(col, row) {
-                        self.play_next_hotkey().await;
-                        return;
-                    }
-                }
-                if let Some(rect) = self.player_bar_hits.progress {
-                    if rect.contains(col, row) {
-                        let relative_x = col.saturating_sub(rect.x) as f32;
-                        let ratio = if rect.width <= 1 {
-                            0.0
-                        } else {
-                            (relative_x / (rect.width - 1) as f32).clamp(0.0, 1.0)
-                        };
-                        self.seek_to_ratio(ratio);
-                    }
-                }
+                self.dispatch_player_bar_click(col, row).await;
             }
             _ => {}
         }
     }
 
+    /// 折叠播放栏按钮的统一分派（小窗口与常规两条分支共用）。
+    ///
+    /// 命中区每帧由 `draw_collapsed_player_bar` 重注册，这里只查表；
+    /// 新增按钮必须同时登记进 `PlayerBarHitTargets` 与 `player_bar_contains`。
+    async fn dispatch_player_bar_click(&mut self, col: u16, row: u16) {
+        let hits = self.player_bar_hits;
+
+        if hits.like.is_some_and(|rect| rect.contains(col, row)) {
+            self.toggle_like_hotkey();
+            return;
+        }
+        if hits.mode.is_some_and(|rect| rect.contains(col, row)) {
+            self.cycle_repeat_mode_hotkey();
+            return;
+        }
+        if hits.prev.is_some_and(|rect| rect.contains(col, row)) {
+            self.play_previous_hotkey().await;
+            return;
+        }
+        if hits.play_pause.is_some_and(|rect| rect.contains(col, row)) {
+            self.toggle_play_pause_hotkey().await;
+            return;
+        }
+        if hits.next.is_some_and(|rect| rect.contains(col, row)) {
+            self.play_next_hotkey().await;
+            return;
+        }
+        if let Some(rect) = hits.progress {
+            if rect.contains(col, row) {
+                let relative_x = col.saturating_sub(rect.x) as f32;
+                let ratio = if rect.width <= 1 {
+                    0.0
+                } else {
+                    (relative_x / (rect.width - 1) as f32).clamp(0.0, 1.0)
+                };
+                self.seek_to_ratio(ratio);
+            }
+        }
+    }
+
     fn player_bar_contains(&self, col: u16, row: u16) -> bool {
-        self.player_bar_hits
-            .prev
-            .map(|rect| rect.contains(col, row))
-            .unwrap_or(false)
-            || self
-                .player_bar_hits
-                .play_pause
-                .map(|rect| rect.contains(col, row))
-                .unwrap_or(false)
-            || self
-                .player_bar_hits
-                .next
-                .map(|rect| rect.contains(col, row))
-                .unwrap_or(false)
-            || self
-                .player_bar_hits
-                .progress
-                .map(|rect| rect.contains(col, row))
-                .unwrap_or(false)
+        let hits = self.player_bar_hits;
+        [
+            hits.prev,
+            hits.play_pause,
+            hits.next,
+            hits.progress,
+            hits.like,
+            hits.mode,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|rect| rect.contains(col, row))
     }
 
     async fn handle_content_scroll(&mut self, col: u16, row: u16, forward: bool) {
