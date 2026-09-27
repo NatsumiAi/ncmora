@@ -416,7 +416,7 @@ fn centered_rect(size: Rect, width: u16, height: u16) -> Rect {
 /// 两边共用同一份矩形，不会各算一遍偏移。
 #[derive(Debug, Clone, Copy)]
 pub struct ModalRows {
-    rows: [Rect; ModalRows::MAX],
+    rows: [(usize, Rect); ModalRows::MAX],
     len: usize,
 }
 
@@ -425,16 +425,24 @@ impl ModalRows {
     /// 超出的行会被丢弃，所以新增更长的弹窗列表时要同步调大。
     pub const MAX: usize = 24;
 
-    /// 登记一行；超出上限的行被丢弃（渲染本身也会被裁掉）。
-    fn push(&mut self, rect: Rect) {
+    /// 登记一行：`index` 是该行代表的**条目序号**，不是登记次序。
+    ///
+    /// 弹窗列表会被截断（终端太矮）或被滚动（按键提示弹窗），行号与条目号
+    /// 并不相等，消费端要的是条目号，所以两者必须分开存。
+    /// 超出上限的行被丢弃（渲染本身也会被裁掉）。
+    fn push(&mut self, rect: Rect, index: usize) {
         if self.len < Self::MAX && rect.width > 0 && rect.height > 0 {
-            self.rows[self.len] = rect;
+            self.rows[self.len] = (index, rect);
             self.len += 1;
         }
     }
 
+    /// 某个条目序号画在哪一行（该条目未显示时为 `None`）。
     pub fn get(&self, index: usize) -> Option<Rect> {
-        (index < self.len).then(|| self.rows[index])
+        self.rows[..self.len]
+            .iter()
+            .find(|(row_index, _)| *row_index == index)
+            .map(|(_, rect)| *rect)
     }
 
     /// 已登记的行数（只在测试里用，release 构建不该带上）。
@@ -447,14 +455,15 @@ impl ModalRows {
     fn hit(&self, col: u16, row: u16) -> Option<usize> {
         self.rows[..self.len]
             .iter()
-            .position(|rect| contains(*rect, col, row))
+            .find(|(_, rect)| contains(*rect, col, row))
+            .map(|(index, _)| *index)
     }
 }
 
 impl Default for ModalRows {
     fn default() -> Self {
         Self {
-            rows: [Rect::default(); Self::MAX],
+            rows: [(0, Rect::default()); Self::MAX],
             len: 0,
         }
     }
@@ -561,7 +570,7 @@ fn render_settings_modal(
             Paragraph::new(Line::styled(format!("  {}", text), item_style(idx))),
             rect,
         );
-        modal_rows.push(rect);
+        modal_rows.push(rect, idx);
     }
 
     let bottom_cols = Layout::default()
@@ -576,7 +585,7 @@ fn render_settings_modal(
         )),
         bottom_cols[0],
     );
-    modal_rows.push(bottom_cols[0]);
+    modal_rows.push(bottom_cols[0], about_idx);
     f.render_widget(Paragraph::new(""), bottom_cols[1]);
 }
 
@@ -766,7 +775,7 @@ fn render_bar_settings_modal(
             Paragraph::new(Line::styled(format!("  {}", text), style)),
             rect,
         );
-        modal_rows.push(rect);
+        modal_rows.push(rect, idx);
     }
 
     f.render_widget(Paragraph::new(""), rows[2]);
@@ -854,7 +863,7 @@ fn render_lyrics_settings_modal(
             Paragraph::new(Line::styled(format!("  {}", text), style)),
             rect,
         );
-        modal_rows.push(rect);
+        modal_rows.push(rect, idx);
     }
 
     f.render_widget(Paragraph::new(""), rows[2]);
@@ -1000,12 +1009,15 @@ fn render_local_audio_settings_modal(
         if offset >= inner.height as usize {
             break;
         }
-        modal_rows.push(Rect {
-            x: inner.x,
-            y: inner.y + offset as u16,
-            width: inner.width,
-            height: 1,
-        });
+        modal_rows.push(
+            Rect {
+                x: inner.x,
+                y: inner.y + offset as u16,
+                width: inner.width,
+                height: 1,
+            },
+            idx,
+        );
     }
 }
 
@@ -1393,7 +1405,7 @@ fn render_help_modal(
             Paragraph::new(Line::styled(format!("  {}: {}", label, key), style)),
             rect,
         );
-        modal_rows.push(rect);
+        modal_rows.push(rect, idx);
     }
 
     f.render_widget(
@@ -2049,9 +2061,9 @@ mod tests {
     #[test]
     fn settings_modal_rows_are_clickable() {
         let mut layout = page_layout();
-        layout.modal_rows.push(rect(2, 10, 20, 1));
-        layout.modal_rows.push(rect(2, 11, 20, 1));
-        layout.modal_rows.push(rect(2, 12, 20, 1));
+        layout.modal_rows.push(rect(2, 10, 20, 1), 0);
+        layout.modal_rows.push(rect(2, 11, 20, 1), 1);
+        layout.modal_rows.push(rect(2, 12, 20, 1), 2);
 
         let app = state(Overlay::SettingsModal);
 
@@ -2066,11 +2078,11 @@ mod tests {
     #[test]
     fn modal_rows_ignore_degenerate_and_overflowing_rows() {
         let mut rows = ModalRows::default();
-        rows.push(Rect::default());
+        rows.push(Rect::default(), 0);
         assert_eq!(rows.hit(0, 0), None);
 
         for idx in 0..(ModalRows::MAX + 5) {
-            rows.push(rect(0, idx as u16, 10, 1));
+            rows.push(rect(0, idx as u16, 10, 1), idx);
         }
 
         assert_eq!(rows.get(ModalRows::MAX), None, "超上限的行被丢弃");
@@ -2079,6 +2091,24 @@ mod tests {
             Some(rect(0, (ModalRows::MAX - 1) as u16, 10, 1))
         );
         assert_eq!(rows.hit(3, 0), Some(0));
+    }
+
+    /// 登记的是条目序号而不是登记次序：滚动过的窗口与固定在底部的行
+    /// 都要能按条目号取回（否则点击会落到别的条目上）。
+    #[test]
+    fn modal_rows_key_on_item_index_not_registration_order() {
+        let mut rows = ModalRows::default();
+        rows.push(rect(0, 5, 10, 1), 7);
+        rows.push(rect(0, 6, 10, 1), 8);
+        rows.push(rect(0, 9, 10, 1), 11);
+
+        assert_eq!(rows.hit(1, 5), Some(7), "窗口首行回的是条目序号");
+        assert_eq!(rows.hit(1, 6), Some(8));
+        assert_eq!(rows.hit(1, 9), Some(11));
+        assert_eq!(rows.get(7), Some(rect(0, 5, 10, 1)));
+        assert_eq!(rows.get(11), Some(rect(0, 9, 10, 1)));
+        assert_eq!(rows.get(0), None, "没画出来的条目不登记");
+        assert_eq!(rows.get(10), None);
     }
 
     /// 播放列表命中区必须用渲染的虚拟滚动窗口：滚过一屏后点到的仍是看到的那首，
@@ -2192,7 +2222,17 @@ mod tests {
         app: &mut AppState,
         draw: impl FnOnce(&mut ratatui::Frame, &mut AppState, &mut ModalRows),
     ) -> (ModalRows, ratatui::buffer::Buffer) {
-        let backend = ratatui::backend::TestBackend::new(80, 24);
+        render_to_buffer_sized(80, 24, app, draw)
+    }
+
+    /// 指定尺寸渲染：矮终端下弹窗条目区会被截断，命中区必须跟着截断。
+    fn render_to_buffer_sized(
+        width: u16,
+        height: u16,
+        app: &mut AppState,
+        draw: impl FnOnce(&mut ratatui::Frame, &mut AppState, &mut ModalRows),
+    ) -> (ModalRows, ratatui::buffer::Buffer) {
+        let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         let mut rows = ModalRows::default();
         terminal.draw(|f| draw(f, app, &mut rows)).expect("draw");
@@ -2253,5 +2293,60 @@ mod tests {
             saw_hint |= text.contains(&compact("小窗口"));
         }
         assert!(saw_hint, "“小窗口切换显示”应出现在按键提示弹窗里");
+    }
+
+    /// 矮终端下设置弹窗的条目区放不下全部条目，但 about 行仍要按条目序号 11
+    /// 登记——否则单击它会选中别的条目、双击会执行别的条目。
+    #[test]
+    fn settings_modal_about_row_keeps_its_item_index_when_items_are_truncated() {
+        let mut app = state(Overlay::SettingsModal);
+        let (rows, buf) = render_to_buffer_sized(80, 18, &mut app, |f, app, rows| {
+            render_settings_modal(f, f.area(), app, rows)
+        });
+
+        let about = rows.get(11).expect("about 行按条目序号 11 登记");
+        assert!(
+            compact(&line_text(&buf, about.y)).contains("about"),
+            "11 号条目行画的是 about"
+        );
+        assert!(rows.len() < 12, "18 行终端下条目区放不下 11 条");
+
+        let mut layout = page_layout();
+        layout.modal_rows = rows;
+        assert_eq!(
+            hit_test(&layout, &app, about.x, about.y),
+            Some(Action::ModalSelect(11)),
+            "点 about 行要回条目序号 11"
+        );
+    }
+
+    /// 按键提示弹窗滚动后，每一行的命中序号必须等于画在该行的条目序号
+    /// （否则点“第 2 行显示的那条”会选中上一条）。
+    #[test]
+    fn help_modal_hit_index_matches_the_row_after_scrolling() {
+        let mut app = state(Overlay::HelpModal);
+        let items = help_items(&app);
+        // 选末条：24 行终端放不下 17 条，渲染窗口必然滚动，滚动量 = 1。
+        app.help_keybind_selected = items.len() - 1;
+
+        let (rows, buf) = render_to_buffer(&mut app, |f, app, rows| {
+            render_help_modal(f, f.area(), app, rows)
+        });
+
+        let mut hits = 0;
+        for y in 0..buf.area().height {
+            let Some(index) = (0..buf.area().width).find_map(|x| rows.hit(x, y)) else {
+                continue;
+            };
+            let text = compact(&line_text(&buf, y));
+            let (label, key) = &items[index];
+            assert!(
+                text.contains(&compact(label)) && text.contains(&compact(key)),
+                "第 {y} 行的命中序号 {index} 与画面 {text:?} 不符"
+            );
+            hits += 1;
+        }
+        assert_eq!(hits, rows.len(), "登记的行都该画在屏幕上");
+        assert!(hits > 0, "至少要有一行可点");
     }
 }
