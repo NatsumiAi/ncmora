@@ -463,3 +463,52 @@ fn key_code_to_keybind_token(code: KeyCode) -> Option<String> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{MouseEvent, MouseEventKind};
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// 鼠标事件映射：滚轮与拖动都要带坐标传给事件循环（此前只认左键按下）。
+    #[test]
+    fn mouse_mapping_covers_wheel_drag_and_release() {
+        assert_eq!(
+            map_mouse(mouse(MouseEventKind::ScrollDown, 3, 4)),
+            Action::MouseScroll {
+                col: 3,
+                row: 4,
+                forward: true
+            }
+        );
+        assert_eq!(
+            map_mouse(mouse(MouseEventKind::ScrollUp, 3, 4)),
+            Action::MouseScroll {
+                col: 3,
+                row: 4,
+                forward: false
+            }
+        );
+        assert_eq!(
+            map_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 5, 6)),
+            Action::MouseDrag { col: 5, row: 6 }
+        );
+        assert_eq!(
+            map_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 5, 6)),
+            Action::MouseUp
+        );
+        assert_eq!(
+            map_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 1, 2)),
+            Action::MouseClick { col: 1, row: 2 }
+        );
+        assert_eq!(map_mouse(mouse(MouseEventKind::Moved, 1, 2)), Action::None);
+    }
+}
