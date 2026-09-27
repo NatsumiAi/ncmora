@@ -334,7 +334,11 @@ fn input_event() -> impl Stream<Item = impl AsyncFn(&mut App)> {
             Event::Mouse(e)
                 if matches!(
                     e.kind,
-                    MouseEventKind::Down(_) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    MouseEventKind::Down(_)
+                        | MouseEventKind::Up(_)
+                        | MouseEventKind::Drag(_)
+                        | MouseEventKind::ScrollUp
+                        | MouseEventKind::ScrollDown
                 ) => {}
             _ => return None,
         }

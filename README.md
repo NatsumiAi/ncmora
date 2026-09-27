@@ -200,7 +200,11 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 | `transparent_background` | `true` | Use the terminal background |
 | `album_border` | `true` | Border around the fullscreen cover |
 | `show_hints` | `true` | Hint line on the content pages and in the fullscreen page's panel border |
-| `page_lyrics` | `false` | Two-line lyrics panel over the content pages |
+| `page_lyrics` | `false` | Two-line lyrics overlay on the content pages |
+| `page_lyrics_drag` | `true` | Lyrics overlay can be dragged with the mouse |
+| `page_lyrics_snap` | `true` | Snap to the nearest corner after dragging (only editable while dragging is on) |
+| `page_lyrics_pos_x` | `1.0` | Normalized horizontal position of the overlay's top-left (0=left, 1=right) |
+| `page_lyrics_pos_y` | `1.0` | Normalized vertical position of the overlay's top-left (0=top, 1=bottom) |
 | `small_window_display` | `true` | Compact layouts for small terminals |
 | `home_more_recommend` | `false` | Expand the home page beyond the three pinned tiles |
 | `default_opening_title` | `""` | Replaces the ASCII banner on the login and loading pages; supports `\n` |

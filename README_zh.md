@@ -200,7 +200,11 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 | `transparent_background` | `true` | 使用终端背景 |
 | `album_border` | `true` | 全屏封面边框 |
 | `show_hints` | `true` | 内容页提示行，以及全屏页面板边框内的提示文字 |
-| `page_lyrics` | `false` | 内容页上的两行歌词浮层 |
+| `page_lyrics` | `false` | 内容页上的两行歌词浮窗 |
+| `page_lyrics_drag` | `true` | 歌词浮窗可用鼠标拖动 |
+| `page_lyrics_snap` | `true` | 拖动结束后吸附到最近的角（仅拖动开启时可改） |
+| `page_lyrics_pos_x` | `1.0` | 歌词浮窗左上角的归一化横坐标（0=左，1=右） |
+| `page_lyrics_pos_y` | `1.0` | 歌词浮窗左上角的归一化纵坐标（0=上，1=下） |
 | `small_window_display` | `true` | 终端过小时启用紧凑布局 |
 | `home_more_recommend` | `false` | 首页在三块固定磁贴之外展开更多推荐 |
 | `default_opening_title` | `""` | 替换登录页与加载页的 ASCII 标题，支持 `\n` |

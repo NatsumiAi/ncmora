@@ -18,6 +18,7 @@ use crate::tmplayer::app::state::LyricLine;
 use crate::tmplayer::audio::cava::{CavaChannels, CavaConfig, MiniCavaState};
 use crate::tmplayer::audio::pcm_tap::PcmRing;
 use crate::tmplayer::playback::metadata::{parse_lrc, parse_plain_lyrics};
+use crate::ui::page_lyrics;
 use crate::ui::theme::Theme;
 use anyhow::{Result, anyhow};
 use crossterm::event::{
@@ -62,8 +63,9 @@ const SEARCH_BOX_ANIM_DURATION: Duration = Duration::from_millis(180);
 /// 侧边栏滑出动画时长（time-based，与帧率解耦）。主页与全屏播放页共用。
 pub(crate) const SIDEBAR_ANIM_DURATION: Duration = Duration::from_millis(200);
 const HOME_SIDEBAR_PLAYLIST_LIMIT: usize = 100;
-const SETTINGS_ROOT_ITEMS: usize = 11;
-const SETTINGS_PLAYBACK_ITEMS: usize = 9;
+const SETTINGS_ROOT_ITEMS: usize = 12;
+const SETTINGS_PLAYBACK_ITEMS: usize = 8;
+const SETTINGS_LYRICS_ITEMS: usize = 3;
 pub(crate) const SETTINGS_KEYBIND_ITEMS: usize = 20;
 /// 主程序内容页小窗口模式的统一触发阈值，与主页既有判定一致。
 pub(crate) const SMALL_WINDOW_MIN_WIDTH: u16 = 32;
@@ -151,6 +153,7 @@ pub enum Overlay {
     Settings,
     SettingsPlayback,
     SettingsKeybinds,
+    SettingsLyrics,
     SettingsAbout,
     SearchBox,
 }
@@ -1879,6 +1882,47 @@ impl HitRect {
     }
 }
 
+impl From<ratatui::layout::Rect> for HitRect {
+    fn from(rect: ratatui::layout::Rect) -> Self {
+        Self {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        }
+    }
+}
+
+/// 上一帧歌词浮窗的几何：内容区 + 浮窗本体。
+///
+/// 拖拽与"点击浮窗不穿透到下面的 tile"都以这份为准（每帧由
+/// `page_lyrics::draw_page_lyrics_overlay` 重登记）。
+#[derive(Debug, Clone, Copy)]
+pub struct PageLyricsLayout {
+    pub content: HitRect,
+    pub panel: HitRect,
+}
+
+impl PageLyricsLayout {
+    pub fn content_rect(self) -> Rect {
+        Rect {
+            x: self.content.x,
+            y: self.content.y,
+            width: self.content.width,
+            height: self.content.height,
+        }
+    }
+
+    pub fn panel_rect(self) -> Rect {
+        Rect {
+            x: self.panel.x,
+            y: self.panel.y,
+            width: self.panel.width,
+            height: self.panel.height,
+        }
+    }
+}
+
 /// about 彩蛋的推进阶段。
 #[cfg(feature = "easter-egg")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -2075,6 +2119,10 @@ pub struct App {
     vu_last_tick_at: Option<Instant>,
     vu_last_meter_generation: u64,
     pub home_sidebar_panel_hit: Option<HitRect>,
+    /// 上一帧歌词浮窗的几何（拖拽 / 点击拦截共用）。
+    page_lyrics_layout: Option<PageLyricsLayout>,
+    /// 正在拖动歌词浮窗时，光标相对浮窗左上角的偏移。
+    page_lyrics_grab: Option<(u16, u16)>,
     pub home_sidebar_playlist_hits: Vec<(HitRect, HomeSidebarHit)>,
     pub home_tile_hits: Vec<(HitRect, usize)>,
     pub playlist_track_hits: Vec<(HitRect, usize)>,
@@ -2087,6 +2135,7 @@ pub struct App {
     pub search_box_anim_started_at: Option<Instant>,
     pub settings_selected: usize,
     pub settings_playback_selected: usize,
+    pub settings_lyrics_selected: usize,
     pub settings_keybind_selected: usize,
     pub settings_keybind_rebinding: Option<usize>,
     /// 设置弹窗当前页的行命中区（每帧由 `draw_settings_modal` 重注册）。
@@ -2205,6 +2254,8 @@ impl App {
             vu_last_tick_at: None,
             vu_last_meter_generation: 0,
             home_sidebar_panel_hit: None,
+            page_lyrics_layout: None,
+            page_lyrics_grab: None,
             home_sidebar_playlist_hits: Vec::new(),
             home_tile_hits: Vec::new(),
             playlist_track_hits: Vec::new(),
@@ -2216,6 +2267,7 @@ impl App {
             search_box_anim_started_at: None,
             settings_selected: 0,
             settings_playback_selected: 0,
+            settings_lyrics_selected: 0,
             settings_keybind_selected: 0,
             settings_keybind_rebinding: None,
             settings_item_hits: Vec::new(),
@@ -2449,11 +2501,22 @@ impl App {
                     return;
                 }
 
+                // 歌词浮窗盖在内容之上：命中即吞掉，顺带作为拖动把手。
+                if self.page_lyrics_press(col, row) {
+                    return;
+                }
+
                 if self.handle_content_click(col, row).await {
                     return;
                 }
 
                 self.dispatch_player_bar_click(col, row).await;
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.page_lyrics_drag(col, row);
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.page_lyrics_release();
             }
             _ => {}
         }
@@ -2582,6 +2645,69 @@ impl App {
         self.playlist_track_hits.clear();
         self.author_tile_hits.clear();
         self.search_item_hits.clear();
+        self.page_lyrics_layout = None;
+    }
+
+    /// 歌词浮窗位置（归一化，内容区内左上角）。
+    pub fn page_lyrics_pos(&self) -> (f32, f32) {
+        (self.config.page_lyrics_pos_x, self.config.page_lyrics_pos_y)
+    }
+
+    /// 登记本帧歌词浮窗几何（由 `page_lyrics::draw_page_lyrics_overlay` 调用）。
+    pub fn set_page_lyrics_layout(&mut self, content: Rect, panel: Rect) {
+        self.page_lyrics_layout = Some(PageLyricsLayout {
+            content: content.into(),
+            panel: panel.into(),
+        });
+    }
+
+    /// 鼠标按下：落在歌词浮窗上就吞掉这次点击（不穿透到下面的 tile），
+    /// 并按配置决定是否开始拖动。返回是否已消费。
+    fn page_lyrics_press(&mut self, col: u16, row: u16) -> bool {
+        let Some(layout) = self.page_lyrics_layout else {
+            return false;
+        };
+        if !layout.panel.contains(col, row) {
+            return false;
+        }
+
+        self.page_lyrics_grab = self.config.page_lyrics_drag.then(|| {
+            (
+                col.saturating_sub(layout.panel.x),
+                row.saturating_sub(layout.panel.y),
+            )
+        });
+        true
+    }
+
+    /// 拖动中：把浮窗移到光标处（保持抓取偏移，钳在内容区内）。
+    fn page_lyrics_drag(&mut self, col: u16, row: u16) {
+        let (Some(layout), Some(grab)) = (self.page_lyrics_layout, self.page_lyrics_grab) else {
+            return;
+        };
+
+        let (pos_x, pos_y) =
+            page_lyrics::pos_after_drag(layout.content_rect(), layout.panel_rect(), col, row, grab);
+        self.config.page_lyrics_pos_x = pos_x;
+        self.config.page_lyrics_pos_y = pos_y;
+    }
+
+    /// 松开：按配置吸附到最近的角，并把位置写回配置。
+    fn page_lyrics_release(&mut self) {
+        if self.page_lyrics_grab.take().is_none() {
+            return;
+        }
+
+        if self.config.page_lyrics_snap {
+            if let Some(layout) = self.page_lyrics_layout {
+                let (pos_x, pos_y) =
+                    page_lyrics::snap_pos(layout.content_rect(), layout.panel_rect());
+                self.config.page_lyrics_pos_x = pos_x;
+                self.config.page_lyrics_pos_y = pos_y;
+            }
+        }
+
+        let _ = self.config.save();
     }
 
     pub fn clear_settings_item_hits(&mut self) {
@@ -2634,6 +2760,10 @@ impl App {
     /// 到 ~30fps 重绘。
     pub fn should_continuous_redraw(&self) -> bool {
         if self.is_seeking() {
+            return true;
+        }
+        // 拖歌词浮窗时保持高帧率，鼠标跟手。
+        if self.page_lyrics_grab.is_some() {
             return true;
         }
         if let Some(started_at) = self.search_box_anim_started_at {
@@ -3194,6 +3324,7 @@ impl App {
             Overlay::Settings => self.handle_settings_root_key(key).await,
             Overlay::SettingsPlayback => self.handle_settings_playback_key(key),
             Overlay::SettingsKeybinds => self.handle_settings_keybinds_key(key),
+            Overlay::SettingsLyrics => self.handle_settings_lyrics_key(key),
             Overlay::SettingsAbout => self.handle_settings_about_key(key),
             Overlay::SearchBox => self.handle_search_box_key(key).await,
         }
@@ -4862,6 +4993,12 @@ impl App {
                     self.apply_settings_playback_delta(1);
                 }
             }
+            Overlay::SettingsLyrics => {
+                self.settings_lyrics_selected = index;
+                if self.is_double_settings_click(overlay, index) {
+                    self.apply_settings_lyrics_delta(1);
+                }
+            }
             Overlay::SettingsKeybinds => {
                 self.settings_keybind_selected = index;
                 if self.is_double_settings_click(overlay, index) {
@@ -4895,9 +5032,13 @@ impl App {
                 self.overlay = Some(Overlay::SettingsPlayback);
             }
             5 => self.open_keybind_settings(),
-            6..=8 => self.apply_settings_root_delta(1).await,
-            9 => self.logout_to_login().await,
-            10 => {
+            6 => {
+                self.settings_lyrics_selected = 0;
+                self.overlay = Some(Overlay::SettingsLyrics);
+            }
+            7..=9 => self.apply_settings_root_delta(1).await,
+            10 => self.logout_to_login().await,
+            11 => {
                 self.overlay = Some(Overlay::SettingsAbout);
             }
             _ => {}
@@ -4916,6 +5057,57 @@ impl App {
                 "press a new shortcut (Esc to cancel)"
             )
         ));
+    }
+
+    /// “歌词浮窗”子页：三行开关。吸附行只在拖动开启时可改（关闭时灰置）。
+    fn apply_settings_lyrics_delta(&mut self, delta: i32) {
+        if delta == 0 {
+            return;
+        }
+
+        match self.settings_lyrics_selected {
+            0 => {
+                self.config.page_lyrics = !self.config.page_lyrics;
+                let _ = self.config.save();
+            }
+            1 => {
+                self.config.page_lyrics_drag = !self.config.page_lyrics_drag;
+                let _ = self.config.save();
+            }
+            2 => {
+                // 拖动关闭时吸附无意义：灰置且不可改。
+                if !self.config.page_lyrics_drag {
+                    return;
+                }
+                self.config.page_lyrics_snap = !self.config.page_lyrics_snap;
+                let _ = self.config.save();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_settings_lyrics_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Left => self.overlay = Some(Overlay::Settings),
+            KeyCode::Char('t') | KeyCode::Char('T') => {
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                    self.close_overlay();
+                }
+            }
+            KeyCode::Right | KeyCode::Enter => self.apply_settings_lyrics_delta(1),
+            KeyCode::Up | KeyCode::BackTab => {
+                if self.settings_lyrics_selected == 0 {
+                    self.settings_lyrics_selected = SETTINGS_LYRICS_ITEMS - 1;
+                } else {
+                    self.settings_lyrics_selected -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                self.settings_lyrics_selected =
+                    (self.settings_lyrics_selected + 1) % SETTINGS_LYRICS_ITEMS;
+            }
+            _ => {}
+        }
     }
 
     async fn handle_settings_root_key(&mut self, key: KeyEvent) {
@@ -5170,12 +5362,15 @@ impl App {
                 }
             }
             6 => {
+                // “歌词浮窗...”是可进入项：左右键不改变配置（与播放设置/按键绑定一致）
+            }
+            7 => {
                 if delta != 0 {
                     self.config.show_hints = !self.config.show_hints;
                     let _ = self.config.save();
                 }
             }
-            7 => {
+            8 => {
                 if delta != 0 {
                     let was_small_context = self.is_small_window_context();
                     self.config.small_window_display = !self.config.small_window_display;
@@ -5186,7 +5381,7 @@ impl App {
                     self.sync_terminal_size();
                 }
             }
-            8 => {
+            9 => {
                 if delta != 0 {
                     self.config.home_more_recommend = !self.config.home_more_recommend;
                     let _ = self.config.save();
@@ -5242,17 +5437,13 @@ impl App {
                 let _ = self.config.save();
             }
             6 => {
-                self.config.page_lyrics = !self.config.page_lyrics;
-                let _ = self.config.save();
-            }
-            7 => {
                 let next = self
                     .config
                     .audio_quality
                     .cycle(delta, self.vip_audio_unlocked);
                 self.set_audio_quality(next);
             }
-            8 => {
+            7 => {
                 self.config.playback_memory = !self.config.playback_memory;
                 let _ = self.config.save();
                 if self.config.playback_memory {

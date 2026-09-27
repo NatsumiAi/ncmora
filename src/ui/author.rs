@@ -60,8 +60,7 @@ pub fn draw_author(frame: &mut Frame, app: &mut App) {
     draw_author_tiles(frame, app, main[1]);
 
     if app.config.page_lyrics {
-        let panel_area = page_lyrics::overlay_panel_area(content_area);
-        page_lyrics::draw_page_lyrics_panel(frame, app, panel_area);
+        page_lyrics::draw_page_lyrics_overlay(frame, app, content_area);
     }
     if app.config.show_hints {
         draw_author_hint(frame, app, hint_area);

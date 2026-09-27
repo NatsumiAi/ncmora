@@ -116,6 +116,20 @@ pub struct Config {
     #[serde(default = "default_page_lyrics")]
     pub page_lyrics: bool,
 
+    /// 歌词浮窗是否允许鼠标拖动。
+    #[serde(default = "default_page_lyrics_drag")]
+    pub page_lyrics_drag: bool,
+
+    /// 拖动结束后是否吸附到最近的角（仅拖动开启时可改）。
+    #[serde(default = "default_page_lyrics_snap")]
+    pub page_lyrics_snap: bool,
+
+    /// 歌词浮窗左上角在内容区内的归一化位置（0..=1），默认右下角。
+    #[serde(default = "default_page_lyrics_pos_x")]
+    pub page_lyrics_pos_x: f32,
+    #[serde(default = "default_page_lyrics_pos_y")]
+    pub page_lyrics_pos_y: f32,
+
     #[serde(default = "default_audio_quality")]
     pub audio_quality: AudioQuality,
 
@@ -419,6 +433,22 @@ fn default_page_lyrics() -> bool {
     false
 }
 
+fn default_page_lyrics_drag() -> bool {
+    true
+}
+
+fn default_page_lyrics_snap() -> bool {
+    true
+}
+
+fn default_page_lyrics_pos_x() -> f32 {
+    1.0
+}
+
+fn default_page_lyrics_pos_y() -> f32 {
+    1.0
+}
+
 fn default_audio_quality() -> AudioQuality {
     AudioQuality::Exhigh
 }
@@ -554,6 +584,10 @@ impl Default for Config {
             default_opening_title: String::new(),
             language: default_language(),
             page_lyrics: default_page_lyrics(),
+            page_lyrics_drag: default_page_lyrics_drag(),
+            page_lyrics_snap: default_page_lyrics_snap(),
+            page_lyrics_pos_x: default_page_lyrics_pos_x(),
+            page_lyrics_pos_y: default_page_lyrics_pos_y(),
             audio_quality: default_audio_quality(),
             playback_memory: false,
             show_hints: default_show_hints(),
@@ -607,6 +641,10 @@ impl Config {
             cfg.spectrum_hz = 30;
         }
 
+        // 手改配置可能越界，浮窗位置统一钳到内容区内。
+        cfg.page_lyrics_pos_x = cfg.page_lyrics_pos_x.clamp(0.0, 1.0);
+        cfg.page_lyrics_pos_y = cfg.page_lyrics_pos_y.clamp(0.0, 1.0);
+
         let mut forced_visualize_fallback = false;
         if !cfg.visualize.is_available() {
             // 只有依赖 cava 的模式会落到这里；退到同样无需外部进程的示波器。
@@ -623,6 +661,10 @@ impl Config {
         if !raw.contains("default_opening_title")
             || !raw.contains("language")
             || !raw.contains("page_lyrics")
+            || !raw.contains("page_lyrics_drag")
+            || !raw.contains("page_lyrics_snap")
+            || !raw.contains("page_lyrics_pos_x")
+            || !raw.contains("page_lyrics_pos_y")
             || !raw.contains("eq_bands_db")
             || !raw.contains("audio_quality")
             || !raw.contains("playback_memory")

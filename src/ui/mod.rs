@@ -23,6 +23,7 @@ pub fn draw_settings(frame: &mut Frame, app: &mut App) {
         Some(Overlay::Settings)
             | Some(Overlay::SettingsPlayback)
             | Some(Overlay::SettingsKeybinds)
+            | Some(Overlay::SettingsLyrics)
             | Some(Overlay::SettingsAbout)
     ) {
         settings::draw_settings_modal(frame, app);

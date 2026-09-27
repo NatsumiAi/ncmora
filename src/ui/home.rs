@@ -40,7 +40,7 @@ pub fn draw_home(frame: &mut Frame, app: &mut App) {
     // 整页（含歌词框）挤上去一行。
     let content_area = rows[0];
     let lyrics_area = if app.config.page_lyrics {
-        page_lyrics::overlay_panel_area(content_area)
+        page_lyrics::overlay_panel_area(content_area, app.page_lyrics_pos())
     } else {
         Rect::default()
     };
@@ -72,7 +72,7 @@ pub fn draw_home(frame: &mut Frame, app: &mut App) {
         draw_home_hint(frame, app, hint_area);
     }
     if lyrics_area.height > 0 {
-        page_lyrics::draw_page_lyrics_panel(frame, app, lyrics_area);
+        page_lyrics::draw_page_lyrics_overlay(frame, app, content_area);
     }
     if app.home_sidebar.is_visible() {
         draw_home_sidebar(frame, app, rows[0]);

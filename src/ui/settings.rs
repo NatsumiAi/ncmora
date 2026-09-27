@@ -27,6 +27,7 @@ pub fn draw_settings_modal(frame: &mut Frame, app: &mut App) {
         Some(Overlay::Settings) => l(app, " 设置 ", " Settings "),
         Some(Overlay::SettingsPlayback) => l(app, " 播放设置 ", " Playback Settings "),
         Some(Overlay::SettingsKeybinds) => l(app, " 按键绑定 ", " Keybinds "),
+        Some(Overlay::SettingsLyrics) => l(app, " 歌词浮窗 ", " Lyrics Overlay "),
         Some(Overlay::SettingsAbout) => " about ",
         _ => l(app, " 设置 ", " Settings "),
     };
@@ -49,6 +50,7 @@ pub fn draw_settings_modal(frame: &mut Frame, app: &mut App) {
     match app.overlay {
         Some(Overlay::SettingsPlayback) => draw_playback_settings(frame, app, inner),
         Some(Overlay::SettingsKeybinds) => draw_keybind_settings(frame, app, inner),
+        Some(Overlay::SettingsLyrics) => draw_lyrics_settings(frame, app, inner),
         _ => draw_root_settings(frame, app, inner),
     }
 }
@@ -89,6 +91,7 @@ fn draw_root_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
         ),
         format!("{}...", l(app, "播放设置", "Playback Settings")),
         format!("{}...", l(app, "按键绑定", "Keybinds")),
+        format!("{}...", l(app, "歌词浮窗", "Lyrics Overlay")),
         format!(
             "{}: {}",
             l(app, "显示提示", "Show Hints"),
@@ -228,11 +231,6 @@ fn draw_playback_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
         ),
         format!(
             "{}: {}",
-            l(app, "页面歌词", "Page Lyrics"),
-            on_off(app, app.config.page_lyrics)
-        ),
-        format!(
-            "{}: {}",
             l(app, "音质", "Audio Quality"),
             audio_quality_label(app, app.config.audio_quality)
         ),
@@ -251,6 +249,88 @@ fn draw_playback_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
                 Style::default()
                     .fg(app.theme.color_accent2())
                     .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.theme.color_text())
+            };
+            Line::from(Span::styled(format!("  {}", text), style))
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(app.theme.color_surface())),
+        rows[1],
+    );
+
+    frame.render_widget(
+        Paragraph::new("").style(Style::default().bg(app.theme.color_surface())),
+        rows[2],
+    );
+
+    // 命中区：与上面的渲染同源的逐行排布（放不下的行不登记）。
+    for idx in 0..items.len() {
+        if idx as u16 >= rows[1].height {
+            break;
+        }
+        app.push_settings_item_hit(
+            HitRect {
+                x: rows[1].x,
+                y: rows[1].y + idx as u16,
+                width: rows[1].width,
+                height: 1,
+            },
+            idx,
+        );
+    }
+}
+
+fn draw_lyrics_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new("").style(Style::default().bg(app.theme.color_surface())),
+        rows[0],
+    );
+
+    // “边缘吸附”只在拖动开启时可选：关闭时灰置（与播放设置有别，这里明确表达依赖关系）。
+    let drag_enabled = app.config.page_lyrics_drag;
+    let items = [
+        format!(
+            "{}: {}",
+            l(app, "歌词浮窗", "Lyrics Overlay"),
+            on_off(app, app.config.page_lyrics)
+        ),
+        format!(
+            "{}: {}",
+            l(app, "歌词浮窗拖动", "Lyrics Overlay Drag"),
+            on_off(app, drag_enabled)
+        ),
+        format!(
+            "{}: {}",
+            l(app, "歌词浮窗边缘吸附", "Lyrics Overlay Edge Snap"),
+            on_off(app, app.config.page_lyrics_snap)
+        ),
+    ];
+
+    let lines: Vec<Line> = items
+        .iter()
+        .enumerate()
+        .map(|(idx, text)| {
+            let disabled = idx == 2 && !drag_enabled;
+            let style = if idx == app.settings_lyrics_selected {
+                if disabled {
+                    Style::default().fg(app.theme.color_subtext())
+                } else {
+                    Style::default()
+                        .fg(app.theme.color_accent2())
+                        .add_modifier(Modifier::BOLD)
+                }
+            } else if disabled {
+                Style::default().fg(app.theme.color_subtext())
             } else {
                 Style::default().fg(app.theme.color_text())
             };
