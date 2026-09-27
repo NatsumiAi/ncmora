@@ -50,13 +50,14 @@ fn control_hit_rects(controls_rect: Rect, labels: [&str; 4]) -> PlayerBarHitTarg
         (width > 0 && x.saturating_add(width) <= right).then(|| rect_at(x, width))
     };
 
-    let mut hits = PlayerBarHitTargets::default();
-    hits.prev = place(start, widths[0]);
-    hits.play_pause = place(second, widths[1]);
-    hits.next = place(third, widths[2]);
-    hits.mode = place(fourth, widths[3]);
-
-    hits
+    PlayerBarHitTargets {
+        prev: place(start, widths[0]),
+        play_pause: place(second, widths[1]),
+        next: place(third, widths[2]),
+        progress: None,
+        like: None,
+        mode: place(fourth, widths[3]),
+    }
 }
 
 /// 爱心命中区：爱心贴左列右端（与 `compose_left_right_line` 的右对齐同源），

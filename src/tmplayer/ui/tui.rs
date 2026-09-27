@@ -284,7 +284,7 @@ impl Tui {
                 }
                 Overlay::AboutModal => render_about_modal(f, size, app),
                 Overlay::AcoustIdModal => render_acoustid_modal(f, size, app),
-                Overlay::HelpModal => render_help_modal(f, size, app),
+                Overlay::HelpModal => render_help_modal(f, size, app, &mut layout_out.modal_rows),
                 Overlay::EqModal => render_eq_modal(f, size, app),
                 _ => {}
             }
@@ -570,16 +570,7 @@ fn render_settings_modal(
         bottom_cols[0],
     );
     modal_rows.push(bottom_cols[0]);
-    f.render_widget(
-        Paragraph::new(format!(
-            "{}: {}",
-            lang_text(app, "小窗口切换显示", "Small Window Switch"),
-            app.config.keybind_small_window_toggle
-        ))
-        .style(Style::default().fg(app.theme.color_subtext()))
-        .alignment(Alignment::Right),
-        bottom_cols[1],
-    );
+    f.render_widget(Paragraph::new(""), bottom_cols[1]);
 }
 
 fn render_acoustid_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
@@ -1259,7 +1250,83 @@ fn select_about_braille_art(
         })
 }
 
-fn render_help_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
+/// 按键提示弹窗的条目 `(说明, 按键)`。
+///
+/// 渲染与键盘/滚轮翻页共用同一份，避免"条目数写死"与列表实际长度不一致
+/// （此前末尾几行因此无法用键盘选中）。
+pub fn help_items(app: &AppState) -> Vec<(String, String)> {
+    let item = |zh: &'static str, en: &'static str, key: &str| {
+        (lang_text(app, zh, en).to_string(), key.to_string())
+    };
+
+    vec![
+        item("搜索框", "Search Box", &app.config.keybind_search_box),
+        item("全屏播放页", "Fullscreen", &app.config.keybind_fullscreen),
+        item("设置弹窗", "Settings Modal", &app.config.keybind_settings),
+        item("侧边栏", "Sidebar", &app.config.keybind_sidebar),
+        item("退出应用", "Quit", &app.config.keybind_quit),
+        item(
+            "快速上翻页（主程序）",
+            "Quick Page Up (Host)",
+            &app.config.keybind_page_up,
+        ),
+        item(
+            "快速下翻页（主程序）",
+            "Quick Page Down (Host)",
+            &app.config.keybind_page_down,
+        ),
+        item("上一首", "Previous", &app.config.keybind_fullscreen_prev),
+        item("下一首", "Next", &app.config.keybind_fullscreen_next),
+        item(
+            "播放/暂停",
+            "Play/Pause",
+            &app.config.keybind_fullscreen_toggle_play_pause,
+        ),
+        item(
+            "全屏模式切换",
+            "Fullscreen Mode Switch",
+            &app.config.keybind_fullscreen_toggle_mode,
+        ),
+        item(
+            "EQ均衡器",
+            "EQ Equalizer",
+            &app.config.keybind_fullscreen_eq,
+        ),
+        item(
+            "EQ重置",
+            "EQ Reset",
+            &app.config.keybind_fullscreen_eq_reset,
+        ),
+        item(
+            "收藏/取消收藏",
+            "Like/Unlike",
+            &app.config.keybind_toggle_like_fullscreen,
+        ),
+        item(
+            "小窗口切换显示",
+            "Small Window Switch",
+            &app.config.keybind_small_window_toggle,
+        ),
+        item(
+            "侧边栏歌单区切换",
+            "Sidebar Playlist Section Switch",
+            "Ctrl+Up/Down",
+        ),
+        item("按键绑定", "Keybinds", "Ctrl+K"),
+    ]
+}
+
+/// 按键提示弹窗的条目数（键盘/滚轮翻页用）。
+pub fn help_item_count(app: &AppState) -> usize {
+    help_items(app).len()
+}
+
+fn render_help_modal(
+    f: &mut ratatui::Frame,
+    size: Rect,
+    app: &mut AppState,
+    modal_rows: &mut ModalRows,
+) {
     let area = centered_rect(size, 70, 20);
     f.render_widget(ratatui::widgets::Clear, area);
 
@@ -1289,69 +1356,7 @@ fn render_help_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
         .split(inner);
     f.render_widget(Paragraph::new(""), rows[0]);
 
-    let items = [
-        (
-            lang_text(app, "搜索框", "Search Box"),
-            app.config.keybind_search_box.as_str(),
-        ),
-        (
-            lang_text(app, "全屏播放页", "Fullscreen"),
-            app.config.keybind_fullscreen.as_str(),
-        ),
-        (
-            lang_text(app, "设置弹窗", "Settings Modal"),
-            app.config.keybind_settings.as_str(),
-        ),
-        (
-            lang_text(app, "侧边栏", "Sidebar"),
-            app.config.keybind_sidebar.as_str(),
-        ),
-        (
-            lang_text(app, "退出应用", "Quit"),
-            app.config.keybind_quit.as_str(),
-        ),
-        (
-            lang_text(app, "快速上翻页（主程序）", "Quick Page Up (Host)"),
-            app.config.keybind_page_up.as_str(),
-        ),
-        (
-            lang_text(app, "快速下翻页（主程序）", "Quick Page Down (Host)"),
-            app.config.keybind_page_down.as_str(),
-        ),
-        (
-            lang_text(app, "上一首", "Previous"),
-            app.config.keybind_fullscreen_prev.as_str(),
-        ),
-        (
-            lang_text(app, "下一首", "Next"),
-            app.config.keybind_fullscreen_next.as_str(),
-        ),
-        (
-            lang_text(app, "播放/暂停", "Play/Pause"),
-            app.config.keybind_fullscreen_toggle_play_pause.as_str(),
-        ),
-        (
-            lang_text(app, "全屏模式切换", "Fullscreen Mode Switch"),
-            app.config.keybind_fullscreen_toggle_mode.as_str(),
-        ),
-        (
-            lang_text(app, "EQ均衡器", "EQ Equalizer"),
-            app.config.keybind_fullscreen_eq.as_str(),
-        ),
-        (
-            lang_text(app, "EQ重置", "EQ Reset"),
-            app.config.keybind_fullscreen_eq_reset.as_str(),
-        ),
-        (
-            lang_text(app, "收藏/取消收藏", "Like/Unlike"),
-            app.config.keybind_toggle_like_fullscreen.as_str(),
-        ),
-        (
-            lang_text(app, "侧边栏歌单区切换", "Sidebar Playlist Section Switch"),
-            "Ctrl+Up/Down",
-        ),
-        (lang_text(app, "按键绑定", "Keybinds"), "Ctrl+K"),
-    ];
+    let items = help_items(app);
 
     let visible_rows = rows[1].height as usize;
     let total_rows = items.len();
@@ -1371,15 +1376,17 @@ fn render_help_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
         } else {
             Style::default().fg(app.theme.color_text())
         };
+        let rect = Rect {
+            x: rows[1].x,
+            y: rows[1].y + (idx - scroll) as u16,
+            width: rows[1].width,
+            height: 1,
+        };
         f.render_widget(
             Paragraph::new(Line::styled(format!("  {}: {}", label, key), style)),
-            Rect {
-                x: rows[1].x,
-                y: rows[1].y + (idx - scroll) as u16,
-                width: rows[1].width,
-                height: 1,
-            },
+            rect,
         );
+        modal_rows.push(rect);
     }
 
     f.render_widget(
@@ -2110,11 +2117,25 @@ mod tests {
             info_volume: rect(0, 2, 12, 1),
             ..UiLayout::default()
         };
-
         assert_eq!(volume_at(&layout, 0, 2), Some(0.0));
         assert_eq!(volume_at(&layout, 11, 2), Some(1.0));
         assert_eq!(volume_at(&layout, 6, 2), Some(0.5));
         assert_eq!(volume_at(&layout, 12, 2), None, "条外不响应");
         assert_eq!(volume_at(&layout, 6, 3), None, "行外不响应");
+    }
+
+    /// 按键提示弹窗的条目数必须由列表本身决定：写死会让末尾几行选不中
+    /// （历史上常量 14 对不上 16 行就是这么来的），小窗口切换也已从设置弹窗搬到这里。
+    #[test]
+    fn help_items_cover_every_row_and_include_the_moved_hint() {
+        let app = state(Overlay::HelpModal);
+        let items = help_items(&app);
+
+        assert_eq!(help_item_count(&app), items.len(), "翻页计数与列表同源");
+        assert!(items.len() > 14, "条目数应随列表增长，不再写死");
+        assert!(
+            items.iter().any(|(label, _)| label.contains("小窗口")),
+            "“小窗口切换显示”应从设置弹窗移到按键提示里"
+        );
     }
 }

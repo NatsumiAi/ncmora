@@ -22,8 +22,6 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
 
-const HELP_MODAL_ITEMS: usize = 14;
-
 fn sync_playlists_when_viewing_playback(app: &mut AppState) {
     if app.local_view_album_folder.is_some() && app.local_folder.is_some() {
         if app.local_view_album_folder.as_ref() == app.local_folder.as_ref() {
@@ -725,7 +723,7 @@ async fn handle_action(
         Action::OpenHelpModal => {
             app.help_keybind_selected = app
                 .help_keybind_selected
-                .min(HELP_MODAL_ITEMS.saturating_sub(1));
+                .min(crate::tmplayer::ui::tui::help_item_count(app).saturating_sub(1));
             app.overlay = Overlay::HelpModal;
         }
         Action::OpenEqModal => {
@@ -1003,8 +1001,12 @@ async fn handle_action(
                 }
                 sync_eq_config(app, host_bridge).await;
             } else if app.overlay == Overlay::HelpModal {
+                let count = crate::tmplayer::ui::tui::help_item_count(app);
+                if count == 0 {
+                    return Ok(());
+                }
                 if app.help_keybind_selected == 0 {
-                    app.help_keybind_selected = HELP_MODAL_ITEMS - 1;
+                    app.help_keybind_selected = count - 1;
                 } else {
                     app.help_keybind_selected -= 1;
                 }
@@ -1031,7 +1033,10 @@ async fn handle_action(
                 }
                 sync_eq_config(app, host_bridge).await;
             } else if app.overlay == Overlay::HelpModal {
-                app.help_keybind_selected = (app.help_keybind_selected + 1) % HELP_MODAL_ITEMS;
+                let count = crate::tmplayer::ui::tui::help_item_count(app);
+                if count > 0 {
+                    app.help_keybind_selected = (app.help_keybind_selected + 1) % count;
+                }
             }
         }
         Action::ModalLeft => {
@@ -1281,6 +1286,18 @@ async fn handle_action(
             }
         }
         Action::MouseScroll { col, row, forward } => {
+            // 弹窗（设置/播放设置/歌词浮窗/本地音频/按键提示/EQ）打开时：
+            // 滚轮切换聚焦行，与 Up/Down 同效。
+            if app.overlay != Overlay::None && app.overlay != Overlay::Playlist {
+                let action = if forward {
+                    Action::ModalDown
+                } else {
+                    Action::ModalUp
+                };
+                Box::pin(handle_action(app, host_bridge, action, layout)).await?;
+                return Ok(());
+            }
+
             // 侧边栏（播放列表面板）：滚轮滚动聚焦。
             if crate::tmplayer::ui::tui::wheel_over_playlist(layout, app, col, row) {
                 let action = if forward {
@@ -1293,12 +1310,12 @@ async fn handle_action(
         }
         Action::MouseDrag { col, row } => {
             // 按住音量条拖动：连续改音量（不松手也跟随）。
-            if app.volume_drag {
-                if let Some(volume) = crate::tmplayer::ui::tui::volume_at(layout, col, row) {
-                    app.player.volume = volume;
-                    if let Some(bridge) = host_bridge.as_mut() {
-                        (*bridge).set_volume(volume);
-                    }
+            if app.volume_drag
+                && let Some(volume) = crate::tmplayer::ui::tui::volume_at(layout, col, row)
+            {
+                app.player.volume = volume;
+                if let Some(bridge) = host_bridge.as_mut() {
+                    (*bridge).set_volume(volume);
                 }
             }
         }
@@ -1315,6 +1332,7 @@ async fn handle_action(
                 Overlay::BarSettingsModal => app.bar_settings_selected = idx,
                 Overlay::LocalAudioSettingsModal => app.local_audio_settings_selected = idx,
                 Overlay::LyricsSettingsModal => app.lyrics_settings_selected = idx,
+                Overlay::HelpModal => app.help_keybind_selected = idx,
                 _ => return Ok(()),
             }
 

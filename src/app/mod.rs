@@ -2478,9 +2478,17 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::ScrollUp => {
+                if self.overlay.is_some() {
+                    self.scroll_settings_modal(false);
+                    return;
+                }
                 self.handle_content_scroll(col, row, false).await;
             }
             MouseEventKind::ScrollDown => {
+                if self.overlay.is_some() {
+                    self.scroll_settings_modal(true);
+                    return;
+                }
                 self.handle_content_scroll(col, row, true).await;
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -5004,6 +5012,37 @@ impl App {
                 if self.is_double_settings_click(overlay, index) {
                     self.begin_keybind_rebind(index);
                 }
+            }
+            _ => {}
+        }
+    }
+
+    /// 设置弹窗滚轮：上下移动选中行（与 Up/Down 同效）。
+    fn scroll_settings_modal(&mut self, forward: bool) {
+        let step = |selected: &mut usize, count: usize| {
+            if count == 0 {
+                return;
+            }
+            *selected = if forward {
+                (*selected + 1) % count
+            } else if *selected == 0 {
+                count - 1
+            } else {
+                *selected - 1
+            };
+        };
+
+        match self.overlay {
+            Some(Overlay::Settings) => step(&mut self.settings_selected, SETTINGS_ROOT_ITEMS),
+            Some(Overlay::SettingsPlayback) => step(
+                &mut self.settings_playback_selected,
+                SETTINGS_PLAYBACK_ITEMS,
+            ),
+            Some(Overlay::SettingsLyrics) => {
+                step(&mut self.settings_lyrics_selected, SETTINGS_LYRICS_ITEMS)
+            }
+            Some(Overlay::SettingsKeybinds) => {
+                step(&mut self.settings_keybind_selected, SETTINGS_KEYBIND_ITEMS)
             }
             _ => {}
         }
