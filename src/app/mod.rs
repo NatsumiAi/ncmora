@@ -1,6 +1,7 @@
 mod api;
 mod mpris_bridge;
 pub(crate) mod player;
+mod startup;
 pub(crate) mod streaming;
 
 use crate::app::api::error_for_status;
@@ -53,6 +54,7 @@ use unicode_width::UnicodeWidthChar;
 use api::ApiState;
 use mpris_bridge::{MprisBridge, MprisControlEvent, MprisSyncPayload};
 use player::{AudioPlayer, AudioPlayerState, cleanup_cache_dir, resolve_cache_root};
+use startup::StartupInit;
 use streaming::StreamingReader;
 
 const MAX_INPUT_LEN: usize = 64;
@@ -2151,6 +2153,10 @@ pub struct App {
     pub playback_repeat_mode: PlaybackRepeatMode,
     pub playback_state: PlaybackRuntimeState,
     pub startup_loading_progress: f32,
+    /// 启动初始化任务与加载页进度（真实步数）。
+    pub startup: StartupInit,
+    /// 加载页收尾后进入的页面（登录态可用为 Home，否则 Login）。
+    startup_loading_target: Page,
     pub player_bar_hits: PlayerBarHitTargets,
     /// 最近一次同步到的终端尺寸（单元格）。
     pub term_width: u16,
@@ -2235,7 +2241,9 @@ impl App {
         self.config.graphics_protocol == GraphicsProtocol::Off
     }
 
-    pub async fn new(config: Config, theme: Theme) -> Result<Self> {
+    /// 构造 App 并启动后台初始化：本地设置同步完成，网络初始化交给
+    /// [`StartupInit`]，加载页随即可以显示真实进度。
+    pub fn new(config: Config, theme: Theme) -> Result<Self> {
         let audio_player = AudioPlayer::new(&config)?;
         let saved_cookie = session::load_cookie().ok().flatten();
 
@@ -2294,6 +2302,8 @@ impl App {
             playback_repeat_mode: PlaybackRepeatMode::Sequence,
             playback_state: PlaybackRuntimeState::Stopped,
             startup_loading_progress: 0.0,
+            startup: StartupInit::detached(),
+            startup_loading_target: Page::Login,
             player_bar_hits: PlayerBarHitTargets::default(),
             term_width: 0,
             term_height: 0,
@@ -2362,12 +2372,6 @@ impl App {
 
         app.load_private_roam_memory();
 
-        if let Ok(_) = Picker::from_query_stdio() {
-            // Don't use queried picker, this cause image layouted improperly on konsole.
-            // It's ok to not set this if we just use Halfblocks.
-
-            // app.graphics_picker = picker;
-        }
         if let Some(protocol) = app.config.graphics_protocol.to_ratatui_protocol() {
             app.graphics_picker.set_protocol_type(protocol);
         }
@@ -2375,30 +2379,18 @@ impl App {
         app.sync_cava();
         app.sync_terminal_size();
 
-        if let Some(cookie) = saved_cookie {
-            match app.api.validate_cookie(&cookie).await {
-                Ok(true) => {
-                    app.session_cookie = app.api.session_cookie().map(|value| value.to_string());
-                    app.refresh_vip_audio_access().await;
-                    let _ = app.refresh_liked_song_cache().await;
-                    app.home.status_line = "已恢复上次登录，正在加载推荐歌单".to_string();
-                    app.begin_startup_loading();
-                    app.refresh_private_roam_daily().await;
-                    if let Err(err) = app.load_home_recommendations().await {
-                        app.home.status_line = format!("已恢复登录，但推荐加载失败: {}", err);
-                    }
-                    app.finish_startup_loading();
-                    app.try_restore_playback_memory().await;
-                    return Ok(app);
-                }
-                Ok(false) => {
-                    let _ = session::clear_cookie();
-                }
-                Err(_) => {}
-            }
-        }
-
-        app.refresh_qr_login().await;
+        // 先出加载页，网络初始化交给后台任务：登录恢复这几步在旧实现里是
+        // 进备用屏幕之前同步 await 的，终端因此有一段时间毫无反馈。
+        let skip_roam = app.private_roam_refreshed_today();
+        let (steps, target) = startup::initial_plan(saved_cookie.is_some(), skip_roam);
+        app.startup = StartupInit::spawn(
+            app.config.clone(),
+            app.api.clone(),
+            saved_cookie,
+            skip_roam,
+            steps,
+        );
+        app.begin_startup_loading(target);
         Ok(app)
     }
 
@@ -2416,6 +2408,7 @@ impl App {
         self.tick_home_sidebar_fetch();
         self.tick_like_sync();
         self.tick_stderr_log_trim();
+        self.tick_startup_init().await;
         self.tick_startup_loading();
         #[cfg(feature = "easter-egg")]
         self.tick_about_easter_egg();
@@ -2469,6 +2462,14 @@ impl App {
         }
 
         if self.page == Page::Loading {
+            // 加载页不响应页面快捷键，但退出键必须留着：初始化万一被网络
+            // 拖住，用户不能只剩 Ctrl+C。
+            if matches!(
+                self.keybind_action_from_event(key),
+                Some(KeybindAction::Quit)
+            ) {
+                self.should_quit = true;
+            }
             return;
         }
 
@@ -2869,7 +2870,9 @@ impl App {
         if self.home_sidebar.anim_started_at.is_some() {
             return true;
         }
-        if self.page == Page::Loading && self.startup_loading_progress < 1.0 {
+        // 加载页全程保持高帧率：进度条本身在缓动，收尾还要等最短可见时长，
+        // 交给 1s 空闲节流会把最后一步拖慢。
+        if self.page == Page::Loading {
             return true;
         }
         if self.flat_switch_anim.is_some() {
@@ -5818,13 +5821,14 @@ impl App {
         self.home_sidebar.anim_started_at = Some(Instant::now());
     }
 
-    fn begin_startup_loading(&mut self) {
+    fn begin_startup_loading(&mut self, target: Page) {
         self.page = Page::Loading;
         self.overlay = None;
         self.startup_loading_progress = 0.0;
         self.startup_loading_started_at = Some(Instant::now());
         self.startup_loading_complete_started_at = None;
         self.startup_loading_complete_requested = false;
+        self.startup_loading_target = target;
     }
 
     fn finish_startup_loading(&mut self) {
@@ -5845,15 +5849,21 @@ impl App {
         };
 
         let elapsed = started_at.elapsed().as_secs_f32();
-        self.startup_loading_progress = startup_loading_progress_at(
-            elapsed,
-            self.startup_loading_complete_started_at
-                .map(|completed_at| completed_at.elapsed().as_secs_f32()),
-            self.startup_loading_complete_requested,
-        );
+        self.startup_loading_progress = self.startup_loading_progress();
 
-        if self.startup_loading_complete_requested && elapsed >= STARTUP_LOADING_MIN_VISIBLE_SECS {
-            self.page = Page::Home;
+        // 让位条件：数据齐了、进度条收尾 ramp 跑满、且满足最短可见时长。
+        // 少了 ramp 这一条，进度条会停在一半就消失。
+        let ramp_done = self
+            .startup_loading_complete_started_at
+            .map(|completed_at| {
+                completed_at.elapsed().as_secs_f32() >= STARTUP_LOADING_COMPLETE_RAMP_SECS
+            })
+            .unwrap_or(false);
+        if self.startup_loading_complete_requested
+            && ramp_done
+            && elapsed >= STARTUP_LOADING_MIN_VISIBLE_SECS
+        {
+            self.page = self.startup_loading_target;
             self.startup_loading_progress = 0.0;
             self.startup_loading_started_at = None;
             self.startup_loading_complete_started_at = None;
@@ -5861,21 +5871,28 @@ impl App {
         }
     }
 
+    /// 加载页进度：后台初始化完成的步数 + 当前步的时间缓动。
+    fn startup_loading_progress(&self) -> f32 {
+        startup_loading_progress(
+            self.startup.step_done(),
+            self.startup.step_total(),
+            self.startup.step_elapsed(),
+            self.startup_loading_complete_started_at
+                .map(|completed_at| completed_at.elapsed().as_secs_f32()),
+            self.startup_loading_complete_requested,
+        )
+    }
+
     pub fn startup_loading_progress_for_width(&self, _bar_width: u16) -> f32 {
         if self.page != Page::Loading {
             return 0.0;
         }
 
-        let Some(started_at) = self.startup_loading_started_at else {
+        if self.startup_loading_started_at.is_none() {
             return 0.0;
-        };
+        }
 
-        startup_loading_progress_at(
-            started_at.elapsed().as_secs_f32(),
-            self.startup_loading_complete_started_at
-                .map(|completed_at| completed_at.elapsed().as_secs_f32()),
-            self.startup_loading_complete_requested,
-        )
+        self.startup_loading_progress()
     }
 
     fn is_double_content_click(&mut self, page: Page, index: usize) -> bool {
@@ -6691,14 +6708,14 @@ impl App {
     async fn refresh_qr_login(&mut self) {
         self.qr_last_poll_at = None;
 
-        let code = match fetch_qr_login_code(&mut self.api, self.config.language).await {
-            Ok(code) => code,
-            Err(err) => {
-                self.login.status_line = format!("{err}");
-                return;
-            }
-        };
+        match fetch_qr_login_code(&mut self.api, self.config.language).await {
+            Ok(code) => self.apply_qr_login_code(code),
+            Err(err) => self.login.status_line = format!("{err}"),
+        }
+    }
 
+    /// 应用一个刚拿到的登录二维码（手动刷新与启动初始化共用）。
+    fn apply_qr_login_code(&mut self, code: QrLoginCode) {
         self.login.qr_key = code.key;
         self.login.qr_url = code.url.clone();
         self.login.status_line = if code.url.is_empty() {
@@ -7034,16 +7051,6 @@ impl App {
         }
         cover_url.map(|x| self.playlist.cover.load(self.api.clone(), x));
         Ok(())
-    }
-
-    /// 每日首次启动时刷新一次：上次最后播放的歌曲保留在首位，其后追加新歌
-    async fn refresh_private_roam_daily(&mut self) {
-        if self.private_roam_refreshed_today() {
-            return;
-        }
-
-        let fetched = fetch_private_roam_songs(&mut self.api).await;
-        self.apply_private_roam_refresh(fetched);
     }
 
     /// 今天是否已刷新过私人漫游（刷新判据只有这一处）。
@@ -7662,7 +7669,9 @@ impl App {
         self.home_sidebar = HomeSidebarState::default();
         self.playlist_section_return_snapshot = None;
         self.home.status_line = text.to_string();
-        self.begin_startup_loading();
+        // 登录后这次刷新仍走同步链路：进度条只按时间缓动，不接后台步数。
+        self.startup.reset_steps(0, 1);
+        self.begin_startup_loading(Page::Home);
         if let Err(err) = self.load_home_recommendations().await {
             self.home.status_line = format!("{}，推荐歌单加载失败: {}", text, err);
         }
@@ -7690,19 +7699,23 @@ fn playback_repeat_mode_from_key(value: &str) -> Option<PlaybackRepeatMode> {
     }
 }
 
-fn startup_loading_progress_at(
-    elapsed: f32,
+/// 加载页进度：已完成步数 + 当前步的时间缓动。
+///
+/// 只有后台初始化真正走完的步骤才会推进进度条，单步内的缓动只是为了在
+/// 跳步之间保持呼吸感；收尾时再由 ramp 补到 1.0（超时跳过剩余步骤也走这条路）。
+fn startup_loading_progress(
+    step_done: usize,
+    step_total: usize,
+    step_elapsed: f32,
     complete_elapsed: Option<f32>,
     complete_requested: bool,
 ) -> f32 {
-    if elapsed <= 0.0 {
-        return 0.0;
-    }
-
-    // Monotonic non-linear loading using a cubic-bezier-like y curve.
-    let t = (elapsed / STARTUP_LOADING_FILL_SECS).clamp(0.0, 1.0);
+    // 单步内的非线性缓动（沿用原来的 cubic-bezier 曲线手感）。
+    let t = (step_elapsed / STARTUP_LOADING_FILL_SECS).clamp(0.0, 1.0);
     let eased = cubic_bezier_y(t, 0.08, 0.98);
-    let base = eased.min(0.96);
+    // 单步最多推进到 1/total 的份额，留出到下一步的余量。
+    let within = (eased / step_total.max(1) as f32).min(0.96);
+    let base = ((step_done as f32 / step_total.max(1) as f32) + within).min(0.96);
 
     if !complete_requested {
         return base;
@@ -9327,6 +9340,39 @@ mod tests {
         let ids: Vec<Option<String>> = merged.iter().map(|t| t.id.clone()).collect();
         assert_eq!(ids, vec![Some("x".to_string()), Some("y".to_string())]);
         assert_eq!(index, None);
+    }
+
+    #[test]
+    fn startup_progress_never_rewinds_and_stops_before_completion() {
+        // 5 步计划：进度只随真实完成的步数与当前步的缓动单调推进，
+        // 且在收尾 ramp 之前不越过 96%（留给「即将完成」的视觉余量）。
+        let total = 5;
+        let mut last = 0.0_f32;
+        for done in 0..=total {
+            for micros in [0.0_f32, 0.02, 0.31, 0.62, 1.5] {
+                let progress = startup_loading_progress(done, total, micros, None, false);
+                assert!(
+                    progress >= last - 1.0e-6,
+                    "进度回退: done={done} step_elapsed={micros} progress={progress} last={last}"
+                );
+                assert!(progress <= 0.96 + 1.0e-6, "未完成时越过 96%: {progress}");
+                last = progress;
+            }
+        }
+        // 最后一步跑满也只到 96%，不会提前显示 100%。
+        assert!(
+            startup_loading_progress(total, total, 5.0, None, false) <= 0.96 + 1.0e-6,
+            "全部步骤完成后未收尾就已到 100%"
+        );
+    }
+
+    #[test]
+    fn startup_progress_reaches_full_after_completion_ramp() {
+        let ramping = startup_loading_progress(5, 5, 0.62, Some(0.0), true);
+        let done = startup_loading_progress(5, 5, 0.62, Some(1.0), true);
+
+        assert!(done >= ramping, "收尾 ramp 必须单调向上");
+        assert!((done - 1.0).abs() < 1.0e-6, "收尾后应为 1.0，实际 {done}");
     }
 
     #[test]

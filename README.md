@@ -101,6 +101,7 @@ The flat player bar keeps its mouse targets (previous, play-pause, next, progres
 
 - Themes: `system`, `latte`, `frappe` (default), `macchiato`, `mocha`
 - UI language: `zh` / `en`
+- Startup: a loading page (ASCII title plus progress bar, no text) appears first; login restore and recommendation fetches run in the background step by step, and an unusable saved session hands over to the login page
 - Transparent background, album-cover border and hint lines
 - 20 rebindable shortcuts with conflict detection; `Ctrl+Alt+R` restores the defaults
 - About modal with braille art, and a hidden easter egg inside it (the `easter-egg` cargo feature, compiled in by default and removable with `--no-default-features`)

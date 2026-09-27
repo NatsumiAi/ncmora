@@ -24,7 +24,7 @@ ncm-api = { path = "./ncm-api-rs" }
 qrcode = "0.14"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 cyper = { version = "0.9", features = ["json", "cookies", "stream", "http2"] }
-compio = { version = "0.19", features = ["macros"] }
+compio = { version = "0.19", features = ["macros", "time"] }
 http = "1.4"
 see = { git = "https://github.com/compio-rs/see" }
 unicode-width = "0.2"

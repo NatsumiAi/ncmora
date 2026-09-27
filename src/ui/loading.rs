@@ -13,12 +13,20 @@ pub fn draw_loading(frame: &mut Frame, app: &App) {
     frame.render_widget(Block::default().style(base_bg_style(app)), size);
 
     if size.width < 36 || size.height < 10 {
-        frame.render_widget(
-            Paragraph::new("Loading...")
-                .style(Style::default().fg(app.theme.color_subtext()))
-                .alignment(Alignment::Center),
-            size,
-        );
+        // 面积不够放下标题时只画一根进度条：加载页不出现任何文字。
+        let bar_w = size.width.saturating_sub(2);
+        if bar_w >= 4 {
+            draw_progress_bar(
+                frame,
+                app,
+                Rect {
+                    x: size.x.saturating_add(1),
+                    y: size.y + size.height / 2,
+                    width: bar_w,
+                    height: 1,
+                },
+            );
+        }
         return;
     }
 
@@ -54,11 +62,16 @@ pub fn draw_loading(frame: &mut Frame, app: &App) {
         height: 1,
     };
 
+    draw_progress_bar(frame, app, bar_area);
+}
+
+/// 进度条本体：只有方块，没有任何文字。小窗口与常规布局共用。
+fn draw_progress_bar(frame: &mut Frame, app: &App, area: Rect) {
     let progress = app
-        .startup_loading_progress_for_width(bar_w)
+        .startup_loading_progress_for_width(area.width)
         .clamp(0.0, 1.0);
-    let filled = ((bar_w as f32) * progress).round() as u16;
-    let filled = filled.min(bar_w);
+    let filled = ((area.width as f32) * progress).round() as u16;
+    let filled = filled.min(area.width);
 
     let filled_usize = filled as usize;
     let mut spans = Vec::with_capacity(filled_usize.saturating_add(1));
@@ -77,7 +90,7 @@ pub fn draw_loading(frame: &mut Frame, app: &App) {
             )),
         ));
     }
-    let remain = bar_w.saturating_sub(filled) as usize;
+    let remain = area.width.saturating_sub(filled) as usize;
     if remain > 0 {
         spans.push(Span::styled(
             "░".repeat(remain),
@@ -87,7 +100,7 @@ pub fn draw_loading(frame: &mut Frame, app: &App) {
 
     frame.render_widget(
         Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
-        bar_area,
+        area,
     );
 }
 

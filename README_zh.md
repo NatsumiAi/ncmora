@@ -101,6 +101,7 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 
 - 主题：`system`、`latte`、`frappe`（默认）、`macchiato`、`mocha`
 - 界面语言：`zh` / `en`
+- 启动：先出加载页（ASCII 标题 + 进度条，不显示文字），登录恢复、推荐加载等网络步骤在后台按步推进；登录态不可用时收尾后进入登录页
 - 透明背景、封面边框、提示行开关
 - 20 个可重绑快捷键，带冲突检测；`Ctrl+Alt+R` 恢复默认
 - about 弹窗含盲文形象画，里面还藏了一个彩蛋（`easter-egg` cargo feature，默认编入，可用 `--no-default-features` 剔除）
