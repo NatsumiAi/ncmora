@@ -16,7 +16,7 @@ pub fn draw_search(frame: &mut Frame, app: &mut App) {
     let size = frame.area();
     frame.render_widget(Block::default().style(base_bg_style(app)), size);
 
-    if size.width < 42 || size.height < 14 {
+    if !app.config.small_window_display && (size.width < 42 || size.height < 14) {
         frame.render_widget(
             Paragraph::new(match app.config.language {
                 Language::Zh => "终端窗口过小",
@@ -38,8 +38,7 @@ pub fn draw_search(frame: &mut Frame, app: &mut App) {
 
     draw_result_panel(frame, app, rows[0]);
     if app.config.page_lyrics {
-        let panel_area = page_lyrics::overlay_panel_area(rows[0]);
-        page_lyrics::draw_page_lyrics_panel(frame, app, panel_area);
+        page_lyrics::draw_page_lyrics_overlay(frame, app, rows[0]);
     }
 
     player_bar::draw_collapsed_player_bar(frame, app, rows[1]);

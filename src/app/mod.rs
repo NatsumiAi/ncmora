@@ -1,6 +1,7 @@
 mod api;
 mod mpris_bridge;
 pub(crate) mod player;
+mod startup;
 pub(crate) mod streaming;
 
 use crate::app::api::error_for_status;
@@ -18,8 +19,9 @@ use crate::tmplayer::app::state::LyricLine;
 use crate::tmplayer::audio::cava::{CavaChannels, CavaConfig, MiniCavaState};
 use crate::tmplayer::audio::pcm_tap::PcmRing;
 use crate::tmplayer::playback::metadata::{parse_lrc, parse_plain_lyrics};
+use crate::ui::page_lyrics;
 use crate::ui::theme::Theme;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -52,6 +54,7 @@ use unicode_width::UnicodeWidthChar;
 use api::ApiState;
 use mpris_bridge::{MprisBridge, MprisControlEvent, MprisSyncPayload};
 use player::{AudioPlayer, AudioPlayerState, cleanup_cache_dir, resolve_cache_root};
+use startup::StartupInit;
 use streaming::StreamingReader;
 
 const MAX_INPUT_LEN: usize = 64;
@@ -62,9 +65,19 @@ const SEARCH_BOX_ANIM_DURATION: Duration = Duration::from_millis(180);
 /// 侧边栏滑出动画时长（time-based，与帧率解耦）。主页与全屏播放页共用。
 pub(crate) const SIDEBAR_ANIM_DURATION: Duration = Duration::from_millis(200);
 const HOME_SIDEBAR_PLAYLIST_LIMIT: usize = 100;
-const SETTINGS_ROOT_ITEMS: usize = 10;
-const SETTINGS_PLAYBACK_ITEMS: usize = 9;
-pub(crate) const SETTINGS_KEYBIND_ITEMS: usize = 19;
+const SETTINGS_ROOT_ITEMS: usize = 12;
+const SETTINGS_PLAYBACK_ITEMS: usize = 8;
+const SETTINGS_LYRICS_ITEMS: usize = 3;
+pub(crate) const SETTINGS_KEYBIND_ITEMS: usize = 20;
+/// 主程序内容页小窗口模式的统一触发阈值，与主页既有判定一致。
+pub(crate) const SMALL_WINDOW_MIN_WIDTH: u16 = 32;
+pub(crate) const SMALL_WINDOW_MIN_HEIGHT: u16 = 12;
+/// 全屏页普通布局的最小宽度；主程序小于该宽度时不响应打开全屏。
+const FULLSCREEN_MIN_WIDTH: u16 = 50;
+/// 扁窗视口高度下限，即折叠播放栏区域高度。
+const FLAT_SMALL_HEIGHT: u16 = 5;
+/// 扁窗播放栏/歌词栏切换动画时长。
+const FLAT_SWITCH_ANIM_DURATION: Duration = Duration::from_millis(220);
 const CONTENT_DOUBLE_CLICK_MS: u64 = 400;
 const GLOBAL_HOTKEY_COOLDOWN_MS: u64 = 120;
 const STARTUP_LOADING_MIN_VISIBLE_SECS: f32 = 0.75;
@@ -74,6 +87,13 @@ const RESERVED_RESET_KEYBIND: &str = "Ctrl+Alt+R";
 const COVER_CACHE_SUBDIR: &str = "cover";
 const COVER_FETCH_RETRY_MS: u64 = 1500;
 const LYRICS_FETCH_RETRY_MS: u64 = 1500;
+/// 窄窗 LUFS 表显示范围：-60..0 LUFS。
+const VU_LUFS_FLOOR: f32 = -120.0;
+const VU_LUFS_MIN: f32 = -60.0;
+const VU_LUFS_MAX: f32 = 0.0;
+const VU_ATTACK_SECS: f32 = 0.08;
+const VU_RELEASE_SECS: f32 = 0.35;
+const VU_SETTLED_EPSILON: f32 = 0.05;
 
 const DEFAULT_KEYBIND_SEARCH_BOX: &str = "Ctrl+S";
 const DEFAULT_KEYBIND_FULLSCREEN: &str = "Ctrl+F";
@@ -94,6 +114,7 @@ const DEFAULT_KEYBIND_FULLSCREEN_EQ: &str = "E";
 const DEFAULT_KEYBIND_FULLSCREEN_EQ_RESET: &str = "Alt+R";
 const DEFAULT_KEYBIND_TOGGLE_LIKE_FULLSCREEN: &str = "L";
 const DEFAULT_KEYBIND_TOGGLE_LIKE_COLLAPSED: &str = "Alt+L";
+const DEFAULT_KEYBIND_SMALL_WINDOW_TOGGLE: &str = "Alt+X";
 
 #[derive(Debug, Clone, Copy)]
 enum KeybindAction {
@@ -116,6 +137,7 @@ enum KeybindAction {
     FullscreenEqReset,
     ToggleLikeFullscreen,
     ToggleLikeCollapsed,
+    SmallWindowToggle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,8 +155,28 @@ pub enum Overlay {
     Settings,
     SettingsPlayback,
     SettingsKeybinds,
+    SettingsLyrics,
     SettingsAbout,
     SearchBox,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmallWindowMode {
+    Flat,
+    Narrow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlatPanel {
+    Player,
+    Lyrics,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FlatSwitchAnim {
+    pub from_x: f32,
+    pub to_x: f32,
+    pub started_at: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,10 +319,12 @@ async fn fetch_home_sidebar_playlists(
 
     let account = match api.user_account().await {
         Ok(v) => v,
-        Err(_) => api
-            .login_status()
-            .await
-            .map_err(|err| format!("{}: {err}", pick("账号信息请求失败", "Account request failed")))?,
+        Err(_) => api.login_status().await.map_err(|err| {
+            format!(
+                "{}: {err}",
+                pick("账号信息请求失败", "Account request failed")
+            )
+        })?,
     };
     let account_code = response_code(&account);
     if account_code != 200 {
@@ -358,6 +402,228 @@ where
 
 pub fn peek_shared_future<T>(cover_bytes: &Option<SharedFuture<T>>) -> Option<&T> {
     cover_bytes.as_ref()?.peek()?.as_ref()
+}
+
+/// 句柄不在 `Option` 里时的取值变体。
+fn peek_shared<T>(fut: &SharedFuture<T>) -> Option<&T> {
+    fut.peek()?.as_ref()
+}
+
+/// 收藏写入请求。成功 `Ok(())`；失败带可展示的原因（接口错误码或传输错误）。
+///
+/// 返回 `String` 而非 `anyhow::Error`：结果要跨 future 边界搬运，需 `Clone`。
+async fn like_song_request(mut api: ApiState, song_id: String, target: bool) -> Result<(), String> {
+    match api.like_song(&song_id, target).await {
+        Ok(response) => {
+            let code = response
+                .body
+                .get("code")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(response.status);
+            if code == 200 {
+                Ok(())
+            } else {
+                Err(code.to_string())
+            }
+        }
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// 服务端收藏态确认请求（切歌后核对账号里的真实状态）。
+async fn song_like_check_request(mut api: ApiState, song_id: String) -> Result<bool, ()> {
+    let Ok(song_id_num) = song_id.parse::<u64>() else {
+        return Err(());
+    };
+
+    let ids_json = format!("[{song_id_num}]");
+    let Ok(response) = api.song_like_check(&ids_json).await else {
+        return Err(());
+    };
+    if response_code(&response) != 200 {
+        return Err(());
+    }
+
+    parse_song_like_check_result(&response.body, &song_id).ok_or(())
+}
+
+type LikeToggleFuture = SharedFuture<Result<(), String>>;
+type LikeVerifyFuture = SharedFuture<Result<bool, ()>>;
+/// 装箱后的任务体（`shot_and_share` 的入参类型）。
+type LikeToggleTask = Pin<Box<dyn Future<Output = Option<Result<(), String>>>>>;
+type LikeVerifyTask = Pin<Box<dyn Future<Output = Option<Result<bool, ()>>>>>;
+
+/// 在途的收藏写入。
+struct PendingLikeToggle {
+    song_id: String,
+    target: bool,
+    fut: LikeToggleFuture,
+}
+
+/// 在途的收藏确认。
+struct PendingLikeVerify {
+    song_id: String,
+    fut: LikeVerifyFuture,
+}
+
+/// 一次收藏写入回包的收敛结果。
+#[derive(Debug, PartialEq, Eq)]
+enum ToggleOutcome {
+    /// 仍是当前意图：确认值已写入，界面据此提示。
+    Settled { liked: bool },
+    /// 已被更新的意图取代：确认值已写入，不提示，由 reconcile 补发新意图。
+    Superseded,
+    /// 失败且仍是当前意图：意图已放弃，显示应回滚到已确认值。
+    Failed { message: String },
+    /// 失败但已被取代：忽略。
+    StaleFailure,
+}
+
+/// 收藏的「期望 / 已确认」双轨状态机。
+///
+/// 点击只写 `desired` 并把界面切到期望值（乐观更新），真实请求由
+/// `App::tick_like_sync` 在每帧派发与收敛——输入路径上不再 `await` 网络，
+/// 收藏不会冻结单线程事件循环的动画。
+///
+/// - 连点：只保留最后一次期望；在途请求串行化，其回包不会覆盖更新的意图。
+/// - 失败：回滚显示到已确认集合，并写状态行。
+///
+/// 本结构不依赖 `App` 与网络：回包由调用方（tick 或单测）喂进 `on_*_result`。
+#[derive(Default)]
+struct LikeMachine {
+    /// 用户最后一次意图（song_id, target）。
+    desired: Option<(String, bool)>,
+    toggle: Option<PendingLikeToggle>,
+    verify: Option<PendingLikeVerify>,
+    /// 已确认的收藏集合（服务端口径）。
+    confirmed: HashSet<String>,
+}
+
+impl LikeMachine {
+    /// 服务端已确认该曲目被收藏。
+    fn is_confirmed(&self, song_id: &str) -> bool {
+        self.confirmed.contains(song_id)
+    }
+
+    /// 该曲目当前应显示的状态：未决意图优先，其次已确认值。
+    fn displayed(&self, song_id: &str) -> bool {
+        match self.desired.as_ref() {
+            Some((id, target)) if id == song_id => *target,
+            _ => self.is_confirmed(song_id),
+        }
+    }
+
+    /// 用整份「喜欢的歌曲」列表覆盖已确认集合。
+    fn replace_confirmed(&mut self, confirmed: HashSet<String>) {
+        self.confirmed = confirmed;
+    }
+
+    /// 记录一次点击。新意图优先于任何在途的服务端确认。
+    fn set_intent(&mut self, song_id: String, target: bool) {
+        self.desired = Some((song_id, target));
+        self.verify = None;
+    }
+
+    /// 现在该补发的写入请求；`None` 表示无需发（无意图、已满足、或有在途）。
+    fn pending_dispatch(&self) -> Option<(String, bool)> {
+        if self.toggle.is_some() {
+            return None;
+        }
+        let (song_id, target) = self.desired.as_ref()?;
+        if self.is_confirmed(song_id) == *target {
+            return None;
+        }
+        Some((song_id.clone(), *target))
+    }
+
+    /// 期望已被满足（例如连点两次回到原状态）时清掉意图，返回该曲目 id。
+    fn drop_satisfied_intent(&mut self) -> Option<String> {
+        let (song_id, target) = self.desired.as_ref()?;
+        if self.is_confirmed(song_id) != *target {
+            return None;
+        }
+        let song_id = song_id.clone();
+        self.desired = None;
+        Some(song_id)
+    }
+
+    fn begin_toggle(&mut self, song_id: String, target: bool, fut: LikeToggleFuture) {
+        self.toggle = Some(PendingLikeToggle {
+            song_id,
+            target,
+            fut,
+        });
+    }
+
+    fn begin_verify(&mut self, song_id: String, fut: LikeVerifyFuture) {
+        self.verify = Some(PendingLikeVerify { song_id, fut });
+    }
+
+    /// 收敛一次写入回包。
+    fn on_toggle_result(
+        &mut self,
+        song_id: &str,
+        target: bool,
+        result: Result<(), String>,
+    ) -> ToggleOutcome {
+        let still_wanted = matches!(
+            self.desired.as_ref(),
+            Some((id, value)) if id == song_id && *value == target
+        );
+        if still_wanted {
+            self.desired = None;
+        }
+
+        match result {
+            Ok(()) => {
+                self.set_confirmed(song_id, target);
+                if still_wanted {
+                    ToggleOutcome::Settled { liked: target }
+                } else {
+                    ToggleOutcome::Superseded
+                }
+            }
+            Err(message) => {
+                if still_wanted {
+                    ToggleOutcome::Failed { message }
+                } else {
+                    ToggleOutcome::StaleFailure
+                }
+            }
+        }
+    }
+
+    /// 收敛一次确认回包；返回是否真的写入了确认值。
+    fn on_verify_result(&mut self, song_id: &str, result: Result<bool, ()>) -> bool {
+        let Ok(liked) = result else {
+            return false;
+        };
+        // 更新的意图 / 在途写入优先，别被旧确认覆盖。
+        let superseded = matches!(self.desired.as_ref(), Some((id, _)) if id == song_id)
+            || self
+                .toggle
+                .as_ref()
+                .is_some_and(|pending| pending.song_id == song_id);
+        if superseded {
+            return false;
+        }
+
+        self.set_confirmed(song_id, liked);
+        true
+    }
+
+    fn set_confirmed(&mut self, song_id: &str, liked: bool) {
+        if liked {
+            self.confirmed.insert(song_id.to_string());
+        } else {
+            self.confirmed.remove(song_id);
+        }
+    }
+
+    /// 登出等场景：连已确认集合一起丢弃。
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
 }
 
 #[derive(Clone, Default)]
@@ -704,6 +970,29 @@ pub struct HomeSidebarHit {
     pub index: usize,
 }
 
+/// 滚轮落在侧边栏时该滚哪个分区：光标所在分区优先（分区按整块算，列表短时
+/// 下方的空白也命中），否则用当前聚焦分区；光标不在侧边栏面板内返回 `None`。
+fn home_sidebar_wheel_target(
+    panel: Option<HitRect>,
+    sections: &[(HitRect, HomeSidebarSection)],
+    focused: HomeSidebarSection,
+    col: u16,
+    row: u16,
+) -> Option<HomeSidebarSection> {
+    let panel = panel?;
+    if !panel.contains(col, row) {
+        return None;
+    }
+
+    Some(
+        sections
+            .iter()
+            .find(|(rect, _)| rect.contains(col, row))
+            .map(|(_, section)| *section)
+            .unwrap_or(focused),
+    )
+}
+
 pub struct HomeSidebarState {
     pub expanded: bool,
     pub loading: bool,
@@ -875,6 +1164,34 @@ impl HomeSidebarState {
             self.focused_index - 1
         };
         self.sync_memory_from_current();
+    }
+
+    /// 滚轮滚动一格：在当前分区内移动焦点（到顶/到底即停，不回卷——键盘的
+    /// `focus_next/prev` 会绕回，滚轮从列表末尾跳回开头会很突兀）。
+    /// 侧边栏的视图跟随焦点，所以这就是它唯一的滚动方式。
+    pub fn scroll_by(&mut self, forward: bool) {
+        let len = self.section_len(self.focused_section);
+        if len == 0 {
+            return;
+        }
+
+        let next = if forward {
+            self.focused_index.saturating_add(1).min(len - 1)
+        } else {
+            self.focused_index.saturating_sub(1)
+        };
+        self.focused_index = next;
+        self.sync_memory_from_current();
+    }
+
+    /// 滚轮落到某个分区：先切到该分区（沿用它的位置记忆），再走一格，
+    /// 这样"指着收藏区滚滚轮"不会把创建区的焦点带走。
+    pub fn scroll_section_by(&mut self, section: HomeSidebarSection, forward: bool) {
+        if section != self.focused_section {
+            let index = self.section_memory(section);
+            self.set_focus(section, index);
+        }
+        self.scroll_by(forward);
     }
 
     pub fn switch_section_prev(&mut self) {
@@ -1514,6 +1831,19 @@ impl PlaybackRepeatMode {
             Self::LoopOne => Self::Sequence,
         }
     }
+
+    /// 播放模式符号（Nerd Font PUA）。
+    ///
+    /// 用码位转义书写：直接粘贴字形会被复制/编辑流程吞掉，源码看不出异常，
+    /// 运行时却变成空串——播放栏会因此错位，并留下"点不动"的按钮。
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Sequence => "\u{f08f}",
+            Self::Shuffle => "\u{f074}",
+            Self::LoopAll => "\u{f0b6}",
+            Self::LoopOne => "\u{f01e}",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1605,6 +1935,47 @@ impl HitRect {
     }
 }
 
+impl From<ratatui::layout::Rect> for HitRect {
+    fn from(rect: ratatui::layout::Rect) -> Self {
+        Self {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        }
+    }
+}
+
+/// 上一帧歌词浮窗的几何：内容区 + 浮窗本体。
+///
+/// 拖拽与"点击浮窗不穿透到下面的 tile"都以这份为准（每帧由
+/// `page_lyrics::draw_page_lyrics_overlay` 重登记）。
+#[derive(Debug, Clone, Copy)]
+pub struct PageLyricsLayout {
+    pub content: HitRect,
+    pub panel: HitRect,
+}
+
+impl PageLyricsLayout {
+    pub fn content_rect(self) -> Rect {
+        Rect {
+            x: self.content.x,
+            y: self.content.y,
+            width: self.content.width,
+            height: self.content.height,
+        }
+    }
+
+    pub fn panel_rect(self) -> Rect {
+        Rect {
+            x: self.panel.x,
+            y: self.panel.y,
+            width: self.panel.width,
+            height: self.panel.height,
+        }
+    }
+}
+
 /// about 彩蛋的推进阶段。
 #[cfg(feature = "easter-egg")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1647,6 +2018,10 @@ pub struct PlayerBarHitTargets {
     pub play_pause: Option<HitRect>,
     pub next: Option<HitRect>,
     pub progress: Option<HitRect>,
+    /// 收藏爱心（左列右端）。
+    pub like: Option<HitRect>,
+    /// 播放模式符号（控制串最后一个字符）。
+    pub mode: Option<HitRect>,
 }
 
 #[derive(Debug, Clone)]
@@ -1762,7 +2137,8 @@ pub struct App {
     pub search: SearchState,
     pub now_playing: Option<PlaybackTrack>,
     pub now_playing_liked: bool,
-    pub liked_song_ids: HashSet<String>,
+    /// 收藏的期望/已确认双轨状态机（乐观更新 + 每帧收敛）。
+    like_machine: LikeMachine,
     pub playback_queue: Vec<PlaybackTrack>,
     /// 当前播放队列来源列表（专辑/歌单）的封面 URL。
     /// 与 `self.playlist` 解耦：后者是"最后访问的页面"，会随浏览漂移。
@@ -1777,9 +2153,36 @@ pub struct App {
     pub playback_repeat_mode: PlaybackRepeatMode,
     pub playback_state: PlaybackRuntimeState,
     pub startup_loading_progress: f32,
+    /// 启动初始化任务与加载页进度（真实步数）。
+    pub startup: StartupInit,
+    /// 加载页收尾后进入的页面（登录态可用为 Home，否则 Login）。
+    startup_loading_target: Page,
     pub player_bar_hits: PlayerBarHitTargets,
+    /// 最近一次同步到的终端尺寸（单元格）。
+    pub term_width: u16,
+    pub term_height: u16,
+    /// 当前生效的小窗口模式；None 表示普通内容页或未启用小窗口显示。
+    pub small_window_mode: Option<SmallWindowMode>,
+    /// 扁窗高度恰为播放栏高度时，Alt+X 切换的当前目标面板。
+    pub flat_panel: FlatPanel,
+    /// 扁窗切换动画；None 表示已停在目标面板。
+    pub flat_switch_anim: Option<FlatSwitchAnim>,
+    /// 上一帧是否处于“扁窗高度恰为播放栏高度”的子状态。
+    flat_exact_height: bool,
+    /// 窄窗音量条的显示端平滑值（LUFS）。以 VU_FLOOR 表示静音。
+    pub vu_left_lufs: f32,
+    pub vu_right_lufs: f32,
+    pub vu_animating: bool,
+    vu_last_tick_at: Option<Instant>,
+    vu_last_meter_generation: u64,
     pub home_sidebar_panel_hit: Option<HitRect>,
+    /// 上一帧歌词浮窗的几何（拖拽 / 点击拦截共用）。
+    page_lyrics_layout: Option<PageLyricsLayout>,
+    /// 正在拖动歌词浮窗时，光标相对浮窗左上角的偏移。
+    page_lyrics_grab: Option<(u16, u16)>,
     pub home_sidebar_playlist_hits: Vec<(HitRect, HomeSidebarHit)>,
+    /// 侧边栏两个分区的矩形（滚轮据此判断光标落在哪个分区）。
+    pub home_sidebar_section_hits: Vec<(HitRect, HomeSidebarSection)>,
     pub home_tile_hits: Vec<(HitRect, usize)>,
     pub playlist_track_hits: Vec<(HitRect, usize)>,
     pub author_tile_hits: Vec<(HitRect, usize)>,
@@ -1791,8 +2194,13 @@ pub struct App {
     pub search_box_anim_started_at: Option<Instant>,
     pub settings_selected: usize,
     pub settings_playback_selected: usize,
+    pub settings_lyrics_selected: usize,
     pub settings_keybind_selected: usize,
     pub settings_keybind_rebinding: Option<usize>,
+    /// 设置弹窗当前页的行命中区（每帧由 `draw_settings_modal` 重注册）。
+    pub settings_item_hits: Vec<(HitRect, usize)>,
+    /// 设置弹窗内上一次点击（用于双击判定）。
+    last_settings_click: Option<(Instant, Overlay, usize)>,
     /// about 弹窗里的形象彩蛋状态。
     #[cfg(feature = "easter-egg")]
     pub about_egg: AboutEasterEgg,
@@ -1833,7 +2241,9 @@ impl App {
         self.config.graphics_protocol == GraphicsProtocol::Off
     }
 
-    pub async fn new(config: Config, theme: Theme) -> Result<Self> {
+    /// 构造 App 并启动后台初始化：本地设置同步完成，网络初始化交给
+    /// [`StartupInit`]，加载页随即可以显示真实进度。
+    pub fn new(config: Config, theme: Theme) -> Result<Self> {
         let audio_player = AudioPlayer::new(&config)?;
         let saved_cookie = session::load_cookie().ok().flatten();
 
@@ -1884,7 +2294,7 @@ impl App {
             search: SearchState::default(),
             now_playing: None,
             now_playing_liked: false,
-            liked_song_ids: HashSet::new(),
+            like_machine: LikeMachine::default(),
             playback_queue: Vec::new(),
             playback_queue_cover_url: None,
             playback_queue_source_id: None,
@@ -1892,9 +2302,25 @@ impl App {
             playback_repeat_mode: PlaybackRepeatMode::Sequence,
             playback_state: PlaybackRuntimeState::Stopped,
             startup_loading_progress: 0.0,
+            startup: StartupInit::detached(),
+            startup_loading_target: Page::Login,
             player_bar_hits: PlayerBarHitTargets::default(),
+            term_width: 0,
+            term_height: 0,
+            small_window_mode: None,
+            flat_panel: FlatPanel::Player,
+            flat_switch_anim: None,
+            flat_exact_height: false,
+            vu_left_lufs: VU_LUFS_FLOOR,
+            vu_right_lufs: VU_LUFS_FLOOR,
+            vu_animating: false,
+            vu_last_tick_at: None,
+            vu_last_meter_generation: 0,
             home_sidebar_panel_hit: None,
+            page_lyrics_layout: None,
+            page_lyrics_grab: None,
             home_sidebar_playlist_hits: Vec::new(),
+            home_sidebar_section_hits: Vec::new(),
             home_tile_hits: Vec::new(),
             playlist_track_hits: Vec::new(),
             author_tile_hits: Vec::new(),
@@ -1905,8 +2331,11 @@ impl App {
             search_box_anim_started_at: None,
             settings_selected: 0,
             settings_playback_selected: 0,
+            settings_lyrics_selected: 0,
             settings_keybind_selected: 0,
             settings_keybind_rebinding: None,
+            settings_item_hits: Vec::new(),
+            last_settings_click: None,
             #[cfg(feature = "easter-egg")]
             about_egg: AboutEasterEgg::default(),
             session_cookie: None,
@@ -1943,42 +2372,25 @@ impl App {
 
         app.load_private_roam_memory();
 
-        if let Ok(_) = Picker::from_query_stdio() {
-            // Don't use queried picker, this cause image layouted improperly on konsole.
-            // It's ok to not set this if we just use Halfblocks.
-
-            // app.graphics_picker = picker;
-        }
         if let Some(protocol) = app.config.graphics_protocol.to_ratatui_protocol() {
             app.graphics_picker.set_protocol_type(protocol);
         }
 
         app.sync_cava();
+        app.sync_terminal_size();
 
-        if let Some(cookie) = saved_cookie {
-            match app.api.validate_cookie(&cookie).await {
-                Ok(true) => {
-                    app.session_cookie = app.api.session_cookie().map(|value| value.to_string());
-                    app.refresh_vip_audio_access().await;
-                    let _ = app.refresh_liked_song_cache().await;
-                    app.home.status_line = "已恢复上次登录，正在加载推荐歌单".to_string();
-                    app.begin_startup_loading();
-                    app.refresh_private_roam_daily().await;
-                    if let Err(err) = app.load_home_recommendations().await {
-                        app.home.status_line = format!("已恢复登录，但推荐加载失败: {}", err);
-                    }
-                    app.finish_startup_loading();
-                    app.try_restore_playback_memory().await;
-                    return Ok(app);
-                }
-                Ok(false) => {
-                    let _ = session::clear_cookie();
-                }
-                Err(_) => {}
-            }
-        }
-
-        app.refresh_qr_login().await;
+        // 先出加载页，网络初始化交给后台任务：登录恢复这几步在旧实现里是
+        // 进备用屏幕之前同步 await 的，终端因此有一段时间毫无反馈。
+        let skip_roam = app.private_roam_refreshed_today();
+        let (steps, target) = startup::initial_plan(saved_cookie.is_some(), skip_roam);
+        app.startup = StartupInit::spawn(
+            app.config.clone(),
+            app.api.clone(),
+            saved_cookie,
+            skip_roam,
+            steps,
+        );
+        app.begin_startup_loading(target);
         Ok(app)
     }
 
@@ -1988,10 +2400,15 @@ impl App {
         self.tick_lyric_fetch();
         self.apply_mpris_control_events().await;
         self.sync_mpris_exposure();
+        let now = Instant::now();
+        self.tick_flat_switch();
+        self.tick_vu_meter(now);
         self.tick_search_box_animation();
         self.tick_home_sidebar_animation();
         self.tick_home_sidebar_fetch();
+        self.tick_like_sync();
         self.tick_stderr_log_trim();
+        self.tick_startup_init().await;
         self.tick_startup_loading();
         #[cfg(feature = "easter-egg")]
         self.tick_about_easter_egg();
@@ -2025,6 +2442,11 @@ impl App {
             return;
         }
 
+        if self.is_small_window_context() {
+            self.handle_small_window_key(key).await;
+            return;
+        }
+
         if self.page != Page::Login
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('k') | KeyCode::Char('K'))
@@ -2040,6 +2462,14 @@ impl App {
         }
 
         if self.page == Page::Loading {
+            // 加载页不响应页面快捷键，但退出键必须留着：初始化万一被网络
+            // 拖住，用户不能只剩 Ctrl+C。
+            if matches!(
+                self.keybind_action_from_event(key),
+                Some(KeybindAction::Quit)
+            ) {
+                self.should_quit = true;
+            }
             return;
         }
 
@@ -2057,8 +2487,51 @@ impl App {
         }
     }
 
+    async fn handle_small_window_key(&mut self, key: KeyEvent) {
+        if keybind_matches(self.config.keybind_small_window_toggle.as_str(), key) {
+            if self.small_window_mode == Some(SmallWindowMode::Flat) {
+                self.toggle_flat_panel();
+            }
+            return;
+        }
+
+        let Some(action) = self.keybind_action_from_event(key) else {
+            return;
+        };
+        match action {
+            KeybindAction::Quit => {
+                self.should_quit = true;
+            }
+            KeybindAction::Prev
+            | KeybindAction::Next
+            | KeybindAction::TogglePlayPause
+            | KeybindAction::ToggleMode
+            | KeybindAction::ToggleLikeCollapsed => {
+                if self.can_execute_global_hotkey() {
+                    self.trigger_keybind_action(action).await;
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub async fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // 松开左键总是收尾拖拽：即使中途切到小窗口/弹窗也不会卡住拖动状态
+        // （卡住会让 should_continuous_redraw 一直按高帧率重绘）。
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
+            self.page_lyrics_release();
+            return;
+        }
+
         if self.page == Page::Login || self.page == Page::Loading {
+            return;
+        }
+
+        if self.is_small_window_context() {
+            if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                self.dispatch_player_bar_click(mouse.column, mouse.row)
+                    .await;
+            }
             return;
         }
 
@@ -2067,9 +2540,17 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::ScrollUp => {
+                if self.overlay.is_some() {
+                    self.scroll_settings_modal(false);
+                    return;
+                }
                 self.handle_content_scroll(col, row, false).await;
             }
             MouseEventKind::ScrollDown => {
+                if self.overlay.is_some() {
+                    self.scroll_settings_modal(true);
+                    return;
+                }
                 self.handle_content_scroll(col, row, true).await;
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -2084,7 +2565,14 @@ impl App {
                     return;
                 }
 
-                if self.overlay.is_some() {
+                if let Some(overlay) = self.overlay {
+                    // 设置弹窗：命中行则聚焦/执行，其余位置一律吞掉。
+                    self.handle_settings_modal_click(overlay, col, row).await;
+                    return;
+                }
+
+                // 歌词浮窗盖在内容之上：命中即吞掉，顺带作为拖动把手。
+                if self.page_lyrics_press(col, row) {
                     return;
                 }
 
@@ -2092,60 +2580,68 @@ impl App {
                     return;
                 }
 
-                if let Some(rect) = self.player_bar_hits.prev {
-                    if rect.contains(col, row) {
-                        self.play_previous_hotkey().await;
-                        return;
-                    }
-                }
-                if let Some(rect) = self.player_bar_hits.play_pause {
-                    if rect.contains(col, row) {
-                        self.toggle_play_pause_hotkey().await;
-                        return;
-                    }
-                }
-                if let Some(rect) = self.player_bar_hits.next {
-                    if rect.contains(col, row) {
-                        self.play_next_hotkey().await;
-                        return;
-                    }
-                }
-                if let Some(rect) = self.player_bar_hits.progress {
-                    if rect.contains(col, row) {
-                        let relative_x = col.saturating_sub(rect.x) as f32;
-                        let ratio = if rect.width <= 1 {
-                            0.0
-                        } else {
-                            (relative_x / (rect.width - 1) as f32).clamp(0.0, 1.0)
-                        };
-                        self.seek_to_ratio(ratio);
-                    }
-                }
+                self.dispatch_player_bar_click(col, row).await;
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.page_lyrics_drag(col, row);
             }
             _ => {}
         }
     }
 
+    /// 折叠播放栏按钮的统一分派（小窗口与常规两条分支共用）。
+    ///
+    /// 命中区每帧由 `draw_collapsed_player_bar` 重注册，这里只查表；
+    /// 新增按钮必须同时登记进 `PlayerBarHitTargets` 与 `player_bar_contains`。
+    async fn dispatch_player_bar_click(&mut self, col: u16, row: u16) {
+        let hits = self.player_bar_hits;
+
+        if hits.like.is_some_and(|rect| rect.contains(col, row)) {
+            self.toggle_like_hotkey();
+            return;
+        }
+        if hits.mode.is_some_and(|rect| rect.contains(col, row)) {
+            self.cycle_repeat_mode_hotkey();
+            return;
+        }
+        if hits.prev.is_some_and(|rect| rect.contains(col, row)) {
+            self.play_previous_hotkey().await;
+            return;
+        }
+        if hits.play_pause.is_some_and(|rect| rect.contains(col, row)) {
+            self.toggle_play_pause_hotkey().await;
+            return;
+        }
+        if hits.next.is_some_and(|rect| rect.contains(col, row)) {
+            self.play_next_hotkey().await;
+            return;
+        }
+        if let Some(rect) = hits.progress {
+            if rect.contains(col, row) {
+                let relative_x = col.saturating_sub(rect.x) as f32;
+                let ratio = if rect.width <= 1 {
+                    0.0
+                } else {
+                    (relative_x / (rect.width - 1) as f32).clamp(0.0, 1.0)
+                };
+                self.seek_to_ratio(ratio);
+            }
+        }
+    }
+
     fn player_bar_contains(&self, col: u16, row: u16) -> bool {
-        self.player_bar_hits
-            .prev
-            .map(|rect| rect.contains(col, row))
-            .unwrap_or(false)
-            || self
-                .player_bar_hits
-                .play_pause
-                .map(|rect| rect.contains(col, row))
-                .unwrap_or(false)
-            || self
-                .player_bar_hits
-                .next
-                .map(|rect| rect.contains(col, row))
-                .unwrap_or(false)
-            || self
-                .player_bar_hits
-                .progress
-                .map(|rect| rect.contains(col, row))
-                .unwrap_or(false)
+        let hits = self.player_bar_hits;
+        [
+            hits.prev,
+            hits.play_pause,
+            hits.next,
+            hits.progress,
+            hits.like,
+            hits.mode,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|rect| rect.contains(col, row))
     }
 
     async fn handle_content_scroll(&mut self, col: u16, row: u16, forward: bool) {
@@ -2168,8 +2664,29 @@ impl App {
                     let _ = self.playlist.focus_prev();
                 }
             }
+            Page::Home => self.scroll_home_sidebar(col, row, forward),
             _ => {}
         };
+    }
+
+    /// 主页侧边栏的滚轮滚动：光标指到哪个分区就滚哪个（没有则滚当前聚焦分区），
+    /// 一格一步、到端点即停。侧边栏收起或光标在面板外时不动。
+    fn scroll_home_sidebar(&mut self, col: u16, row: u16, forward: bool) {
+        if !self.home_sidebar.expanded {
+            return;
+        }
+
+        let Some(section) = home_sidebar_wheel_target(
+            self.home_sidebar_panel_hit,
+            &self.home_sidebar_section_hits,
+            self.home_sidebar.focused_section,
+            col,
+            row,
+        ) else {
+            return;
+        };
+
+        self.home_sidebar.scroll_section_by(section, forward);
     }
 
     async fn advance_search_focus(&mut self) {
@@ -2212,10 +2729,85 @@ impl App {
     pub fn clear_content_hits(&mut self) {
         self.home_sidebar_panel_hit = None;
         self.home_sidebar_playlist_hits.clear();
+        self.home_sidebar_section_hits.clear();
         self.home_tile_hits.clear();
         self.playlist_track_hits.clear();
         self.author_tile_hits.clear();
         self.search_item_hits.clear();
+        self.page_lyrics_layout = None;
+    }
+
+    /// 歌词浮窗位置（归一化，内容区内左上角）。
+    pub fn page_lyrics_pos(&self) -> (f32, f32) {
+        (self.config.page_lyrics_pos_x, self.config.page_lyrics_pos_y)
+    }
+
+    /// 登记本帧歌词浮窗几何（由 `page_lyrics::draw_page_lyrics_overlay` 调用）。
+    pub fn set_page_lyrics_layout(&mut self, content: Rect, panel: Rect) {
+        self.page_lyrics_layout = Some(PageLyricsLayout {
+            content: content.into(),
+            panel: panel.into(),
+        });
+    }
+
+    /// 鼠标按下：落在歌词浮窗上就吞掉这次点击（不穿透到下面的 tile），
+    /// 并按配置决定是否开始拖动。返回是否已消费。
+    fn page_lyrics_press(&mut self, col: u16, row: u16) -> bool {
+        let Some(layout) = self.page_lyrics_layout else {
+            return false;
+        };
+        if !layout.panel.contains(col, row) {
+            return false;
+        }
+
+        self.page_lyrics_grab = self.config.page_lyrics_drag.then(|| {
+            (
+                col.saturating_sub(layout.panel.x),
+                row.saturating_sub(layout.panel.y),
+            )
+        });
+        true
+    }
+
+    /// 拖动中：把浮窗移到光标处（保持抓取偏移，钳在内容区内）。
+    fn page_lyrics_drag(&mut self, col: u16, row: u16) {
+        let (Some(layout), Some(grab)) = (self.page_lyrics_layout, self.page_lyrics_grab) else {
+            return;
+        };
+
+        let (pos_x, pos_y) =
+            page_lyrics::pos_after_drag(layout.content_rect(), layout.panel_rect(), col, row, grab);
+        self.config.page_lyrics_pos_x = pos_x;
+        self.config.page_lyrics_pos_y = pos_y;
+    }
+
+    /// 松开：按配置吸附到最近的角，并把位置写回配置。
+    fn page_lyrics_release(&mut self) {
+        if self.page_lyrics_grab.take().is_none() {
+            return;
+        }
+
+        if self.config.page_lyrics_snap {
+            if let Some(layout) = self.page_lyrics_layout {
+                let (pos_x, pos_y) = page_lyrics::snap_pos(
+                    layout.content_rect(),
+                    layout.panel_rect(),
+                    self.page_lyrics_pos(),
+                );
+                self.config.page_lyrics_pos_x = pos_x;
+                self.config.page_lyrics_pos_y = pos_y;
+            }
+        }
+
+        let _ = self.config.save();
+    }
+
+    pub fn clear_settings_item_hits(&mut self) {
+        self.settings_item_hits.clear();
+    }
+
+    pub fn push_settings_item_hit(&mut self, rect: HitRect, index: usize) {
+        self.settings_item_hits.push((rect, index));
     }
 
     pub fn set_home_sidebar_panel_hit(&mut self, rect: Option<HitRect>) {
@@ -2228,6 +2820,10 @@ impl App {
 
     pub fn push_home_sidebar_playlist_hit(&mut self, rect: HitRect, hit: HomeSidebarHit) {
         self.home_sidebar_playlist_hits.push((rect, hit));
+    }
+
+    pub fn push_home_sidebar_section_hit(&mut self, rect: HitRect, section: HomeSidebarSection) {
+        self.home_sidebar_section_hits.push((rect, section));
     }
 
     pub fn push_home_tile_hit(&mut self, rect: HitRect, index: usize) {
@@ -2262,6 +2858,10 @@ impl App {
         if self.is_seeking() {
             return true;
         }
+        // 拖歌词浮窗时保持高帧率，鼠标跟手。
+        if self.page_lyrics_grab.is_some() {
+            return true;
+        }
         if let Some(started_at) = self.search_box_anim_started_at {
             if started_at.elapsed() < SEARCH_BOX_ANIM_DURATION {
                 return true;
@@ -2270,7 +2870,22 @@ impl App {
         if self.home_sidebar.anim_started_at.is_some() {
             return true;
         }
-        if self.page == Page::Loading && self.startup_loading_progress < 1.0 {
+        // 加载页全程保持高帧率：进度条本身在缓动，收尾还要等最短可见时长，
+        // 交给 1s 空闲节流会把最后一步拖慢。
+        if self.page == Page::Loading {
+            return true;
+        }
+        if self.flat_switch_anim.is_some() {
+            return true;
+        }
+        if self.small_window_mode == Some(SmallWindowMode::Flat)
+            && self.playback_state == PlaybackRuntimeState::Playing
+        {
+            return true;
+        }
+        if self.small_window_mode == Some(SmallWindowMode::Narrow)
+            && (self.playback_state == PlaybackRuntimeState::Playing || self.vu_animating)
+        {
             return true;
         }
         // about 彩蛋：蓄力/迸发在动，激活后边框噪点也持续流动。
@@ -2315,6 +2930,229 @@ impl App {
         self.audio_player.pcm_ring()
     }
 
+    /// 是否处于“小窗口相关”上下文：设置开启、已登录内容页、且终端低于统一阈值。
+    /// 该上下文包含扁窗、窄窗，以及两个方向都过小而只显示提示的情况。
+    pub fn is_small_window_context(&self) -> bool {
+        if !self.config.small_window_display {
+            return false;
+        }
+        if matches!(self.page, Page::Login | Page::Loading) {
+            return false;
+        }
+        self.term_width < SMALL_WINDOW_MIN_WIDTH || self.term_height < SMALL_WINDOW_MIN_HEIGHT
+    }
+
+    pub fn set_terminal_size(&mut self, width: u16, height: u16) {
+        let was_small_context = self.is_small_window_context();
+        self.term_width = width;
+        self.term_height = height;
+        if !was_small_context && self.is_small_window_context() {
+            // 普通尺寸进入小窗口上下文（含“双轴过小”）：立即关闭弹窗与侧边栏。
+            self.close_panels_for_small_window();
+        }
+        self.recompute_small_window_mode();
+    }
+
+    pub fn sync_terminal_size(&mut self) {
+        if let Ok((width, height)) = crossterm::terminal::size() {
+            self.set_terminal_size(width, height);
+        }
+    }
+
+    fn compute_small_window_mode(&self) -> Option<SmallWindowMode> {
+        if !self.is_small_window_context() {
+            return None;
+        }
+
+        let width = self.term_width;
+        let height = self.term_height;
+        if height >= SMALL_WINDOW_MIN_HEIGHT && width < SMALL_WINDOW_MIN_WIDTH {
+            Some(SmallWindowMode::Narrow)
+        } else if width >= SMALL_WINDOW_MIN_WIDTH
+            && (FLAT_SMALL_HEIGHT..SMALL_WINDOW_MIN_HEIGHT).contains(&height)
+        {
+            Some(SmallWindowMode::Flat)
+        } else {
+            // 高度不足扁窗下限，或宽高同时过小：仍显示“终端窗口过小”。
+            None
+        }
+    }
+
+    fn recompute_small_window_mode(&mut self) {
+        let mode = self.compute_small_window_mode();
+        if mode == self.small_window_mode {
+            if mode == Some(SmallWindowMode::Flat) {
+                let width = self.term_width.max(1) as f32;
+                let current = self.flat_switch_offset().min(width);
+                if let Some(anim) = &mut self.flat_switch_anim {
+                    anim.to_x = match self.flat_panel {
+                        FlatPanel::Player => 0.0,
+                        FlatPanel::Lyrics => width,
+                    };
+                    anim.from_x = current;
+                }
+                let exact = self.term_height == FLAT_SMALL_HEIGHT;
+                if exact && !self.flat_exact_height {
+                    // 从“上方有歌词”的扁窗缩到只剩播放栏高度时，重新以播放栏为默认面板。
+                    self.flat_panel = FlatPanel::Player;
+                    self.flat_switch_anim = None;
+                }
+                self.flat_exact_height = exact;
+            }
+            return;
+        }
+
+        self.small_window_mode = mode;
+        match mode {
+            Some(SmallWindowMode::Flat) => {
+                // 每次进入扁窗都从缩略播放栏开始。
+                self.flat_panel = FlatPanel::Player;
+                self.flat_switch_anim = None;
+                self.flat_exact_height = self.term_height == FLAT_SMALL_HEIGHT;
+                self.close_panels_for_small_window();
+            }
+            Some(SmallWindowMode::Narrow) => {
+                self.flat_exact_height = false;
+                self.flat_switch_anim = None;
+                self.vu_left_lufs = VU_LUFS_FLOOR;
+                self.vu_right_lufs = VU_LUFS_FLOOR;
+                self.vu_animating = false;
+                self.vu_last_tick_at = None;
+                self.close_panels_for_small_window();
+            }
+            None => {
+                // 离开小窗口回到普通页面：清掉小窗口阶段可能残留的命中区域。
+                self.flat_exact_height = false;
+                self.flat_switch_anim = None;
+                self.clear_content_hits();
+                self.clear_player_bar_hits();
+            }
+        }
+
+        // 宽高同时过小、只显示“终端窗口过小”时没有独立模式，
+        // 但同样属于小窗口上下文：关闭已打开的弹窗与侧边栏。
+        if mode.is_none() && self.is_small_window_context() {
+            self.close_panels_for_small_window();
+        }
+    }
+
+    /// 进入小窗口时关闭设置/搜索等弹窗与侧边栏，并清理隐藏页面的命中区域。
+    fn close_panels_for_small_window(&mut self) {
+        if self.overlay.is_some() {
+            self.close_overlay();
+        }
+        self.home_sidebar.expanded = false;
+        self.home_sidebar.anim_progress = 0.0;
+        self.home_sidebar.anim_from = 0.0;
+        self.home_sidebar.anim_started_at = None;
+        self.clear_content_hits();
+        self.clear_player_bar_hits();
+    }
+
+    /// 扁窗 5 行视口下两个面板的水平偏移（0=播放栏，width=歌词栏）。
+    pub fn flat_switch_offset(&self) -> f32 {
+        let width = self.term_width.max(1) as f32;
+        if let Some(anim) = &self.flat_switch_anim {
+            let elapsed = anim.started_at.elapsed().as_secs_f32();
+            let t = if elapsed >= FLAT_SWITCH_ANIM_DURATION.as_secs_f32() {
+                1.0
+            } else {
+                elapsed / FLAT_SWITCH_ANIM_DURATION.as_secs_f32()
+            };
+            let eased = cubic_bezier_y(t, 0.0, 0.7);
+            return anim.from_x + (anim.to_x - anim.from_x) * eased;
+        }
+        match self.flat_panel {
+            FlatPanel::Player => 0.0,
+            FlatPanel::Lyrics => width,
+        }
+    }
+
+    pub fn flat_switch_animating(&self) -> bool {
+        self.flat_switch_anim.is_some()
+    }
+
+    pub fn toggle_flat_panel(&mut self) {
+        if self.small_window_mode != Some(SmallWindowMode::Flat)
+            || self.term_height != FLAT_SMALL_HEIGHT
+        {
+            return;
+        }
+
+        let width = self.term_width.max(1) as f32;
+        let current = self.flat_switch_offset().clamp(0.0, width);
+        let visually_lyrics = current >= width * 0.5;
+        self.flat_panel = if visually_lyrics {
+            FlatPanel::Player
+        } else {
+            FlatPanel::Lyrics
+        };
+        let to_x = match self.flat_panel {
+            FlatPanel::Player => 0.0,
+            FlatPanel::Lyrics => width,
+        };
+        self.flat_switch_anim = Some(FlatSwitchAnim {
+            from_x: current,
+            to_x,
+            started_at: Instant::now(),
+        });
+    }
+
+    fn tick_flat_switch(&mut self) {
+        let Some(anim) = &mut self.flat_switch_anim else {
+            return;
+        };
+        let width = self.term_width.max(1) as f32;
+        let target = match self.flat_panel {
+            FlatPanel::Player => 0.0,
+            FlatPanel::Lyrics => width,
+        };
+        anim.to_x = target;
+        if (anim.from_x - target).abs() < 0.5 {
+            self.flat_switch_anim = None;
+            return;
+        }
+        if anim.started_at.elapsed() >= FLAT_SWITCH_ANIM_DURATION {
+            self.flat_switch_anim = None;
+        }
+    }
+
+    fn tick_vu_meter(&mut self, now: Instant) {
+        if self.small_window_mode != Some(SmallWindowMode::Narrow) {
+            self.vu_animating = false;
+            self.vu_last_tick_at = None;
+            return;
+        }
+
+        let reading = self.audio_player.lufs_meter().latest();
+        let dt = self
+            .vu_last_tick_at
+            .map(|at| now.saturating_duration_since(at).as_secs_f32().min(0.25))
+            .unwrap_or(0.0);
+        self.vu_last_tick_at = Some(now);
+
+        let stale = self.vu_last_meter_generation == reading.generation
+            && self.playback_state != PlaybackRuntimeState::Playing;
+        self.vu_last_meter_generation = reading.generation;
+
+        let target_left = if stale || self.now_playing.is_none() {
+            VU_LUFS_FLOOR
+        } else {
+            mean_square_to_lufs(reading.left_mean_square)
+        };
+        let target_right = if stale || self.now_playing.is_none() {
+            VU_LUFS_FLOOR
+        } else {
+            mean_square_to_lufs(reading.right_mean_square)
+        };
+
+        let (left, left_moving) = smooth_lufs_level(self.vu_left_lufs, target_left, dt);
+        let (right, right_moving) = smooth_lufs_level(self.vu_right_lufs, target_right, dt);
+        self.vu_left_lufs = left;
+        self.vu_right_lufs = right;
+        self.vu_animating = left_moving || right_moving;
+    }
+
     pub fn main_spectrum_braille(&mut self) -> String {
         let mut out = String::with_capacity(10);
         for i in 0..10 {
@@ -2330,6 +3168,7 @@ impl App {
 
     pub fn sync_on_change(&mut self) {
         self.sync_cava();
+        self.sync_terminal_size();
     }
 
     fn sync_cava(&mut self) {
@@ -2379,6 +3218,8 @@ impl App {
         self.tick_lyric_fetch();
         self.apply_mpris_control_events().await;
         self.sync_mpris_exposure();
+        // 全屏页不跑宿主主循环，收藏的派发/收敛要在这里推进。
+        self.tick_like_sync();
     }
 
     async fn apply_mpris_control_events(&mut self) {
@@ -2573,7 +3414,7 @@ impl App {
     }
 
     pub async fn fullscreen_toggle_like(&mut self) {
-        self.toggle_like_hotkey().await;
+        self.toggle_like_hotkey();
     }
 
     async fn handle_overlay_key(&mut self, overlay: Overlay, key: KeyEvent) {
@@ -2581,6 +3422,7 @@ impl App {
             Overlay::Settings => self.handle_settings_root_key(key).await,
             Overlay::SettingsPlayback => self.handle_settings_playback_key(key),
             Overlay::SettingsKeybinds => self.handle_settings_keybinds_key(key),
+            Overlay::SettingsLyrics => self.handle_settings_lyrics_key(key),
             Overlay::SettingsAbout => self.handle_settings_about_key(key),
             Overlay::SearchBox => self.handle_search_box_key(key).await,
         }
@@ -2600,6 +3442,7 @@ impl App {
                 | KeybindAction::FullscreenToggleMode
                 | KeybindAction::FullscreenEq
                 | KeybindAction::FullscreenEqReset
+                | KeybindAction::SmallWindowToggle
         ) {
             return false;
         }
@@ -2627,7 +3470,11 @@ impl App {
         match action {
             KeybindAction::SearchBox => self.open_search_box(),
             KeybindAction::Fullscreen => {
-                self.launch_fullscreen_requested = true;
+                // 全屏页普通布局最小宽度为 50；更窄的窗口直接忽略打开全屏，
+                // 避免“进入全屏后立即因过小退出”。
+                if self.term_width >= FULLSCREEN_MIN_WIDTH {
+                    self.launch_fullscreen_requested = true;
+                }
             }
             KeybindAction::Settings => self.open_settings(),
             KeybindAction::Sidebar => self.toggle_home_sidebar().await,
@@ -2647,7 +3494,8 @@ impl App {
             KeybindAction::FullscreenEq => {}
             KeybindAction::FullscreenEqReset => {}
             KeybindAction::ToggleLikeFullscreen => {}
-            KeybindAction::ToggleLikeCollapsed => self.toggle_like_hotkey().await,
+            KeybindAction::ToggleLikeCollapsed => self.toggle_like_hotkey(),
+            KeybindAction::SmallWindowToggle => {}
         }
     }
 
@@ -2764,7 +3612,7 @@ impl App {
 
         if self.is_liked_playlist(&playlist_id, Some(&title)) {
             let _ = self.refresh_liked_song_cache().await;
-            self.refresh_now_playing_like_state().await;
+            self.refresh_now_playing_like_state();
         }
 
         self.home.status_line = format!("{} {}", self.lang_text("正在加载", "Loading"), title);
@@ -2810,6 +3658,7 @@ impl App {
             KeybindAction::FullscreenEqReset,
             KeybindAction::ToggleLikeFullscreen,
             KeybindAction::ToggleLikeCollapsed,
+            KeybindAction::SmallWindowToggle,
         ];
 
         actions
@@ -2840,6 +3689,7 @@ impl App {
             KeybindAction::FullscreenEqReset => &self.config.keybind_fullscreen_eq_reset,
             KeybindAction::ToggleLikeFullscreen => &self.config.keybind_toggle_like_fullscreen,
             KeybindAction::ToggleLikeCollapsed => &self.config.keybind_toggle_like_collapsed,
+            KeybindAction::SmallWindowToggle => &self.config.keybind_small_window_toggle,
         }
     }
 
@@ -2864,6 +3714,7 @@ impl App {
             16 => Some(&mut self.config.keybind_toggle_like_fullscreen),
             17 => Some(&mut self.config.keybind_toggle_mode),
             18 => Some(&mut self.config.keybind_toggle_like_collapsed),
+            19 => Some(&mut self.config.keybind_small_window_toggle),
             _ => None,
         }
     }
@@ -2889,6 +3740,7 @@ impl App {
             16 => Some(self.config.keybind_toggle_like_fullscreen.as_str()),
             17 => Some(self.config.keybind_toggle_mode.as_str()),
             18 => Some(self.config.keybind_toggle_like_collapsed.as_str()),
+            19 => Some(self.config.keybind_small_window_toggle.as_str()),
             _ => None,
         }
     }
@@ -2933,6 +3785,7 @@ impl App {
             16 => self.lang_text("全屏收藏/取消收藏", "Fullscreen Like/Unlike"),
             17 => self.lang_text("折叠栏模式切换", "Collapsed Mode Switch"),
             18 => self.lang_text("折叠栏收藏/取消收藏", "Collapsed Like/Unlike"),
+            19 => self.lang_text("小窗口切换显示", "Small Window Switch"),
             _ => self.lang_text("未知", "Unknown"),
         }
     }
@@ -2961,6 +3814,7 @@ impl App {
             DEFAULT_KEYBIND_TOGGLE_LIKE_FULLSCREEN.to_string();
         self.config.keybind_toggle_like_collapsed =
             DEFAULT_KEYBIND_TOGGLE_LIKE_COLLAPSED.to_string();
+        self.config.keybind_small_window_toggle = DEFAULT_KEYBIND_SMALL_WINDOW_TOGGLE.to_string();
     }
 
     pub fn keybind_label_for_index(&self, index: usize) -> String {
@@ -2984,6 +3838,7 @@ impl App {
             16 => KeybindAction::ToggleLikeFullscreen,
             17 => KeybindAction::ToggleMode,
             18 => KeybindAction::ToggleLikeCollapsed,
+            19 => KeybindAction::SmallWindowToggle,
             _ => KeybindAction::SearchBox,
         });
         format!("{}: {}", self.keybind_name_for_index(index), value)
@@ -3128,41 +3983,36 @@ impl App {
         }
     }
 
-    async fn refresh_now_playing_like_state(&mut self) {
-        let Some(song_id) = self.now_playing.as_ref().map(|track| track.song_id.clone()) else {
+    /// 切歌后刷新收藏态：先用本地缓存（含未决意图）立即显示，服务端确认
+    /// 交给 `tick_like_sync` 收敛——不再阻塞事件循环。
+    fn refresh_now_playing_like_state(&mut self) {
+        let Some(song_id) = self.current_song_id() else {
             self.now_playing_liked = false;
             return;
         };
 
-        self.now_playing_liked = self.liked_song_ids.contains(&song_id);
+        self.sync_like_display(&song_id);
 
-        let Ok(song_id_num) = song_id.parse::<u64>() else {
-            return;
-        };
+        let fut = song_like_check_request(self.api.clone(), song_id.clone());
+        let fut: LikeVerifyTask = Box::pin(async move { Some(fut.await) });
+        self.like_machine.begin_verify(song_id, shot_and_share(fut));
+    }
 
-        let ids_json = format!("[{song_id_num}]");
-        let Ok(response) = self.api.song_like_check(&ids_json).await else {
-            return;
-        };
+    /// 当前曲目 id。
+    fn current_song_id(&self) -> Option<String> {
+        self.now_playing.as_ref().map(|track| track.song_id.clone())
+    }
 
-        if response_code(&response) != 200 {
-            return;
-        }
-
-        let Some(liked) = parse_song_like_check_result(&response.body, &song_id) else {
-            return;
-        };
-
-        self.now_playing_liked = liked;
-        if liked {
-            self.liked_song_ids.insert(song_id);
-        } else {
-            self.liked_song_ids.remove(&song_id);
+    /// 把某首歌的显示值同步到状态机（未决意图优先，其次已确认值）。
+    fn sync_like_display(&mut self, song_id: &str) {
+        if self.current_song_id().as_deref() == Some(song_id) {
+            self.now_playing_liked = self.like_machine.displayed(song_id);
         }
     }
 
-    async fn toggle_like_hotkey(&mut self) {
-        let Some(song_id) = self.now_playing.as_ref().map(|track| track.song_id.clone()) else {
+    /// 收藏切换：立刻按期望值改界面（乐观更新），请求由 `tick_like_sync` 派发。
+    fn toggle_like_hotkey(&mut self) {
+        let Some(song_id) = self.current_song_id() else {
             self.set_runtime_status(self.lang_text(
                 "当前没有可收藏的歌曲",
                 "No song is available for like/unlike",
@@ -3171,43 +4021,83 @@ impl App {
         };
 
         let target = !self.now_playing_liked;
-        match self.api.like_song(&song_id, target).await {
-            Ok(response) => {
-                let code = response
-                    .body
-                    .get("code")
-                    .and_then(|value| value.as_i64())
-                    .unwrap_or(response.status);
-                if code == 200 {
-                    if target {
-                        self.liked_song_ids.insert(song_id.clone());
-                    } else {
-                        self.liked_song_ids.remove(&song_id);
-                    }
-                    self.now_playing_liked = self.liked_song_ids.contains(&song_id);
-                    self.set_runtime_status(if target {
-                        self.lang_text("已收藏当前歌曲", "Liked current song")
-                            .to_string()
-                    } else {
-                        self.lang_text("已取消收藏当前歌曲", "Unliked current song")
-                            .to_string()
-                    });
+        self.like_machine.set_intent(song_id, target);
+        self.now_playing_liked = target;
+    }
+
+    /// 每帧收敛收藏状态：先搬在途结果，再按需补发请求。
+    fn tick_like_sync(&mut self) {
+        self.pump_like_toggle();
+        self.pump_like_verify();
+        self.dispatch_like_toggle();
+    }
+
+    fn pump_like_toggle(&mut self) {
+        let Some(pending) = self.like_machine.toggle.as_ref() else {
+            return;
+        };
+        let Some(result) = peek_shared(&pending.fut).cloned() else {
+            return;
+        };
+
+        let song_id = pending.song_id.clone();
+        let target = pending.target;
+        self.like_machine.toggle = None;
+
+        match self.like_machine.on_toggle_result(&song_id, target, result) {
+            ToggleOutcome::Settled { liked } => {
+                self.sync_like_display(&song_id);
+                self.set_runtime_status(if liked {
+                    self.lang_text("已收藏当前歌曲", "Liked current song")
+                        .to_string()
                 } else {
-                    self.set_runtime_status(format!(
-                        "{}: {}",
-                        self.lang_text("收藏操作失败", "Like operation failed"),
-                        code
-                    ));
-                }
+                    self.lang_text("已取消收藏当前歌曲", "Unliked current song")
+                        .to_string()
+                });
             }
-            Err(err) => {
+            ToggleOutcome::Superseded => self.sync_like_display(&song_id),
+            ToggleOutcome::Failed { message } => {
+                // 意图已被状态机放弃，显示回滚到已确认值。
+                self.sync_like_display(&song_id);
                 self.set_runtime_status(format!(
                     "{}: {}",
                     self.lang_text("收藏操作失败", "Like operation failed"),
-                    err
+                    message
                 ));
             }
+            ToggleOutcome::StaleFailure => {}
         }
+    }
+
+    fn pump_like_verify(&mut self) {
+        let Some(pending) = self.like_machine.verify.as_ref() else {
+            return;
+        };
+        let Some(result) = peek_shared(&pending.fut).cloned() else {
+            return;
+        };
+
+        let song_id = pending.song_id.clone();
+        self.like_machine.verify = None;
+
+        if self.like_machine.on_verify_result(&song_id, result) {
+            self.sync_like_display(&song_id);
+        }
+    }
+
+    fn dispatch_like_toggle(&mut self) {
+        if let Some(song_id) = self.like_machine.drop_satisfied_intent() {
+            self.sync_like_display(&song_id);
+        }
+
+        let Some((song_id, target)) = self.like_machine.pending_dispatch() else {
+            return;
+        };
+
+        let fut = like_song_request(self.api.clone(), song_id.clone(), target);
+        let fut: LikeToggleTask = Box::pin(async move { Some(fut.await) });
+        self.like_machine
+            .begin_toggle(song_id, target, shot_and_share(fut));
     }
 
     async fn tick_audio(&mut self) {
@@ -3292,7 +4182,7 @@ impl App {
         }
         self.trim_non_current_cover_memory(index);
         self.now_playing = Some(enriched.clone());
-        self.refresh_now_playing_like_state().await;
+        self.refresh_now_playing_like_state();
         self.playback_index = Some(index);
         self.cover_fetch_inflight_url = None;
         self.cover_fetch_last_attempt_at = None;
@@ -3738,7 +4628,8 @@ impl App {
             PlaylistTrackKind::Song => {
                 let (queue, target) = self.build_queue_from_playlist();
                 let source_cover = self.playlist.cover.url.clone();
-                self.replace_queue_and_play(queue, target, source_cover).await;
+                self.replace_queue_and_play(queue, target, source_cover)
+                    .await;
             }
             PlaylistTrackKind::Album | PlaylistTrackKind::Ep | PlaylistTrackKind::Single => {
                 self.open_focused_playlist_album().await;
@@ -4173,6 +5064,183 @@ impl App {
         self.search_box_cursor = char_index_for_display_column(&self.search_box_input, rel);
     }
 
+    /// 设置弹窗内的鼠标点击：单击聚焦该行，400ms 内再点同一行等同 Enter。
+    ///
+    /// 弹窗盖住整页，未命中行的点击由调用方直接丢弃（不穿透到底层页面）。
+    async fn handle_settings_modal_click(&mut self, overlay: Overlay, col: u16, row: u16) {
+        let Some((_, index)) = self
+            .settings_item_hits
+            .iter()
+            .find(|(rect, _)| rect.contains(col, row))
+            .copied()
+        else {
+            self.last_settings_click = None;
+            return;
+        };
+
+        match overlay {
+            Overlay::Settings => {
+                self.settings_selected = index;
+                if self.is_double_settings_click(overlay, index) {
+                    self.activate_settings_root_item().await;
+                }
+            }
+            Overlay::SettingsPlayback => {
+                self.settings_playback_selected = index;
+                if self.is_double_settings_click(overlay, index) {
+                    self.apply_settings_playback_delta(1);
+                }
+            }
+            Overlay::SettingsLyrics => {
+                // 这三行都是开关：左键直接改值（不用双击）。
+                self.settings_lyrics_selected = index;
+                self.apply_settings_lyrics_delta(1);
+            }
+            Overlay::SettingsKeybinds => {
+                self.settings_keybind_selected = index;
+                if self.is_double_settings_click(overlay, index) {
+                    self.begin_keybind_rebind(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// 设置弹窗滚轮：上下移动选中行（与 Up/Down 同效）。
+    fn scroll_settings_modal(&mut self, forward: bool) {
+        let step = |selected: &mut usize, count: usize| {
+            if count == 0 {
+                return;
+            }
+            *selected = if forward {
+                (*selected + 1) % count
+            } else if *selected == 0 {
+                count - 1
+            } else {
+                *selected - 1
+            };
+        };
+
+        match self.overlay {
+            Some(Overlay::Settings) => step(&mut self.settings_selected, SETTINGS_ROOT_ITEMS),
+            Some(Overlay::SettingsPlayback) => step(
+                &mut self.settings_playback_selected,
+                SETTINGS_PLAYBACK_ITEMS,
+            ),
+            Some(Overlay::SettingsLyrics) => {
+                step(&mut self.settings_lyrics_selected, SETTINGS_LYRICS_ITEMS)
+            }
+            Some(Overlay::SettingsKeybinds) => {
+                step(&mut self.settings_keybind_selected, SETTINGS_KEYBIND_ITEMS)
+            }
+            _ => {}
+        }
+    }
+
+    fn is_double_settings_click(&mut self, overlay: Overlay, index: usize) -> bool {
+        let now = Instant::now();
+        let is_double = self
+            .last_settings_click
+            .map(|(at, o, i)| {
+                o == overlay
+                    && i == index
+                    && now.duration_since(at) <= Duration::from_millis(CONTENT_DOUBLE_CLICK_MS)
+            })
+            .unwrap_or(false);
+        self.last_settings_click = Some((now, overlay, index));
+        is_double
+    }
+
+    /// 设置根页选中项的执行（键盘 Enter 与双击共用）。
+    async fn activate_settings_root_item(&mut self) {
+        match self.settings_selected {
+            0..=3 => self.apply_settings_root_delta(1).await,
+            4 => {
+                self.settings_playback_selected = 0;
+                self.overlay = Some(Overlay::SettingsPlayback);
+            }
+            5 => self.open_keybind_settings(),
+            6 => {
+                self.settings_lyrics_selected = 0;
+                self.overlay = Some(Overlay::SettingsLyrics);
+            }
+            7..=9 => self.apply_settings_root_delta(1).await,
+            10 => self.logout_to_login().await,
+            11 => {
+                self.overlay = Some(Overlay::SettingsAbout);
+            }
+            _ => {}
+        }
+    }
+
+    /// 开始重绑某条快捷键（键盘 Enter 与双击共用）。
+    fn begin_keybind_rebind(&mut self, index: usize) {
+        self.settings_keybind_rebinding = Some(index);
+        self.set_runtime_status(format!(
+            "{} [{}]，{}",
+            self.lang_text("正在重绑", "Rebinding"),
+            self.keybind_name_for_index(index),
+            self.lang_text(
+                "请按新快捷键（Esc 取消）",
+                "press a new shortcut (Esc to cancel)"
+            )
+        ));
+    }
+
+    /// “歌词浮窗”子页：三行开关。吸附行只在拖动开启时可改（关闭时灰置）。
+    fn apply_settings_lyrics_delta(&mut self, delta: i32) {
+        if delta == 0 {
+            return;
+        }
+
+        match self.settings_lyrics_selected {
+            0 => {
+                self.config.page_lyrics = !self.config.page_lyrics;
+                let _ = self.config.save();
+            }
+            1 => {
+                self.config.page_lyrics_drag = !self.config.page_lyrics_drag;
+                let _ = self.config.save();
+            }
+            2 => {
+                // 拖动关闭时吸附无意义：灰置且不可改。
+                if !self.config.page_lyrics_drag {
+                    return;
+                }
+                self.config.page_lyrics_snap = !self.config.page_lyrics_snap;
+                let _ = self.config.save();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_settings_lyrics_key(&mut self, key: KeyEvent) {
+        match key.code {
+            // 三行都是开关（值行）：与播放设置页同构，Left/Right 都用来改值，
+            // 返回上一级只走 Esc。
+            KeyCode::Esc => self.overlay = Some(Overlay::Settings),
+            KeyCode::Char('t') | KeyCode::Char('T') => {
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                    self.close_overlay();
+                }
+            }
+            KeyCode::Left => self.apply_settings_lyrics_delta(-1),
+            KeyCode::Right | KeyCode::Enter => self.apply_settings_lyrics_delta(1),
+            KeyCode::Up | KeyCode::BackTab => {
+                if self.settings_lyrics_selected == 0 {
+                    self.settings_lyrics_selected = SETTINGS_LYRICS_ITEMS - 1;
+                } else {
+                    self.settings_lyrics_selected -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                self.settings_lyrics_selected =
+                    (self.settings_lyrics_selected + 1) % SETTINGS_LYRICS_ITEMS;
+            }
+            _ => {}
+        }
+    }
+
     async fn handle_settings_root_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => self.close_overlay(),
@@ -4193,23 +5261,7 @@ impl App {
             }
             KeyCode::Left => self.apply_settings_root_delta(-1).await,
             KeyCode::Right => self.apply_settings_root_delta(1).await,
-            KeyCode::Enter => match self.settings_selected {
-                0..=3 => self.apply_settings_root_delta(1).await,
-                4 => {
-                    self.settings_playback_selected = 0;
-                    self.overlay = Some(Overlay::SettingsPlayback);
-                }
-                5 => {
-                    self.open_keybind_settings();
-                }
-                6 => self.apply_settings_root_delta(1).await,
-                7 => self.apply_settings_root_delta(1).await,
-                8 => self.logout_to_login().await,
-                9 => {
-                    self.overlay = Some(Overlay::SettingsAbout);
-                }
-                _ => {}
-            },
+            KeyCode::Enter => self.activate_settings_root_item().await,
             _ => {}
         }
     }
@@ -4335,16 +5387,7 @@ impl App {
             }
             KeyCode::Enter => {
                 let idx = self.settings_keybind_selected;
-                self.settings_keybind_rebinding = Some(idx);
-                self.set_runtime_status(format!(
-                    "{} [{}]，{}",
-                    self.lang_text("正在重绑", "Rebinding"),
-                    self.keybind_name_for_index(idx),
-                    self.lang_text(
-                        "请按新快捷键（Esc 取消）",
-                        "press a new shortcut (Esc to cancel)"
-                    )
-                ));
+                self.begin_keybind_rebind(idx);
             }
             _ => {}
         }
@@ -4450,12 +5493,26 @@ impl App {
                 }
             }
             6 => {
+                // “歌词浮窗...”是可进入项：左右键不改变配置（与播放设置/按键绑定一致）
+            }
+            7 => {
                 if delta != 0 {
                     self.config.show_hints = !self.config.show_hints;
                     let _ = self.config.save();
                 }
             }
-            7 => {
+            8 => {
+                if delta != 0 {
+                    let was_small_context = self.is_small_window_context();
+                    self.config.small_window_display = !self.config.small_window_display;
+                    let _ = self.config.save();
+                    if !was_small_context && self.is_small_window_context() {
+                        self.close_panels_for_small_window();
+                    }
+                    self.sync_terminal_size();
+                }
+            }
+            9 => {
                 if delta != 0 {
                     self.config.home_more_recommend = !self.config.home_more_recommend;
                     let _ = self.config.save();
@@ -4511,17 +5568,13 @@ impl App {
                 let _ = self.config.save();
             }
             6 => {
-                self.config.page_lyrics = !self.config.page_lyrics;
-                let _ = self.config.save();
-            }
-            7 => {
                 let next = self
                     .config
                     .audio_quality
                     .cycle(delta, self.vip_audio_unlocked);
                 self.set_audio_quality(next);
             }
-            8 => {
+            7 => {
                 self.config.playback_memory = !self.config.playback_memory;
                 let _ = self.config.save();
                 if self.config.playback_memory {
@@ -4674,7 +5727,9 @@ impl App {
     fn tick_search_box_animation(&mut self) {
         if matches!(self.overlay, Some(Overlay::SearchBox)) {
             // time-based：动画时长与驱动帧率解耦，与 startup_loading 同风格
-            let started_at = self.search_box_anim_started_at.get_or_insert_with(Instant::now);
+            let started_at = self
+                .search_box_anim_started_at
+                .get_or_insert_with(Instant::now);
             let elapsed = started_at.elapsed();
             if elapsed >= SEARCH_BOX_ANIM_DURATION {
                 self.search_box_anim_height = SEARCH_BOX_TARGET_HEIGHT;
@@ -4769,13 +5824,14 @@ impl App {
         self.home_sidebar.anim_started_at = Some(Instant::now());
     }
 
-    fn begin_startup_loading(&mut self) {
+    fn begin_startup_loading(&mut self, target: Page) {
         self.page = Page::Loading;
         self.overlay = None;
         self.startup_loading_progress = 0.0;
         self.startup_loading_started_at = Some(Instant::now());
         self.startup_loading_complete_started_at = None;
         self.startup_loading_complete_requested = false;
+        self.startup_loading_target = target;
     }
 
     fn finish_startup_loading(&mut self) {
@@ -4796,15 +5852,21 @@ impl App {
         };
 
         let elapsed = started_at.elapsed().as_secs_f32();
-        self.startup_loading_progress = startup_loading_progress_at(
-            elapsed,
-            self.startup_loading_complete_started_at
-                .map(|completed_at| completed_at.elapsed().as_secs_f32()),
-            self.startup_loading_complete_requested,
-        );
+        self.startup_loading_progress = self.startup_loading_progress();
 
-        if self.startup_loading_complete_requested && elapsed >= STARTUP_LOADING_MIN_VISIBLE_SECS {
-            self.page = Page::Home;
+        // 让位条件：数据齐了、进度条收尾 ramp 跑满、且满足最短可见时长。
+        // 少了 ramp 这一条，进度条会停在一半就消失。
+        let ramp_done = self
+            .startup_loading_complete_started_at
+            .map(|completed_at| {
+                completed_at.elapsed().as_secs_f32() >= STARTUP_LOADING_COMPLETE_RAMP_SECS
+            })
+            .unwrap_or(false);
+        if self.startup_loading_complete_requested
+            && ramp_done
+            && elapsed >= STARTUP_LOADING_MIN_VISIBLE_SECS
+        {
+            self.page = self.startup_loading_target;
             self.startup_loading_progress = 0.0;
             self.startup_loading_started_at = None;
             self.startup_loading_complete_started_at = None;
@@ -4812,21 +5874,28 @@ impl App {
         }
     }
 
+    /// 加载页进度：后台初始化完成的步数 + 当前步的时间缓动。
+    fn startup_loading_progress(&self) -> f32 {
+        startup_loading_progress(
+            self.startup.step_done(),
+            self.startup.step_total(),
+            self.startup.step_elapsed(),
+            self.startup_loading_complete_started_at
+                .map(|completed_at| completed_at.elapsed().as_secs_f32()),
+            self.startup_loading_complete_requested,
+        )
+    }
+
     pub fn startup_loading_progress_for_width(&self, _bar_width: u16) -> f32 {
         if self.page != Page::Loading {
             return 0.0;
         }
 
-        let Some(started_at) = self.startup_loading_started_at else {
+        if self.startup_loading_started_at.is_none() {
             return 0.0;
-        };
+        }
 
-        startup_loading_progress_at(
-            started_at.elapsed().as_secs_f32(),
-            self.startup_loading_complete_started_at
-                .map(|completed_at| completed_at.elapsed().as_secs_f32()),
-            self.startup_loading_complete_requested,
-        )
+        self.startup_loading_progress()
     }
 
     fn is_double_content_click(&mut self, page: Page, index: usize) -> bool {
@@ -4969,6 +6038,8 @@ impl App {
         self.overlay = None;
         self.search_box_anim_height = 0;
         self.search_box_anim_started_at = None;
+        self.last_settings_click = None;
+        self.clear_settings_item_hits();
     }
 
     async fn execute_search_from_box(&mut self) {
@@ -5009,11 +6080,16 @@ impl App {
             language: self.config.language,
             graphics_protocol: self.config.graphics_protocol,
             page_lyrics: self.config.page_lyrics,
+            page_lyrics_drag: self.config.page_lyrics_drag,
+            page_lyrics_snap: self.config.page_lyrics_snap,
+            page_lyrics_pos_x: self.config.page_lyrics_pos_x,
+            page_lyrics_pos_y: self.config.page_lyrics_pos_y,
             audio_quality: self.config.audio_quality,
             eq_bands_db: self.config.eq_bands_db,
             playback_memory: self.config.playback_memory,
             vip_audio_unlocked: self.vip_audio_unlocked,
             show_hints: self.config.show_hints,
+            small_window_display: self.config.small_window_display,
             home_more_recommend: self.config.home_more_recommend,
             visualize: self.config.visualize,
             super_smooth_bar: self.config.super_smooth_bar,
@@ -5061,6 +6137,28 @@ impl App {
             changed = true;
         }
 
+        if self.config.page_lyrics_drag != sync.page_lyrics_drag {
+            self.config.page_lyrics_drag = sync.page_lyrics_drag;
+            changed = true;
+        }
+
+        if self.config.page_lyrics_snap != sync.page_lyrics_snap {
+            self.config.page_lyrics_snap = sync.page_lyrics_snap;
+            changed = true;
+        }
+
+        // 全屏页也可能改到浮窗位置（拖拽时由宿主写、这里只做兜底同步）。
+        let pos_x = sync.page_lyrics_pos_x.clamp(0.0, 1.0);
+        if (self.config.page_lyrics_pos_x - pos_x).abs() > f32::EPSILON {
+            self.config.page_lyrics_pos_x = pos_x;
+            changed = true;
+        }
+        let pos_y = sync.page_lyrics_pos_y.clamp(0.0, 1.0);
+        if (self.config.page_lyrics_pos_y - pos_y).abs() > f32::EPSILON {
+            self.config.page_lyrics_pos_y = pos_y;
+            changed = true;
+        }
+
         if self.vip_audio_unlocked != sync.vip_audio_unlocked {
             self.vip_audio_unlocked = sync.vip_audio_unlocked;
             changed = true;
@@ -5094,6 +6192,11 @@ impl App {
 
         if self.config.show_hints != sync.show_hints {
             self.config.show_hints = sync.show_hints;
+            changed = true;
+        }
+
+        if self.config.small_window_display != sync.small_window_display {
+            self.config.small_window_display = sync.small_window_display;
             changed = true;
         }
 
@@ -5453,23 +6556,15 @@ impl App {
     }
 
     fn lang_text<'a>(&self, zh: &'a str, en: &'a str) -> &'a str {
-        match self.config.language {
-            Language::Zh => zh,
-            Language::En => en,
-        }
+        lang_text(self.config.language, zh, en)
     }
 
     async fn refresh_vip_audio_access(&mut self) {
-        let mut unlocked = false;
+        let unlocked = fetch_vip_unlocked(&mut self.api).await;
+        self.apply_vip_audio_access(unlocked);
+    }
 
-        if let Ok(response) = self.api.vip_info_v2().await {
-            unlocked = response_indicates_vip(&response);
-        }
-
-        if !unlocked && let Ok(response) = self.api.vip_info().await {
-            unlocked = response_indicates_vip(&response);
-        }
-
+    fn apply_vip_audio_access(&mut self, unlocked: bool) {
         self.vip_audio_unlocked = unlocked;
         self.set_audio_quality(self.config.audio_quality);
     }
@@ -5549,7 +6644,7 @@ impl App {
         self.audio_player.stop();
         self.now_playing = None;
         self.now_playing_liked = false;
-        self.liked_song_ids.clear();
+        self.like_machine.clear();
         self.playback_queue.clear();
         self.playback_index = None;
         self.playback_state = PlaybackRuntimeState::Stopped;
@@ -5615,37 +6710,21 @@ impl App {
 
     async fn refresh_qr_login(&mut self) {
         self.qr_last_poll_at = None;
-        let key_resp = match self.api.login_qr_key().await {
-            Ok(response) => response,
-            Err(err) => {
-                self.login.status_line = format!("二维码 key 获取失败: {}", err);
-                return;
-            }
-        };
 
-        let key = extract_qr_key(&key_resp);
-
-        if key.is_empty() {
-            self.login.status_line = "二维码 key 为空，请重试".to_string();
-            return;
+        match fetch_qr_login_code(&mut self.api, self.config.language).await {
+            Ok(code) => self.apply_qr_login_code(code),
+            Err(err) => self.login.status_line = format!("{err}"),
         }
+    }
 
-        let qr_resp = match self.api.login_qr_create(&key).await {
-            Ok(response) => response,
-            Err(err) => {
-                self.login.status_line = format!("二维码创建失败: {}", err);
-                return;
-            }
-        };
-
-        let qr_url = extract_qr_url(&qr_resp);
-
-        self.login.qr_key = key;
-        self.login.qr_url = qr_url.clone();
-        self.login.status_line = if qr_url.is_empty() {
+    /// 应用一个刚拿到的登录二维码（手动刷新与启动初始化共用）。
+    fn apply_qr_login_code(&mut self, code: QrLoginCode) {
+        self.login.qr_key = code.key;
+        self.login.qr_url = code.url.clone();
+        self.login.status_line = if code.url.is_empty() {
             "二维码已刷新，请按 Enter 轮询状态".to_string()
         } else {
-            format!("二维码已刷新: {}", truncate_text(&qr_url, 48))
+            format!("二维码已刷新: {}", truncate_text(&code.url, 48))
         };
     }
 
@@ -5761,92 +6840,15 @@ impl App {
         self.login.status_line = format!("登录失败({}): {}", code, response_message(&response));
     }
 
-    async fn fetch_home_private_radar_cover(&mut self, playlist_id: &str) -> Option<String> {
-        let response = self.api.playlist_detail(playlist_id).await.ok()?;
-        if response_code(&response) != 200 {
-            return None;
-        }
-
-        if let Some(playlist) = response.body.get("playlist") {
-            if let Some(cover_url) = first_non_empty(playlist, &["/coverImgUrl", "/picUrl"]) {
-                return Some(cover_url);
-            }
-        }
-
-        response
-            .body
-            .pointer("/playlist/tracks")
-            .and_then(|value| value.as_array())
-            .and_then(|items| items.first())
-            .and_then(|track| first_non_empty(track, &["/al/picUrl", "/album/picUrl"]))
-            .map(|s| s.to_string())
+    async fn load_home_recommendations(&mut self) -> Result<()> {
+        let tiles = fetch_home_tiles(&mut self.api, self.config.home_more_recommend).await;
+        self.apply_home_tiles(tiles);
+        Ok(())
     }
 
-    async fn load_home_recommendations(&mut self) -> Result<()> {
-        let mut daily_tile = HomeTile::placeholder_daily();
-        if let Ok(response) = self.api.recommend_songs().await {
-            if response_code(&response) == 200 {
-                if let Some(songs) = home_daily_song_items(&response.body) {
-                    if let Some(cover_url) = songs
-                        .iter()
-                        .find_map(|item| first_non_empty(item, &["/al/picUrl", "/album/picUrl"]))
-                    {
-                        daily_tile.cover.load(self.api.clone(), cover_url);
-                    }
-                }
-            }
-        }
-
-        let mut cards = Vec::new();
-
-        if let Ok(response) = self.api.recommend_resource().await {
-            cards = parse_recommend_cards(&response, 24);
-        }
-
-        if cards.is_empty() {
-            if let Ok(response) = self.api.personalized(24).await {
-                cards = parse_personalized_cards(&response, 24);
-            }
-        }
-
-        let mut tiles = Vec::with_capacity(cards.len().saturating_add(1));
-        tiles.push(daily_tile);
-
-        for card in cards {
-            let pinned_title = normalize_home_pinned_title(&card.title);
-            if pinned_title == Some("每日推荐") {
-                continue;
-            }
-
-            let mut tile = HomeTile::from_recommendation(
-                &self.api,
-                card.id,
-                card.title,
-                card.subtitle,
-                card.cover_url,
-            );
-
-            if pinned_title == Some("私人雷达") {
-                if let Some(playlist_id) = tile.id.clone() {
-                    if let Some(cover_url) = self.fetch_home_private_radar_cover(&playlist_id).await
-                    {
-                        tile.cover.load(self.api.clone(), cover_url);
-                    }
-                }
-            }
-
-            if pinned_title == Some("私人漫游") {
-                tile.id = Some(HOME_PRIVATE_ROAM_TILE_ID.to_string());
-            }
-
-            tiles.push(tile);
-        }
-
-        self.home.set_tiles(prioritize_home_tiles(
-            &self.api,
-            tiles,
-            self.config.home_more_recommend,
-        ));
+    /// 应用首页推荐 tile（首页刷新与启动初始化共用）。
+    fn apply_home_tiles(&mut self, tiles: Vec<HomeTile>) {
+        self.home.set_tiles(tiles);
         // 私人漫游 tile 封面：未播放过时为首歌封面，播放后为最后播放歌曲的封面
         self.sync_home_roam_tile_cover();
         self.home.status_line = self
@@ -5855,7 +6857,6 @@ impl App {
                 "Use arrows/Tab to focus, Enter to open playlist",
             )
             .to_string();
-        Ok(())
     }
 
     async fn resolve_current_user_id(&mut self) -> Result<String> {
@@ -5863,49 +6864,35 @@ impl App {
             return Ok(uid.clone());
         }
 
-        let account = match self.api.user_account().await {
-            Ok(v) => v,
-            Err(_) => self.api.login_status().await?,
-        };
-        let code = response_code(&account);
-        if code != 200 {
-            return Err(anyhow!(
-                "{}({}): {}",
-                self.lang_text("账号信息请求失败", "Failed to fetch account profile"),
-                code,
-                response_message(&account)
-            ));
-        }
+        let profile = fetch_account_profile(&mut self.api, self.config.language).await?;
+        self.apply_account_profile(profile);
+        Ok(self
+            .home_sidebar
+            .user_id
+            .clone()
+            .unwrap_or_default())
+    }
 
-        let uid = extract_current_user_id(&account).ok_or_else(|| {
-            anyhow!(self.lang_text("未找到当前用户 ID", "Current user id not found"))
-        })?;
-
-        self.home_sidebar.user_id = Some(uid.clone());
-        self.home_sidebar.liked_playlist_id = extract_liked_playlist_id(&account);
-        if let Some(name) = extract_current_user_name(&account) {
+    /// 应用账号档案（侧边栏用户名 / uid / 我喜欢歌单 id）。
+    fn apply_account_profile(&mut self, profile: AccountProfile) {
+        self.home_sidebar.user_id = Some(profile.uid);
+        self.home_sidebar.liked_playlist_id = profile.liked_playlist_id;
+        if let Some(name) = profile.name {
             self.home_sidebar.user_name = name;
         }
-
-        Ok(uid)
     }
 
     async fn refresh_liked_song_cache(&mut self) -> Result<()> {
         let uid = self.resolve_current_user_id().await?;
-        let response = self.api.likelist(&uid).await?;
-        let code = response_code(&response);
-        if code != 200 {
-            return Err(anyhow!(
-                "{}({}): {}",
-                self.lang_text("喜爱列表请求失败", "Failed to fetch liked songs"),
-                code,
-                response_message(&response)
-            ));
-        }
-
-        self.liked_song_ids = parse_likelist_song_ids(&response.body);
-        self.refresh_now_playing_like_state().await;
+        let ids = fetch_liked_song_ids(&mut self.api, &uid, self.config.language).await?;
+        self.apply_liked_song_ids(ids);
         Ok(())
+    }
+
+    /// 应用「我喜欢的音乐」全量 id 集合。
+    fn apply_liked_song_ids(&mut self, ids: HashSet<String>) {
+        self.like_machine.replace_confirmed(ids);
+        self.refresh_now_playing_like_state();
     }
 
     fn is_liked_playlist(&self, playlist_id: &str, title: Option<&str>) -> bool {
@@ -6047,9 +7034,7 @@ impl App {
         let focus_index = self.private_roam.last_played_index;
 
         self.playlist.id = Some(HOME_PRIVATE_ROAM_TILE_ID.to_string());
-        self.playlist.title = self
-            .lang_text("私人漫游", "Private Roam")
-            .to_string();
+        self.playlist.title = self.lang_text("私人漫游", "Private Roam").to_string();
         self.playlist.artist = self
             .lang_text("网易云音乐", "Netease Cloud Music")
             .to_string();
@@ -6071,14 +7056,14 @@ impl App {
         Ok(())
     }
 
-    /// 每日首次启动时刷新一次：上次最后播放的歌曲保留在首位，其后追加新歌
-    async fn refresh_private_roam_daily(&mut self) {
-        let today = today_day_number();
-        if self.private_roam.last_refresh_day == Some(today) {
-            return;
-        }
+    /// 今天是否已刷新过私人漫游（刷新判据只有这一处）。
+    fn private_roam_refreshed_today(&self) -> bool {
+        self.private_roam.last_refresh_day == Some(today_day_number())
+    }
 
-        let fetched = fetch_private_roam_songs(&mut self.api).await;
+    /// 应用一批新拉取的漫游歌曲（启动初始化与每日刷新共用）。
+    fn apply_private_roam_refresh(&mut self, fetched: Vec<PlaylistTrack>) {
+        let today = today_day_number();
         if fetched.is_empty() {
             // 拉取失败保留旧列表，下次启动再试
             return;
@@ -6113,12 +7098,7 @@ impl App {
         let mut added = false;
         let mut new_queue_items = Vec::new();
         for track in fetched {
-            if !self
-                .private_roam
-                .tracks
-                .iter()
-                .any(|t| t.id == track.id)
-            {
+            if !self.private_roam.tracks.iter().any(|t| t.id == track.id) {
                 if let Some(item) = PlaybackTrack::from_playlist_track(&track) {
                     new_queue_items.push(item);
                 }
@@ -6236,14 +7216,12 @@ impl App {
         self.private_roam.last_played_index = record.last_played_index;
         self.private_roam.last_played_cover_url = record.last_played_cover_url.clone();
         self.private_roam.last_refresh_day = record.last_refresh_day;
-        self.private_roam.cover_url = record
-            .last_played_cover_url
-            .or_else(|| {
-                self.private_roam
-                    .tracks
-                    .first()
-                    .and_then(|track| track.cover_url.clone())
-            });
+        self.private_roam.cover_url = record.last_played_cover_url.or_else(|| {
+            self.private_roam
+                .tracks
+                .first()
+                .and_then(|track| track.cover_url.clone())
+        });
     }
 
     fn sync_home_roam_tile_cover(&mut self) {
@@ -6694,7 +7672,9 @@ impl App {
         self.home_sidebar = HomeSidebarState::default();
         self.playlist_section_return_snapshot = None;
         self.home.status_line = text.to_string();
-        self.begin_startup_loading();
+        // 登录后这次刷新仍走同步链路：进度条只按时间缓动，不接后台步数。
+        self.startup.reset_steps(0, 1);
+        self.begin_startup_loading(Page::Home);
         if let Err(err) = self.load_home_recommendations().await {
             self.home.status_line = format!("{}，推荐歌单加载失败: {}", text, err);
         }
@@ -6722,19 +7702,23 @@ fn playback_repeat_mode_from_key(value: &str) -> Option<PlaybackRepeatMode> {
     }
 }
 
-fn startup_loading_progress_at(
-    elapsed: f32,
+/// 加载页进度：已完成步数 + 当前步的时间缓动。
+///
+/// 只有后台初始化真正走完的步骤才会推进进度条，单步内的缓动只是为了在
+/// 跳步之间保持呼吸感；收尾时再由 ramp 补到 1.0（超时跳过剩余步骤也走这条路）。
+fn startup_loading_progress(
+    step_done: usize,
+    step_total: usize,
+    step_elapsed: f32,
     complete_elapsed: Option<f32>,
     complete_requested: bool,
 ) -> f32 {
-    if elapsed <= 0.0 {
-        return 0.0;
-    }
-
-    // Monotonic non-linear loading using a cubic-bezier-like y curve.
-    let t = (elapsed / STARTUP_LOADING_FILL_SECS).clamp(0.0, 1.0);
+    // 单步内的非线性缓动（沿用原来的 cubic-bezier 曲线手感）。
+    let t = (step_elapsed / STARTUP_LOADING_FILL_SECS).clamp(0.0, 1.0);
     let eased = cubic_bezier_y(t, 0.08, 0.98);
-    let base = eased.min(0.96);
+    // 单步最多推进到 1/total 的份额，留出到下一步的余量。
+    let within = (eased / step_total.max(1) as f32).min(0.96);
+    let base = ((step_done as f32 / step_total.max(1) as f32) + within).min(0.96);
 
     if !complete_requested {
         return base;
@@ -6744,6 +7728,50 @@ fn startup_loading_progress_at(
         (complete_elapsed.unwrap_or(0.0) / STARTUP_LOADING_COMPLETE_RAMP_SECS).clamp(0.0, 1.0);
     let complete_eased = cubic_bezier_y(complete_t, 0.25, 1.0);
     (base + (1.0 - base) * complete_eased).clamp(0.0, 1.0)
+}
+
+pub(crate) fn mean_square_to_lufs(mean_square: f32) -> f32 {
+    if mean_square <= 1.0e-12 {
+        VU_LUFS_FLOOR
+    } else {
+        (-0.691 + 10.0 * mean_square.log10()).max(VU_LUFS_FLOOR)
+    }
+}
+
+pub(crate) fn lufs_to_mean_square(lufs: f32) -> f32 {
+    if lufs <= VU_LUFS_FLOOR + 0.5 {
+        0.0
+    } else {
+        10.0_f32.powf((lufs + 0.691) / 10.0)
+    }
+}
+
+pub(crate) fn lufs_to_bar_level(lufs: f32) -> f32 {
+    ((lufs - VU_LUFS_MIN) / (VU_LUFS_MAX - VU_LUFS_MIN)).clamp(0.0, 1.0)
+}
+
+fn smooth_lufs_level(current: f32, target: f32, dt: f32) -> (f32, bool) {
+    let target = target.max(VU_LUFS_FLOOR);
+    let mut current = current.max(VU_LUFS_FLOOR);
+    if (current - target).abs() <= VU_SETTLED_EPSILON {
+        return (target, false);
+    }
+
+    let tau = if target > current {
+        VU_ATTACK_SECS
+    } else {
+        VU_RELEASE_SECS
+    };
+    let amount = if dt <= 0.0 {
+        0.0
+    } else {
+        1.0 - (-dt / tau).exp()
+    };
+    current += (target - current) * amount;
+    if (current - target).abs() <= VU_SETTLED_EPSILON {
+        current = target;
+    }
+    (current, (current - target).abs() > VU_SETTLED_EPSILON)
 }
 
 pub(crate) fn cubic_bezier_y(t: f32, p1y: f32, p2y: f32) -> f32 {
@@ -6988,6 +8016,197 @@ fn normalize_home_pinned_title(title: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+/// 与 `App::lang_text` 同一套文案选择，供拿不到 `App` 的请求函数使用。
+fn lang_text<'a>(lang: Language, zh: &'a str, en: &'a str) -> &'a str {
+    match lang {
+        Language::Zh => zh,
+        Language::En => en,
+    }
+}
+
+/// 账号档案：uid / 昵称 /「我喜欢的音乐」歌单 id。
+struct AccountProfile {
+    uid: String,
+    name: Option<String>,
+    liked_playlist_id: Option<String>,
+}
+
+/// 当前账号档案：`user/account`，失败时回退 `login/status`。
+async fn fetch_account_profile(api: &mut ApiState, lang: Language) -> Result<AccountProfile> {
+    let account = match api.user_account().await {
+        Ok(response) => response,
+        Err(_) => api.login_status().await?,
+    };
+    let code = response_code(&account);
+    if code != 200 {
+        return Err(anyhow!(
+            "{}({}): {}",
+            lang_text(lang, "账号信息请求失败", "Failed to fetch account profile"),
+            code,
+            response_message(&account)
+        ));
+    }
+
+    let uid = extract_current_user_id(&account).ok_or_else(|| {
+        anyhow!(lang_text(
+            lang,
+            "未找到当前用户 ID",
+            "Current user id not found"
+        ))
+    })?;
+
+    Ok(AccountProfile {
+        uid,
+        name: extract_current_user_name(&account),
+        liked_playlist_id: extract_liked_playlist_id(&account),
+    })
+}
+
+///「我喜欢的音乐」全量 id 集合。
+async fn fetch_liked_song_ids(
+    api: &mut ApiState,
+    uid: &str,
+    lang: Language,
+) -> Result<HashSet<String>> {
+    let response = api.likelist(uid).await?;
+    let code = response_code(&response);
+    if code != 200 {
+        return Err(anyhow!(
+            "{}({}): {}",
+            lang_text(lang, "喜爱列表请求失败", "Failed to fetch liked songs"),
+            code,
+            response_message(&response)
+        ));
+    }
+
+    Ok(parse_likelist_song_ids(&response.body))
+}
+
+/// 会员音质权限：先查 `vip/info/v2`，未命中再回退 `vip/info`。
+async fn fetch_vip_unlocked(api: &mut ApiState) -> bool {
+    let mut unlocked = false;
+
+    if let Ok(response) = api.vip_info_v2().await {
+        unlocked = response_indicates_vip(&response);
+    }
+
+    if !unlocked && let Ok(response) = api.vip_info().await {
+        unlocked = response_indicates_vip(&response);
+    }
+
+    unlocked
+}
+
+/// 歌单封面（私人雷达 tile 用）。
+async fn fetch_playlist_cover_url(api: &mut ApiState, playlist_id: &str) -> Option<String> {
+    let response = api.playlist_detail(playlist_id).await.ok()?;
+    if response_code(&response) != 200 {
+        return None;
+    }
+
+    if let Some(playlist) = response.body.get("playlist") {
+        if let Some(cover_url) = first_non_empty(playlist, &["/coverImgUrl", "/picUrl"]) {
+            return Some(cover_url);
+        }
+    }
+
+    response
+        .body
+        .pointer("/playlist/tracks")
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.first())
+        .and_then(|track| first_non_empty(track, &["/al/picUrl", "/album/picUrl"]))
+        .map(|s| s.to_string())
+}
+
+/// 首页推荐 tile：每日推荐 + 推荐歌单卡片，已按固定顺序排好。
+async fn fetch_home_tiles(api: &mut ApiState, show_more: bool) -> Vec<HomeTile> {
+    let mut daily_tile = HomeTile::placeholder_daily();
+    if let Ok(response) = api.recommend_songs().await {
+        if response_code(&response) == 200 {
+            if let Some(songs) = home_daily_song_items(&response.body) {
+                if let Some(cover_url) = songs
+                    .iter()
+                    .find_map(|item| first_non_empty(item, &["/al/picUrl", "/album/picUrl"]))
+                {
+                    daily_tile.cover.load(api.clone(), cover_url);
+                }
+            }
+        }
+    }
+
+    let mut cards = Vec::new();
+
+    if let Ok(response) = api.recommend_resource().await {
+        cards = parse_recommend_cards(&response, 24);
+    }
+
+    if cards.is_empty() {
+        if let Ok(response) = api.personalized(24).await {
+            cards = parse_personalized_cards(&response, 24);
+        }
+    }
+
+    let mut tiles = Vec::with_capacity(cards.len().saturating_add(1));
+    tiles.push(daily_tile);
+
+    for card in cards {
+        let pinned_title = normalize_home_pinned_title(&card.title);
+        if pinned_title == Some("每日推荐") {
+            continue;
+        }
+
+        let mut tile =
+            HomeTile::from_recommendation(api, card.id, card.title, card.subtitle, card.cover_url);
+
+        if pinned_title == Some("私人雷达") {
+            if let Some(playlist_id) = tile.id.clone() {
+                if let Some(cover_url) = fetch_playlist_cover_url(api, &playlist_id).await {
+                    tile.cover.load(api.clone(), cover_url);
+                }
+            }
+        }
+
+        if pinned_title == Some("私人漫游") {
+            tile.id = Some(HOME_PRIVATE_ROAM_TILE_ID.to_string());
+        }
+
+        tiles.push(tile);
+    }
+
+    prioritize_home_tiles(api, tiles, show_more)
+}
+
+/// 扫码登录二维码：key 与二维码链接。
+struct QrLoginCode {
+    key: String,
+    url: String,
+}
+
+async fn fetch_qr_login_code(api: &mut ApiState, lang: Language) -> Result<QrLoginCode> {
+    let key_resp = api.login_qr_key().await.with_context(|| {
+        lang_text(lang, "二维码 key 获取失败", "Failed to fetch QR login key")
+    })?;
+
+    let key = extract_qr_key(&key_resp);
+    if key.is_empty() {
+        bail!(lang_text(
+            lang,
+            "二维码 key 为空，请重试",
+            "Empty QR login key, please retry"
+        ));
+    }
+
+    let qr_resp = api.login_qr_create(&key).await.with_context(|| {
+        lang_text(lang, "二维码创建失败", "Failed to create QR login code")
+    })?;
+
+    Ok(QrLoginCode {
+        key,
+        url: extract_qr_url(&qr_resp),
+    })
 }
 
 fn prioritize_home_tiles(
@@ -8127,6 +9346,39 @@ mod tests {
     }
 
     #[test]
+    fn startup_progress_never_rewinds_and_stops_before_completion() {
+        // 5 步计划：进度只随真实完成的步数与当前步的缓动单调推进，
+        // 且在收尾 ramp 之前不越过 96%（留给「即将完成」的视觉余量）。
+        let total = 5;
+        let mut last = 0.0_f32;
+        for done in 0..=total {
+            for micros in [0.0_f32, 0.02, 0.31, 0.62, 1.5] {
+                let progress = startup_loading_progress(done, total, micros, None, false);
+                assert!(
+                    progress >= last - 1.0e-6,
+                    "进度回退: done={done} step_elapsed={micros} progress={progress} last={last}"
+                );
+                assert!(progress <= 0.96 + 1.0e-6, "未完成时越过 96%: {progress}");
+                last = progress;
+            }
+        }
+        // 最后一步跑满也只到 96%，不会提前显示 100%。
+        assert!(
+            startup_loading_progress(total, total, 5.0, None, false) <= 0.96 + 1.0e-6,
+            "全部步骤完成后未收尾就已到 100%"
+        );
+    }
+
+    #[test]
+    fn startup_progress_reaches_full_after_completion_ramp() {
+        let ramping = startup_loading_progress(5, 5, 0.62, Some(0.0), true);
+        let done = startup_loading_progress(5, 5, 0.62, Some(1.0), true);
+
+        assert!(done >= ramping, "收尾 ramp 必须单调向上");
+        assert!((done - 1.0).abs() < 1.0e-6, "收尾后应为 1.0，实际 {done}");
+    }
+
+    #[test]
     fn merge_refresh_stale_last_played_falls_back_to_fetched() {
         // 最后播放歌曲已不在旧列表（数据异常），退化为全量替换
         let old = vec![track("a")];
@@ -8155,5 +9407,291 @@ mod tests {
         assert_eq!(normalized[0]["ar"][0]["name"], "artist-a");
         // 原有字段不受影响
         assert_eq!(normalized[0]["name"], "song");
+    }
+
+    #[test]
+    fn lufs_mapping_uses_minus_60_to_zero_range() {
+        assert!((mean_square_to_lufs(0.5) - (-3.701)).abs() < 0.01);
+        assert!((lufs_to_bar_level(-30.0) - 0.5).abs() < 1.0e-6);
+        assert_eq!(lufs_to_bar_level(VU_LUFS_FLOOR), 0.0);
+        assert_eq!(lufs_to_bar_level(0.0), 1.0);
+        assert_eq!(lufs_to_mean_square(VU_LUFS_FLOOR), 0.0);
+    }
+
+    fn pending_toggle_future() -> LikeToggleFuture {
+        let fut: Pin<Box<dyn Future<Output = Option<Result<(), String>>>>> =
+            Box::pin(async { None });
+        fut.shared()
+    }
+
+    fn pending_verify_future() -> LikeVerifyFuture {
+        let fut: Pin<Box<dyn Future<Output = Option<Result<bool, ()>>>>> = Box::pin(async { None });
+        fut.shared()
+    }
+
+    /// 点击必须立刻改变显示值（乐观），并把请求排进派发队列。
+    #[test]
+    fn like_click_is_optimistic_and_queues_one_request() {
+        let mut machine = LikeMachine::default();
+        machine.set_intent("s1".to_string(), true);
+
+        assert!(machine.displayed("s1"), "点击后立即显示为已收藏");
+        assert_eq!(machine.pending_dispatch(), Some(("s1".to_string(), true)));
+    }
+
+    /// 连点两次回到原状态：一个请求都不该发。
+    #[test]
+    fn like_double_click_back_to_start_sends_nothing() {
+        let mut machine = LikeMachine::default();
+        machine.set_intent("s1".to_string(), true);
+        machine.set_intent("s1".to_string(), false);
+
+        assert!(!machine.displayed("s1"));
+        assert_eq!(machine.pending_dispatch(), None);
+        assert_eq!(machine.drop_satisfied_intent(), Some("s1".to_string()));
+        assert!(machine.desired.is_none());
+    }
+
+    /// 在途请求未收敛前不再并发派发，但显示跟随最后一次意图。
+    #[test]
+    fn like_inflight_toggle_blocks_a_second_request() {
+        let mut machine = LikeMachine::default();
+        machine.set_intent("s1".to_string(), true);
+        machine.begin_toggle("s1".to_string(), true, pending_toggle_future());
+
+        machine.set_intent("s1".to_string(), false);
+
+        assert_eq!(machine.pending_dispatch(), None, "串行化：一次只发一个");
+        assert!(!machine.displayed("s1"));
+    }
+
+    /// 旧回包不得覆盖更新的意图：确认值照写，显示与补发按新意图走。
+    #[test]
+    fn like_stale_response_keeps_newer_intent() {
+        let mut machine = LikeMachine::default();
+        machine.set_intent("s1".to_string(), true);
+        machine.begin_toggle("s1".to_string(), true, pending_toggle_future());
+        machine.set_intent("s1".to_string(), false);
+        // 真实路径里 pump 先取走回包句柄，再交给状态机收敛
+        machine.toggle = None;
+
+        let outcome = machine.on_toggle_result("s1", true, Ok(()));
+
+        assert_eq!(outcome, ToggleOutcome::Superseded);
+        assert!(machine.is_confirmed("s1"), "回包写入已确认值");
+        assert!(!machine.displayed("s1"), "显示仍按最后一次意图");
+        assert_eq!(machine.pending_dispatch(), Some(("s1".to_string(), false)));
+    }
+
+    /// 仍是最新意图的失败要回滚显示并报错。
+    #[test]
+    fn like_failure_rolls_back_to_confirmed() {
+        let mut machine = LikeMachine::default();
+        machine.set_intent("s1".to_string(), true);
+
+        let outcome = machine.on_toggle_result("s1", true, Err("502".to_string()));
+
+        assert_eq!(
+            outcome,
+            ToggleOutcome::Failed {
+                message: "502".to_string()
+            }
+        );
+        assert!(!machine.is_confirmed("s1"));
+        assert!(!machine.displayed("s1"), "失败后回滚到已确认值");
+        assert_eq!(machine.pending_dispatch(), None, "失败的意图已被放弃");
+    }
+
+    /// 已被取代的旧失败直接忽略，不影响新意图。
+    #[test]
+    fn like_stale_failure_is_ignored() {
+        let mut machine = LikeMachine::default();
+        machine.set_intent("s1".to_string(), true);
+        machine.begin_toggle("s1".to_string(), true, pending_toggle_future());
+        machine.set_intent("s1".to_string(), false);
+        machine.toggle = None;
+
+        let outcome = machine.on_toggle_result("s1", true, Err("timeout".to_string()));
+
+        assert_eq!(outcome, ToggleOutcome::StaleFailure, "旧失败不打断新意图");
+        assert!(!machine.displayed("s1"));
+        assert!(!machine.is_confirmed("s1"));
+        // 新意图（取消收藏）与已确认状态一致，无需再发请求
+        assert_eq!(machine.pending_dispatch(), None);
+        assert_eq!(machine.drop_satisfied_intent(), Some("s1".to_string()));
+    }
+
+    /// 服务端确认不能覆盖未决意图。
+    #[test]
+    fn like_verify_does_not_override_pending_intent() {
+        let mut machine = LikeMachine::default();
+        machine.begin_verify("s1".to_string(), pending_verify_future());
+        machine.set_intent("s1".to_string(), true);
+
+        assert!(
+            !machine.on_verify_result("s1", Ok(false)),
+            "确认被未决意图挡住"
+        );
+        assert!(!machine.is_confirmed("s1"));
+        assert!(machine.displayed("s1"));
+    }
+
+    /// 无未决意图时确认写入已确认集合；确认失败保持本地缓存。
+    #[test]
+    fn like_verify_applies_without_pending_intent() {
+        let mut machine = LikeMachine::default();
+
+        assert!(machine.on_verify_result("s1", Ok(true)));
+        assert!(machine.is_confirmed("s1"));
+        assert!(machine.displayed("s1"));
+        assert!(!machine.on_verify_result("s1", Err(())));
+        assert!(machine.is_confirmed("s1"), "确认失败不改动本地缓存");
+    }
+
+    /// 未决意图只作用于它自己的曲目。
+    #[test]
+    fn like_display_is_per_song() {
+        let mut machine = LikeMachine::default();
+        machine.set_confirmed("s1", true);
+        machine.set_intent("s2".to_string(), true);
+
+        assert!(machine.displayed("s1"), "其他曲目仍按已确认值");
+        assert!(machine.displayed("s2"));
+        assert!(!machine.is_confirmed("s2"));
+    }
+
+    fn sidebar_item(title: &str) -> HomeSidebarPlaylist {
+        HomeSidebarPlaylist {
+            id: Some(title.to_string()),
+            title: title.to_string(),
+            creator: String::new(),
+            track_count: 1,
+        }
+    }
+
+    fn sidebar_state(created: usize, collected: usize) -> HomeSidebarState {
+        let mut state = HomeSidebarState::default();
+        state.created_playlists = (0..created)
+            .map(|i| sidebar_item(&format!("created-{i}")))
+            .collect();
+        state.collected_playlists = (0..collected)
+            .map(|i| sidebar_item(&format!("collected-{i}")))
+            .collect();
+        state.clamp_focus();
+        state
+    }
+
+    /// 滚轮一格一步、到端点即停（不回卷），且焦点记忆跟着走。
+    #[test]
+    fn home_sidebar_wheel_steps_and_clamps_at_ends() {
+        let mut state = sidebar_state(3, 0);
+        state.expanded = true;
+
+        state.scroll_by(true);
+        assert_eq!(state.focused_index, 1);
+        assert_eq!(state.created_focused_index, 1, "焦点位置写回分区记忆");
+
+        state.scroll_by(true);
+        state.scroll_by(true);
+        assert_eq!(state.focused_index, 2, "到底即停，不像键盘那样绕回开头");
+
+        state.scroll_by(false);
+        assert_eq!(state.focused_index, 1);
+
+        state.focused_index = 0;
+        state.scroll_by(false);
+        assert_eq!(state.focused_index, 0, "到顶即停");
+    }
+
+    /// 空分区没有可滚的内容，不动焦点。
+    #[test]
+    fn home_sidebar_wheel_without_items_does_nothing() {
+        let mut state = sidebar_state(0, 0);
+        state.expanded = true;
+
+        state.scroll_by(true);
+
+        assert_eq!(state.focused_index, 0);
+        assert_eq!(state.focused_section, HomeSidebarSection::Created);
+    }
+
+    /// 指着另一个分区滚：先切过去（沿用该分区的位置记忆）再走一格。
+    #[test]
+    fn home_sidebar_wheel_switches_section_then_steps() {
+        let mut state = sidebar_state(3, 4);
+        state.expanded = true;
+        state.collected_focused_index = 2;
+
+        state.scroll_section_by(HomeSidebarSection::Collected, true);
+
+        assert_eq!(state.focused_section, HomeSidebarSection::Collected);
+        assert_eq!(state.focused_index, 3, "先回到记忆位置 2，再前进一格");
+        assert_eq!(state.created_focused_index, 0, "原分区焦点已存回");
+        assert_eq!(state.collected_focused_index, 3);
+    }
+
+    /// 指到空分区时不会把焦点放进空列表：仍留在有内容的分区里走一格。
+    #[test]
+    fn home_sidebar_wheel_on_empty_section_keeps_full_one() {
+        let mut state = sidebar_state(2, 0);
+        state.expanded = true;
+
+        state.scroll_section_by(HomeSidebarSection::Collected, true);
+
+        assert_eq!(state.focused_section, HomeSidebarSection::Created);
+        assert_eq!(state.focused_index, 1);
+    }
+
+    /// 分区判定：光标所在分区优先，落在分区之间的空隙时用当前聚焦分区，
+    /// 面板外或面板未登记则不响应（收起态由调用方先挡掉）。
+    #[test]
+    fn home_sidebar_wheel_targets_section_under_cursor() {
+        let panel = HitRect {
+            x: 0,
+            y: 0,
+            width: 30,
+            height: 20,
+        };
+        let sections = [
+            (
+                HitRect {
+                    x: 0,
+                    y: 5,
+                    width: 30,
+                    height: 6,
+                },
+                HomeSidebarSection::Created,
+            ),
+            (
+                HitRect {
+                    x: 0,
+                    y: 11,
+                    width: 30,
+                    height: 6,
+                },
+                HomeSidebarSection::Collected,
+            ),
+        ];
+
+        assert_eq!(
+            home_sidebar_wheel_target(Some(panel), &sections, HomeSidebarSection::Created, 3, 12),
+            Some(HomeSidebarSection::Collected),
+            "指到收藏区就滚收藏区"
+        );
+        assert_eq!(
+            home_sidebar_wheel_target(Some(panel), &sections, HomeSidebarSection::Collected, 3, 2),
+            Some(HomeSidebarSection::Collected),
+            "落在分区外的面板空白处 → 用聚焦分区"
+        );
+        assert_eq!(
+            home_sidebar_wheel_target(Some(panel), &sections, HomeSidebarSection::Created, 40, 12),
+            None,
+            "面板外不响应"
+        );
+        assert_eq!(
+            home_sidebar_wheel_target(None, &sections, HomeSidebarSection::Created, 3, 12),
+            None,
+            "面板未登记（侧边栏宽度不足）不响应"
+        );
     }
 }

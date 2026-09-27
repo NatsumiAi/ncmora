@@ -25,6 +25,14 @@ pub struct InfoPanelLayout {
     pub time_line: Rect,
 }
 
+/// 核心行（标题/进度/音量/控制）是否齐备。
+///
+/// 爱心只在核心行齐备时绘制；命中区复用同一判据，免得留下"看不见却可点"
+/// 或"看得见点不动"的按钮。
+pub fn core_rows_visible(l: &InfoPanelLayout) -> bool {
+    l.meta.height >= 1 && l.progress.height >= 1 && l.volume.height >= 1 && l.controls.height >= 1
+}
+
 pub fn layout(area: Rect) -> InfoPanelLayout {
     // Keep borders outside and reserve an inner content area.
     let inner = area.inner(ratatui::layout::Margin {
@@ -321,11 +329,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
     }
 
     // metadata + controls/progress/volume: prioritized content for small windows.
-    if l.meta.height >= 1
-        && l.progress.height >= 1
-        && l.volume.height >= 1
-        && l.controls.height >= 1
-    {
+    if core_rows_visible(&l) {
         let title = app.player.track.title.as_str();
         let artist = app.player.track.artist.as_str();
         let album = app.player.track.album.as_str();

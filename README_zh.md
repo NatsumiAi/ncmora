@@ -43,7 +43,7 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 ### 浏览
 
 - 首页：推荐磁贴网格，`每日推荐`、`私人雷达`、`私人漫游` 三块始终占据最前面的位置；`home_more_recommend` 会展开其余推荐
-- 首页侧边栏（开关快捷键默认 `P`）：用户创建与用户收藏的歌单，各最多 100 条；`Ctrl+Up/Down` 切换分区，`Enter` 打开，`Esc` 收起
+- 首页侧边栏（开关快捷键默认 `P`）：用户创建与用户收藏的歌单，各最多 100 条；`Ctrl+Up/Down` 切换分区，`Enter` 打开，`Esc` 收起；鼠标滚轮滚动（指到哪个分区就滚哪个，到端点即停），单击聚焦、双击打开
 - 歌单页——专辑也复用它，没有独立的专辑页；头部（封面、标题、作者、简介、曲目数）加虚拟化曲目列表
 - 作者页：头像、名称、热门歌曲 / 专辑 / EP / 单曲数量，以及各分类的磁贴网格
 - 搜索页：每次请求 50 条，继续滚动会自动追加
@@ -101,6 +101,7 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 
 - 主题：`system`、`latte`、`frappe`（默认）、`macchiato`、`mocha`
 - 界面语言：`zh` / `en`
+- 启动：先出加载页（ASCII 标题 + 进度条，不显示文字），登录恢复、推荐加载等网络步骤在后台按步推进；登录态不可用时收尾后进入登录页
 - 透明背景、封面边框、提示行开关
 - 20 个可重绑快捷键，带冲突检测；`Ctrl+Alt+R` 恢复默认
 - about 弹窗含盲文形象画，里面还藏了一个彩蛋（`easter-egg` cargo feature，默认编入，可用 `--no-default-features` 剔除）
@@ -200,7 +201,11 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 | `transparent_background` | `true` | 使用终端背景 |
 | `album_border` | `true` | 全屏封面边框 |
 | `show_hints` | `true` | 内容页提示行，以及全屏页面板边框内的提示文字 |
-| `page_lyrics` | `false` | 内容页上的两行歌词浮层 |
+| `page_lyrics` | `false` | 内容页上的两行歌词浮窗 |
+| `page_lyrics_drag` | `true` | 歌词浮窗可用鼠标拖动 |
+| `page_lyrics_snap` | `true` | 拖动结束后吸附到最近的边（左/右/上/下，另一轴保持自由；仅拖动开启时可改） |
+| `page_lyrics_pos_x` | `1.0` | 歌词浮窗左上角的归一化横坐标（0=左，1=右） |
+| `page_lyrics_pos_y` | `1.0` | 歌词浮窗左上角的归一化纵坐标（0=上，1=下） |
 | `small_window_display` | `true` | 终端过小时启用紧凑布局 |
 | `home_more_recommend` | `false` | 首页在三块固定磁贴之外展开更多推荐 |
 | `default_opening_title` | `""` | 替换登录页与加载页的 ASCII 标题，支持 `\n` |

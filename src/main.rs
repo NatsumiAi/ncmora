@@ -277,7 +277,7 @@ async fn main() -> Result<()> {
     init_logger().await?;
     let config = Config::load_or_default()?;
     let theme = ThemeLoader::load(&config.theme).unwrap_or_default();
-    let mut app = App::new(config, theme).await?;
+    let mut app = App::new(config, theme)?;
 
     let mut terminal = init_terminal()?;
     let run_result = run_app(&mut terminal, &mut app).await;
@@ -334,7 +334,11 @@ fn input_event() -> impl Stream<Item = impl AsyncFn(&mut App)> {
             Event::Mouse(e)
                 if matches!(
                     e.kind,
-                    MouseEventKind::Down(_) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    MouseEventKind::Down(_)
+                        | MouseEventKind::Up(_)
+                        | MouseEventKind::Drag(_)
+                        | MouseEventKind::ScrollUp
+                        | MouseEventKind::ScrollDown
                 ) => {}
             _ => return None,
         }

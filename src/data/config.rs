@@ -116,6 +116,21 @@ pub struct Config {
     #[serde(default = "default_page_lyrics")]
     pub page_lyrics: bool,
 
+    /// 歌词浮窗是否允许鼠标拖动。
+    #[serde(default = "default_page_lyrics_drag")]
+    pub page_lyrics_drag: bool,
+
+    /// 拖动结束后是否吸附到最近的边（左/右/上/下，另一轴保持自由；
+    /// 仅拖动开启时可改）。
+    #[serde(default = "default_page_lyrics_snap")]
+    pub page_lyrics_snap: bool,
+
+    /// 歌词浮窗左上角在内容区内的归一化位置（0..=1），默认右下角。
+    #[serde(default = "default_page_lyrics_pos_x")]
+    pub page_lyrics_pos_x: f32,
+    #[serde(default = "default_page_lyrics_pos_y")]
+    pub page_lyrics_pos_y: f32,
+
     #[serde(default = "default_audio_quality")]
     pub audio_quality: AudioQuality,
 
@@ -124,6 +139,9 @@ pub struct Config {
 
     #[serde(default = "default_show_hints")]
     pub show_hints: bool,
+
+    #[serde(default = "default_small_window_display")]
+    pub small_window_display: bool,
 
     #[serde(default)]
     pub home_more_recommend: bool,
@@ -187,6 +205,9 @@ pub struct Config {
 
     #[serde(default = "default_keybind_toggle_like_collapsed")]
     pub keybind_toggle_like_collapsed: String,
+
+    #[serde(default = "default_keybind_small_window_toggle")]
+    pub keybind_small_window_toggle: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -413,6 +434,22 @@ fn default_page_lyrics() -> bool {
     false
 }
 
+fn default_page_lyrics_drag() -> bool {
+    true
+}
+
+fn default_page_lyrics_snap() -> bool {
+    true
+}
+
+fn default_page_lyrics_pos_x() -> f32 {
+    1.0
+}
+
+fn default_page_lyrics_pos_y() -> f32 {
+    1.0
+}
+
 fn default_audio_quality() -> AudioQuality {
     AudioQuality::Exhigh
 }
@@ -514,6 +551,14 @@ fn default_keybind_toggle_like_collapsed() -> String {
     "Alt+L".to_string()
 }
 
+fn default_small_window_display() -> bool {
+    true
+}
+
+fn default_keybind_small_window_toggle() -> String {
+    "Alt+X".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -540,9 +585,14 @@ impl Default for Config {
             default_opening_title: String::new(),
             language: default_language(),
             page_lyrics: default_page_lyrics(),
+            page_lyrics_drag: default_page_lyrics_drag(),
+            page_lyrics_snap: default_page_lyrics_snap(),
+            page_lyrics_pos_x: default_page_lyrics_pos_x(),
+            page_lyrics_pos_y: default_page_lyrics_pos_y(),
             audio_quality: default_audio_quality(),
             playback_memory: false,
             show_hints: default_show_hints(),
+            small_window_display: default_small_window_display(),
             home_more_recommend: false,
             cache: CacheConfig::default(),
             keybind_search_box: default_keybind_search_box(),
@@ -564,6 +614,7 @@ impl Default for Config {
             keybind_fullscreen_eq_reset: default_keybind_fullscreen_eq_reset(),
             keybind_toggle_like_fullscreen: default_keybind_toggle_like_fullscreen(),
             keybind_toggle_like_collapsed: default_keybind_toggle_like_collapsed(),
+            keybind_small_window_toggle: default_keybind_small_window_toggle(),
         }
     }
 }
@@ -591,6 +642,10 @@ impl Config {
             cfg.spectrum_hz = 30;
         }
 
+        // 手改配置可能越界，浮窗位置统一钳到内容区内。
+        cfg.page_lyrics_pos_x = cfg.page_lyrics_pos_x.clamp(0.0, 1.0);
+        cfg.page_lyrics_pos_y = cfg.page_lyrics_pos_y.clamp(0.0, 1.0);
+
         let mut forced_visualize_fallback = false;
         if !cfg.visualize.is_available() {
             // 只有依赖 cava 的模式会落到这里；退到同样无需外部进程的示波器。
@@ -607,6 +662,10 @@ impl Config {
         if !raw.contains("default_opening_title")
             || !raw.contains("language")
             || !raw.contains("page_lyrics")
+            || !raw.contains("page_lyrics_drag")
+            || !raw.contains("page_lyrics_snap")
+            || !raw.contains("page_lyrics_pos_x")
+            || !raw.contains("page_lyrics_pos_y")
             || !raw.contains("eq_bands_db")
             || !raw.contains("audio_quality")
             || !raw.contains("playback_memory")
@@ -637,6 +696,8 @@ impl Config {
             || !raw.contains("keybind_fullscreen_eq_reset")
             || !raw.contains("keybind_toggle_like_fullscreen")
             || !raw.contains("keybind_toggle_like_collapsed")
+            || !raw.contains("small_window_display")
+            || !raw.contains("keybind_small_window_toggle")
             || legacy_startup_folder_key_present
             || migrated_legacy_sidebar
         {

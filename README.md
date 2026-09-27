@@ -43,7 +43,7 @@ Playback belongs to the host: streaming with a local cache, queue memory, privat
 ### Browsing
 
 - Home: a recommendation tile grid whose first three slots are always `每日推荐` (Daily Recommendations), `私人雷达` (Private Radar) and `私人漫游` (Private Roam); `home_more_recommend` expands the remaining recommendations
-- Home sidebar (toggle keybind, default `P`): your created and collected playlists, up to 100 each; `Ctrl+Up/Down` switches section, Enter opens, Esc collapses
+- Home sidebar (toggle keybind, default `P`): your created and collected playlists, up to 100 each; `Ctrl+Up/Down` switches section, Enter opens, Esc collapses; the wheel scrolls the section under the cursor (stopping at either end), a click focuses and a double click opens
 - Playlist page — also used for albums, there is no separate album page; a header (cover, title, author, description, track count) above a virtualized track list
 - Artist page: avatar, name, hot-song / album / EP / single counts and a tile grid per section
 - Search page: 50 results per request, appended as you scroll further
@@ -101,6 +101,7 @@ The flat player bar keeps its mouse targets (previous, play-pause, next, progres
 
 - Themes: `system`, `latte`, `frappe` (default), `macchiato`, `mocha`
 - UI language: `zh` / `en`
+- Startup: a loading page (ASCII title plus progress bar, no text) appears first; login restore and recommendation fetches run in the background step by step, and an unusable saved session hands over to the login page
 - Transparent background, album-cover border and hint lines
 - 20 rebindable shortcuts with conflict detection; `Ctrl+Alt+R` restores the defaults
 - About modal with braille art, and a hidden easter egg inside it (the `easter-egg` cargo feature, compiled in by default and removable with `--no-default-features`)
@@ -200,7 +201,11 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 | `transparent_background` | `true` | Use the terminal background |
 | `album_border` | `true` | Border around the fullscreen cover |
 | `show_hints` | `true` | Hint line on the content pages and in the fullscreen page's panel border |
-| `page_lyrics` | `false` | Two-line lyrics panel over the content pages |
+| `page_lyrics` | `false` | Two-line lyrics overlay on the content pages |
+| `page_lyrics_drag` | `true` | Lyrics overlay can be dragged with the mouse |
+| `page_lyrics_snap` | `true` | Snap to the nearest edge (left/right/top/bottom, the other axis stays free; only editable while dragging is on) |
+| `page_lyrics_pos_x` | `1.0` | Normalized horizontal position of the overlay's top-left (0=left, 1=right) |
+| `page_lyrics_pos_y` | `1.0` | Normalized vertical position of the overlay's top-left (0=top, 1=bottom) |
 | `small_window_display` | `true` | Compact layouts for small terminals |
 | `home_more_recommend` | `false` | Expand the home page beyond the three pinned tiles |
 | `default_opening_title` | `""` | Replaces the ASCII banner on the login and loading pages; supports `\n` |

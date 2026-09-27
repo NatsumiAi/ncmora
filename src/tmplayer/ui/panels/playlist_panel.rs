@@ -328,7 +328,7 @@ fn render_separator(f: &mut Frame, area: Rect, app: &AppState) {
     f.render_widget(Paragraph::new(line).style(style), line_area);
 }
 
-fn render_playlist_list(f: &mut Frame, area: Rect, app: &AppState) {
+fn render_playlist_list(f: &mut Frame, area: Rect, app: &mut AppState) {
     // Virtualized rendering to avoid lag on huge playlists.
     let footer_rows: u16 = 2;
     let list_rows = area.height.saturating_sub(footer_rows);
@@ -351,6 +351,10 @@ fn render_playlist_list(f: &mut Frame, area: Rect, app: &AppState) {
     } else {
         (start + visible).min(total)
     };
+
+    // 命中区要用同一份窗口映射：否则列表滚过一屏后点谁都不是谁。
+    app.playlist_list_scroll = start;
+    app.playlist_list_rows = visible;
 
     let mut lines: Vec<Line> = Vec::new();
 

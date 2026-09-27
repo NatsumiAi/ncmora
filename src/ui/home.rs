@@ -40,7 +40,7 @@ pub fn draw_home(frame: &mut Frame, app: &mut App) {
     // 整页（含歌词框）挤上去一行。
     let content_area = rows[0];
     let lyrics_area = if app.config.page_lyrics {
-        page_lyrics::overlay_panel_area(content_area)
+        page_lyrics::overlay_panel_area(content_area, app.page_lyrics_pos())
     } else {
         Rect::default()
     };
@@ -72,7 +72,7 @@ pub fn draw_home(frame: &mut Frame, app: &mut App) {
         draw_home_hint(frame, app, hint_area);
     }
     if lyrics_area.height > 0 {
-        page_lyrics::draw_page_lyrics_panel(frame, app, lyrics_area);
+        page_lyrics::draw_page_lyrics_overlay(frame, app, content_area);
     }
     if app.home_sidebar.is_visible() {
         draw_home_sidebar(frame, app, rows[0]);
@@ -420,6 +420,17 @@ fn draw_home_sidebar_section(
     if area.width < 6 || area.height < 3 {
         return;
     }
+
+    // 整块分区都要能接住滚轮：列表短时下方空白处也属于该分区。
+    app.push_home_sidebar_section_hit(
+        crate::app::HitRect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: area.height,
+        },
+        section,
+    );
 
     let section_focused = app.home_sidebar.expanded && app.home_sidebar.focused_section == section;
     let section_title_style = if section_focused {

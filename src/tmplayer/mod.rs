@@ -16,8 +16,7 @@ use std::time::Duration;
 
 use crate::data::config::{
     AudioQuality as HostAudioQuality, BarChannels as HostBarChannels, BarNumber as HostBarNumber,
-    Config as HostConfig, GraphicsProtocol, Language as HostLanguage,
-    VisualizeMode as HostVisualizeMode,
+    Config as HostConfig, GraphicsProtocol, Language as HostLanguage, VisualizeMode,
 };
 
 #[derive(Debug, Clone)]
@@ -102,13 +101,18 @@ pub struct HostConfigSync {
     pub language: HostLanguage,
     pub graphics_protocol: GraphicsProtocol,
     pub page_lyrics: bool,
+    pub page_lyrics_drag: bool,
+    pub page_lyrics_snap: bool,
+    pub page_lyrics_pos_x: f32,
+    pub page_lyrics_pos_y: f32,
     pub audio_quality: HostAudioQuality,
     pub eq_bands_db: [f32; crate::tmplayer::app::state::EQ_BANDS],
     pub playback_memory: bool,
     pub vip_audio_unlocked: bool,
     pub show_hints: bool,
+    pub small_window_display: bool,
     pub home_more_recommend: bool,
-    pub visualize: HostVisualizeMode,
+    pub visualize: VisualizeMode,
     pub super_smooth_bar: bool,
     pub bars_gap: bool,
     pub bar_number: HostBarNumber,
@@ -163,14 +167,14 @@ fn tm_config_from_host(host: &HostConfig) -> data::config::Config {
         ui_fps: host.ui_fps,
         spectrum_hz: host.spectrum_hz,
         mpris_poll_ms: host.mpris_poll_ms,
-        visualize: match host.visualize {
-            HostVisualizeMode::Off => data::config::VisualizeMode::Off,
-            HostVisualizeMode::Bars => data::config::VisualizeMode::Bars,
-            HostVisualizeMode::Oscilloscope => data::config::VisualizeMode::Oscilloscope,
-        },
+        visualize: host.visualize,
         eq_bands_db: host.eq_bands_db,
         transparent_background: host.transparent_background,
         page_lyrics: host.page_lyrics,
+        page_lyrics_drag: host.page_lyrics_drag,
+        page_lyrics_snap: host.page_lyrics_snap,
+        page_lyrics_pos_x: host.page_lyrics_pos_x,
+        page_lyrics_pos_y: host.page_lyrics_pos_y,
         album_border: host.album_border,
         graphics_protocol: host.graphics_protocol,
         kitty_cover_scale_percent: host.kitty_cover_scale_percent,
@@ -189,6 +193,7 @@ fn tm_config_from_host(host: &HostConfig) -> data::config::Config {
         },
         playback_memory: host.playback_memory,
         show_hints: host.show_hints,
+        small_window_display: host.small_window_display,
         home_more_recommend: host.home_more_recommend,
         bar_number: match host.bar_number {
             HostBarNumber::Auto => data::config::BarNumber::Auto,
@@ -228,6 +233,7 @@ fn tm_config_from_host(host: &HostConfig) -> data::config::Config {
         keybind_fullscreen_eq: host.keybind_fullscreen_eq.clone(),
         keybind_fullscreen_eq_reset: host.keybind_fullscreen_eq_reset.clone(),
         keybind_toggle_like_fullscreen: host.keybind_toggle_like_fullscreen.clone(),
+        keybind_small_window_toggle: host.keybind_small_window_toggle.clone(),
     }
 }
 

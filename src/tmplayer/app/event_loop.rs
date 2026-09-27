@@ -22,7 +22,20 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
 
-const HELP_MODAL_ITEMS: usize = 14;
+/// 子页的上一级：挂在设置弹窗下面的这些弹窗，Esc 应该回到设置弹窗，
+/// 而不是直接关掉整个弹窗（更不是退出全屏页）。`None` 表示没有上一级。
+fn settings_parent(overlay: Overlay) -> Option<Overlay> {
+    matches!(
+        overlay,
+        Overlay::AcoustIdModal
+            | Overlay::BarSettingsModal
+            | Overlay::LocalAudioSettingsModal
+            | Overlay::LyricsSettingsModal
+            | Overlay::HelpModal
+            | Overlay::AboutModal
+    )
+    .then_some(Overlay::SettingsModal)
+}
 
 fn sync_playlists_when_viewing_playback(app: &mut AppState) {
     if app.local_view_album_folder.is_some() && app.local_folder.is_some() {
@@ -69,6 +82,10 @@ fn host_config_sync_from_app(app: &AppState) -> HostConfigSync {
         language: app.language,
         graphics_protocol: app.config.graphics_protocol,
         page_lyrics: app.config.page_lyrics,
+        page_lyrics_drag: app.config.page_lyrics_drag,
+        page_lyrics_snap: app.config.page_lyrics_snap,
+        page_lyrics_pos_x: app.config.page_lyrics_pos_x,
+        page_lyrics_pos_y: app.config.page_lyrics_pos_y,
         audio_quality: match app.config.audio_quality {
             AudioQuality::Standard => crate::data::config::AudioQuality::Standard,
             AudioQuality::Higher => crate::data::config::AudioQuality::Higher,
@@ -84,12 +101,9 @@ fn host_config_sync_from_app(app: &AppState) -> HostConfigSync {
         playback_memory: app.config.playback_memory,
         vip_audio_unlocked: app.vip_audio_unlocked,
         show_hints: app.config.show_hints,
+        small_window_display: app.config.small_window_display,
         home_more_recommend: app.config.home_more_recommend,
-        visualize: match app.config.visualize {
-            VisualizeMode::Off => crate::data::config::VisualizeMode::Off,
-            VisualizeMode::Bars => crate::data::config::VisualizeMode::Bars,
-            VisualizeMode::Oscilloscope => crate::data::config::VisualizeMode::Oscilloscope,
-        },
+        visualize: app.config.visualize,
         super_smooth_bar: app.config.super_smooth_bar,
         bars_gap: app.config.bars_gap,
         bar_number: match app.config.bar_number {
@@ -121,6 +135,10 @@ fn apply_host_config_sync(app: &mut AppState, config: HostConfigSync) {
     app.config.album_border = config.album_border;
     app.language = config.language;
     app.config.page_lyrics = config.page_lyrics;
+    app.config.page_lyrics_drag = config.page_lyrics_drag;
+    app.config.page_lyrics_snap = config.page_lyrics_snap;
+    app.config.page_lyrics_pos_x = config.page_lyrics_pos_x.clamp(0.0, 1.0);
+    app.config.page_lyrics_pos_y = config.page_lyrics_pos_y.clamp(0.0, 1.0);
     app.vip_audio_unlocked = config.vip_audio_unlocked;
     app.config.audio_quality = match config.audio_quality {
         crate::data::config::AudioQuality::Standard => AudioQuality::Standard,
@@ -138,12 +156,9 @@ fn apply_host_config_sync(app: &mut AppState, config: HostConfigSync) {
     app.eq.bands_db = config.eq_bands_db;
     app.config.playback_memory = config.playback_memory;
     app.config.show_hints = config.show_hints;
+    app.config.small_window_display = config.small_window_display;
     app.config.home_more_recommend = config.home_more_recommend;
-    app.config.visualize = match config.visualize {
-        crate::data::config::VisualizeMode::Off => VisualizeMode::Off,
-        crate::data::config::VisualizeMode::Bars => VisualizeMode::Bars,
-        crate::data::config::VisualizeMode::Oscilloscope => VisualizeMode::Oscilloscope,
-    };
+    app.config.visualize = config.visualize;
     app.config.super_smooth_bar = config.super_smooth_bar;
     app.config.bars_gap = config.bars_gap;
     app.config.bar_number = match config.bar_number {
@@ -717,13 +732,13 @@ async fn handle_action(
             app.set_toast("Bye");
         }
         Action::OpenSettingsModal => {
-            app.settings_selected = app.settings_selected.min(9);
+            app.settings_selected = app.settings_selected.min(11);
             app.overlay = Overlay::SettingsModal;
         }
         Action::OpenHelpModal => {
             app.help_keybind_selected = app
                 .help_keybind_selected
-                .min(HELP_MODAL_ITEMS.saturating_sub(1));
+                .min(crate::tmplayer::ui::tui::help_item_count(app).saturating_sub(1));
             app.overlay = Overlay::HelpModal;
         }
         Action::OpenEqModal => {
@@ -762,12 +777,9 @@ async fn handle_action(
                 // 面板状态立即关闭，滑出动画由 tick 推进到位。
                 app.start_playlist_slide(-(layout.left_width as i16));
                 app.overlay = Overlay::None;
-            } else if app.overlay == Overlay::AcoustIdModal
-                || app.overlay == Overlay::BarSettingsModal
-                || app.overlay == Overlay::LocalAudioSettingsModal
-                || app.overlay == Overlay::AboutModal
-            {
-                app.overlay = Overlay::SettingsModal;
+            } else if let Some(parent) = settings_parent(app.overlay) {
+                // 设置类子页：回上一级，而不是直接退出全屏页。
+                app.overlay = parent;
             } else {
                 app.close_overlay();
             }
@@ -831,15 +843,22 @@ async fn handle_action(
                     app.overlay = Overlay::HelpModal;
                 }
                 6 => {
-                    apply_settings_delta(app, host_bridge, 1).await;
+                    app.lyrics_settings_selected = app.lyrics_settings_selected.min(2);
+                    app.overlay = Overlay::LyricsSettingsModal;
                 }
                 7 => {
                     apply_settings_delta(app, host_bridge, 1).await;
                 }
                 8 => {
-                    app.set_toast("Logout is unavailable in fullscreen");
+                    apply_settings_delta(app, host_bridge, 1).await;
                 }
                 9 => {
+                    apply_settings_delta(app, host_bridge, 1).await;
+                }
+                10 => {
+                    app.set_toast("Logout is unavailable in fullscreen");
+                }
+                11 => {
                     app.overlay = Overlay::AboutModal;
                 }
                 _ => {}
@@ -870,17 +889,31 @@ async fn handle_action(
                     save_and_sync_host_config(app, host_bridge).await;
                 }
                 6 => {
-                    app.config.page_lyrics = !app.config.page_lyrics;
-                    save_and_sync_host_config(app, host_bridge).await;
-                }
-                7 => {
                     app.config.audio_quality =
                         app.config.audio_quality.cycle(1, app.vip_audio_unlocked);
                     save_and_sync_host_config(app, host_bridge).await;
                 }
-                8 => {
+                7 => {
                     app.config.playback_memory = !app.config.playback_memory;
                     save_and_sync_host_config(app, host_bridge).await;
+                }
+                _ => {}
+            },
+            Overlay::LyricsSettingsModal => match app.lyrics_settings_selected {
+                0 => {
+                    app.config.page_lyrics = !app.config.page_lyrics;
+                    save_and_sync_host_config(app, host_bridge).await;
+                }
+                1 => {
+                    app.config.page_lyrics_drag = !app.config.page_lyrics_drag;
+                    save_and_sync_host_config(app, host_bridge).await;
+                }
+                2 => {
+                    // 拖动关闭时吸附无意义：灰置且不可改。
+                    if app.config.page_lyrics_drag {
+                        app.config.page_lyrics_snap = !app.config.page_lyrics_snap;
+                        save_and_sync_host_config(app, host_bridge).await;
+                    }
                 }
                 _ => {}
             },
@@ -944,18 +977,25 @@ async fn handle_action(
         Action::PrevAlbum | Action::NextAlbum => (),
         Action::ModalUp => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 10;
+                let count = 12;
                 if app.settings_selected == 0 {
                     app.settings_selected = count - 1;
                 } else {
                     app.settings_selected -= 1;
                 }
             } else if app.overlay == Overlay::BarSettingsModal {
-                let count = 9;
+                let count = 8;
                 if app.bar_settings_selected == 0 {
                     app.bar_settings_selected = count - 1;
                 } else {
                     app.bar_settings_selected -= 1;
+                }
+            } else if app.overlay == Overlay::LyricsSettingsModal {
+                let count = 3;
+                if app.lyrics_settings_selected == 0 {
+                    app.lyrics_settings_selected = count - 1;
+                } else {
+                    app.lyrics_settings_selected -= 1;
                 }
             } else if app.overlay == Overlay::LocalAudioSettingsModal {
                 let count = 5;
@@ -972,8 +1012,12 @@ async fn handle_action(
                 }
                 sync_eq_config(app, host_bridge).await;
             } else if app.overlay == Overlay::HelpModal {
+                let count = crate::tmplayer::ui::tui::help_item_count(app);
+                if count == 0 {
+                    return Ok(());
+                }
                 if app.help_keybind_selected == 0 {
-                    app.help_keybind_selected = HELP_MODAL_ITEMS - 1;
+                    app.help_keybind_selected = count - 1;
                 } else {
                     app.help_keybind_selected -= 1;
                 }
@@ -981,11 +1025,14 @@ async fn handle_action(
         }
         Action::ModalDown => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 10;
+                let count = 12;
                 app.settings_selected = (app.settings_selected + 1) % count;
             } else if app.overlay == Overlay::BarSettingsModal {
-                let count = 9;
+                let count = 8;
                 app.bar_settings_selected = (app.bar_settings_selected + 1) % count;
+            } else if app.overlay == Overlay::LyricsSettingsModal {
+                let count = 3;
+                app.lyrics_settings_selected = (app.lyrics_settings_selected + 1) % count;
             } else if app.overlay == Overlay::LocalAudioSettingsModal {
                 let count = 5;
                 app.local_audio_settings_selected = (app.local_audio_settings_selected + 1) % count;
@@ -997,7 +1044,10 @@ async fn handle_action(
                 }
                 sync_eq_config(app, host_bridge).await;
             } else if app.overlay == Overlay::HelpModal {
-                app.help_keybind_selected = (app.help_keybind_selected + 1) % HELP_MODAL_ITEMS;
+                let count = crate::tmplayer::ui::tui::help_item_count(app);
+                if count > 0 {
+                    app.help_keybind_selected = (app.help_keybind_selected + 1) % count;
+                }
             }
         }
         Action::ModalLeft => {
@@ -1030,20 +1080,18 @@ async fn handle_action(
                         save_and_sync_host_config(app, host_bridge).await;
                     }
                     6 => {
-                        app.config.page_lyrics = !app.config.page_lyrics;
-                        save_and_sync_host_config(app, host_bridge).await;
-                    }
-                    7 => {
                         app.config.audio_quality =
                             app.config.audio_quality.cycle(-1, app.vip_audio_unlocked);
                         save_and_sync_host_config(app, host_bridge).await;
                     }
-                    8 => {
+                    7 => {
                         app.config.playback_memory = !app.config.playback_memory;
                         save_and_sync_host_config(app, host_bridge).await;
                     }
                     _ => {}
                 }
+            } else if app.overlay == Overlay::LyricsSettingsModal {
+                apply_lyrics_settings_delta(app, host_bridge, -1).await;
             } else if app.overlay == Overlay::LocalAudioSettingsModal {
                 apply_local_audio_settings_delta(app, -1);
             } else if app.overlay == Overlay::EqModal {
@@ -1085,20 +1133,18 @@ async fn handle_action(
                         save_and_sync_host_config(app, host_bridge).await;
                     }
                     6 => {
-                        app.config.page_lyrics = !app.config.page_lyrics;
-                        save_and_sync_host_config(app, host_bridge).await;
-                    }
-                    7 => {
                         app.config.audio_quality =
                             app.config.audio_quality.cycle(1, app.vip_audio_unlocked);
                         save_and_sync_host_config(app, host_bridge).await;
                     }
-                    8 => {
+                    7 => {
                         app.config.playback_memory = !app.config.playback_memory;
                         save_and_sync_host_config(app, host_bridge).await;
                     }
                     _ => {}
                 }
+            } else if app.overlay == Overlay::LyricsSettingsModal {
+                apply_lyrics_settings_delta(app, host_bridge, 1).await;
             } else if app.overlay == Overlay::LocalAudioSettingsModal {
                 apply_local_audio_settings_delta(app, 1);
             } else if app.overlay == Overlay::EqModal {
@@ -1112,31 +1158,26 @@ async fn handle_action(
                 app.playlist_view.clamp_selected();
                 sync_playlists_when_viewing_playback(app);
 
+                // 单击只聚焦；400ms 内再点同一行才切歌（按条目序号判定，
+                // 与滚动窗口无关，聚焦本身可能引起列表滚动）。
+                let now = Instant::now();
+                let is_double = app.last_playlist_click.is_some_and(|(at, last)| {
+                    now.duration_since(at) <= Duration::from_millis(400) && last == idx
+                });
+                app.last_playlist_click = Some((now, idx));
+
+                if !is_double {
+                    return Ok(());
+                }
+
                 if let Some(bridge) = host_bridge.as_mut() {
                     (*bridge).play_queue_index(idx).await;
                     let snapshot = (*bridge).snapshot();
                     sync_from_host_snapshot(app, snapshot);
-                    return Ok(());
+                } else {
+                    // 本地模式：双击等价 Enter。
+                    Box::pin(handle_action(app, host_bridge, Action::Confirm, layout)).await?;
                 }
-
-                // double click => play
-                let now = Instant::now();
-                if let Some((at, last_col, last_row)) = app.last_mouse_click {
-                    if now.duration_since(at) <= Duration::from_millis(400) {
-                        // same row (best-effort)
-                        if last_row == (layout.playlist_list_inner.y + idx as u16) {
-                            return Box::pin(handle_action(
-                                app,
-                                host_bridge,
-                                Action::Confirm,
-                                layout,
-                            ))
-                            .await;
-                        }
-                        let _ = last_col;
-                    }
-                }
-                app.last_mouse_click = Some((now, 0, layout.playlist_list_inner.y + idx as u16));
             }
         }
         Action::TogglePlayPause => {
@@ -1200,6 +1241,8 @@ async fn handle_action(
         },
         Action::SetVolume(v) => match app.player.mode {
             PlayMode::Idle => {
+                // 音量条：按下即开始拖动，MouseDrag 持续跟随。
+                app.volume_drag = true;
                 let next = v.clamp(0.0, 1.0);
                 if let Some(bridge) = host_bridge.as_mut() {
                     (*bridge).set_volume(next);
@@ -1251,6 +1294,75 @@ async fn handle_action(
             // map click to controls/progress/volume/playlist
             if let Some(a) = crate::tmplayer::ui::tui::hit_test(layout, app, col, row) {
                 Box::pin(handle_action(app, host_bridge, a, layout)).await?;
+            }
+        }
+        Action::MouseScroll { col, row, forward } => {
+            // 弹窗（设置/播放设置/歌词浮窗/本地音频/按键提示/EQ）打开时：
+            // 滚轮切换聚焦行，与 Up/Down 同效。
+            if app.overlay != Overlay::None && app.overlay != Overlay::Playlist {
+                let action = if forward {
+                    Action::ModalDown
+                } else {
+                    Action::ModalUp
+                };
+                Box::pin(handle_action(app, host_bridge, action, layout)).await?;
+                return Ok(());
+            }
+
+            // 侧边栏（播放列表面板）：滚轮滚动聚焦。
+            if crate::tmplayer::ui::tui::wheel_over_playlist(layout, app, col, row) {
+                let action = if forward {
+                    Action::PlaylistDown
+                } else {
+                    Action::PlaylistUp
+                };
+                Box::pin(handle_action(app, host_bridge, action, layout)).await?;
+            }
+        }
+        Action::MouseDrag { col, .. } => {
+            // 按住音量条拖动：只要起点落在条内，之后拖着走（哪怕拖出条外）
+            // 都继续改音量，不在拖动中途要求光标还在条上。
+            if app.volume_drag
+                && let Some(volume) = crate::tmplayer::ui::tui::volume_for_drag(layout, col)
+            {
+                app.player.volume = volume;
+                if let Some(bridge) = host_bridge.as_mut() {
+                    (*bridge).set_volume(volume);
+                }
+            }
+        }
+        Action::MouseUp => {
+            app.volume_drag = false;
+        }
+        Action::ModalSelect(idx) => {
+            let Some(rect) = layout.modal_rows.get(idx) else {
+                return Ok(());
+            };
+
+            match app.overlay {
+                Overlay::SettingsModal => app.settings_selected = idx,
+                Overlay::BarSettingsModal => app.bar_settings_selected = idx,
+                Overlay::LocalAudioSettingsModal => app.local_audio_settings_selected = idx,
+                Overlay::LyricsSettingsModal => {
+                    // 开关行：左键直接改值（与宿主一致），不走双击。
+                    app.lyrics_settings_selected = idx.min(2);
+                    apply_lyrics_settings_delta(app, host_bridge, 1).await;
+                    return Ok(());
+                }
+                Overlay::HelpModal => app.help_keybind_selected = idx,
+                _ => return Ok(()),
+            }
+
+            // 同一行 400ms 内再点一次 = Enter（与播放列表双击同款判定）。
+            // 列归一化到行首，行内任意位置都算同一个目标。
+            let now = Instant::now();
+            let is_double = app.last_mouse_click.is_some_and(|(at, col, row)| {
+                now.duration_since(at) <= Duration::from_millis(400)
+                    && (col, row) == (rect.x, rect.y)
+            });
+            app.last_mouse_click = Some((now, rect.x, rect.y));
+            if is_double {
+                return Box::pin(handle_action(app, host_bridge, Action::Confirm, layout)).await;
             }
         }
         Action::None => {}
@@ -1340,17 +1452,55 @@ async fn apply_settings_delta(
                 save_and_sync_host_config(app, host_bridge).await;
             }
         }
+        // “歌词浮窗...”是可进入项：左右键不改变配置。
+        6 => {}
         // Show hints
-        6 => {
+        7 => {
             if delta != 0 {
                 app.config.show_hints = !app.config.show_hints;
                 save_and_sync_host_config(app, host_bridge).await;
             }
         }
+        // Small window display
+        8 => {
+            if delta != 0 {
+                app.config.small_window_display = !app.config.small_window_display;
+                save_and_sync_host_config(app, host_bridge).await;
+            }
+        }
         // Home more recommendations
-        7 => {
+        9 => {
             if delta != 0 {
                 app.config.home_more_recommend = !app.config.home_more_recommend;
+                save_and_sync_host_config(app, host_bridge).await;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// “歌词浮窗”子页三行开关；吸附行只在拖动开启时可改。
+async fn apply_lyrics_settings_delta(
+    app: &mut AppState,
+    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+    delta: i32,
+) {
+    if delta == 0 {
+        return;
+    }
+
+    match app.lyrics_settings_selected {
+        0 => {
+            app.config.page_lyrics = !app.config.page_lyrics;
+            save_and_sync_host_config(app, host_bridge).await;
+        }
+        1 => {
+            app.config.page_lyrics_drag = !app.config.page_lyrics_drag;
+            save_and_sync_host_config(app, host_bridge).await;
+        }
+        2 => {
+            if app.config.page_lyrics_drag {
+                app.config.page_lyrics_snap = !app.config.page_lyrics_snap;
                 save_and_sync_host_config(app, host_bridge).await;
             }
         }
@@ -1540,3 +1690,34 @@ fn pick_shuffle_index(pl: &crate::tmplayer::data::playlist::Playlist) -> Option<
 }
 
 // fallback bars removed (leave spectrum empty when unavailable)
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 挂在设置弹窗下面的子页必须全部登记进 `settings_parent`：
+    /// 漏一个，那个页面按 Esc 就会直接退出全屏页（按键提示弹窗就这么漏过）。
+    #[test]
+    fn every_settings_child_returns_to_the_settings_modal() {
+        for child in [
+            Overlay::BarSettingsModal,
+            Overlay::LocalAudioSettingsModal,
+            Overlay::LyricsSettingsModal,
+            Overlay::HelpModal,
+            Overlay::AboutModal,
+            Overlay::AcoustIdModal,
+        ] {
+            assert_eq!(
+                settings_parent(child),
+                Some(Overlay::SettingsModal),
+                "{child:?} 应该回设置弹窗"
+            );
+        }
+
+        // 设置弹窗本身与 EQ/播放列表没有上一级。
+        assert_eq!(settings_parent(Overlay::SettingsModal), None);
+        assert_eq!(settings_parent(Overlay::EqModal), None);
+        assert_eq!(settings_parent(Overlay::Playlist), None);
+        assert_eq!(settings_parent(Overlay::None), None);
+    }
+}

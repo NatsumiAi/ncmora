@@ -1,4 +1,4 @@
-use crate::app::{App, Overlay};
+use crate::app::{App, HitRect, Overlay};
 use crate::data::config::{AudioQuality, BarChannels, BarNumber, Language, VisualizeMode};
 use crate::tmplayer::data::about::{BrailleImage, about_info};
 use crate::tmplayer::ui::borders::SOLID_BORDER;
@@ -10,6 +10,9 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 pub fn draw_settings_modal(frame: &mut Frame, app: &mut App) {
     let size = frame.area();
+
+    // 命中区每帧重注册：页面切换/滚动变化后不该留下上一页的矩形。
+    app.clear_settings_item_hits();
 
     if matches!(app.overlay, Some(Overlay::SettingsAbout)) {
         draw_about_modal(frame, app, size);
@@ -24,6 +27,7 @@ pub fn draw_settings_modal(frame: &mut Frame, app: &mut App) {
         Some(Overlay::Settings) => l(app, " 设置 ", " Settings "),
         Some(Overlay::SettingsPlayback) => l(app, " 播放设置 ", " Playback Settings "),
         Some(Overlay::SettingsKeybinds) => l(app, " 按键绑定 ", " Keybinds "),
+        Some(Overlay::SettingsLyrics) => l(app, " 歌词浮窗 ", " Lyrics Overlay "),
         Some(Overlay::SettingsAbout) => " about ",
         _ => l(app, " 设置 ", " Settings "),
     };
@@ -46,11 +50,12 @@ pub fn draw_settings_modal(frame: &mut Frame, app: &mut App) {
     match app.overlay {
         Some(Overlay::SettingsPlayback) => draw_playback_settings(frame, app, inner),
         Some(Overlay::SettingsKeybinds) => draw_keybind_settings(frame, app, inner),
+        Some(Overlay::SettingsLyrics) => draw_lyrics_settings(frame, app, inner),
         _ => draw_root_settings(frame, app, inner),
     }
 }
 
-fn draw_root_settings(frame: &mut Frame, app: &App, inner: Rect) {
+fn draw_root_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -86,10 +91,16 @@ fn draw_root_settings(frame: &mut Frame, app: &App, inner: Rect) {
         ),
         format!("{}...", l(app, "播放设置", "Playback Settings")),
         format!("{}...", l(app, "按键绑定", "Keybinds")),
+        format!("{}...", l(app, "歌词浮窗", "Lyrics Overlay")),
         format!(
             "{}: {}",
             l(app, "显示提示", "Show Hints"),
             on_off(app, app.config.show_hints)
+        ),
+        format!(
+            "{}: {}",
+            l(app, "小窗口显示", "Small Window Display"),
+            on_off(app, app.config.small_window_display)
         ),
         format!(
             "{}: {}",
@@ -132,9 +143,37 @@ fn draw_root_settings(frame: &mut Frame, app: &App, inner: Rect) {
         .style(Style::default().bg(app.theme.color_surface())),
         rows[2],
     );
+
+    // 命中区与上面的渲染同源：前 10 项在 rows[1] 逐行排布（超高的行会被
+    // Paragraph 裁掉，故只登记放得下的），about 固定在最底一行。
+    for idx in 0..about_idx {
+        if idx as u16 >= rows[1].height {
+            break;
+        }
+        app.push_settings_item_hit(
+            HitRect {
+                x: rows[1].x,
+                y: rows[1].y + idx as u16,
+                width: rows[1].width,
+                height: 1,
+            },
+            idx,
+        );
+    }
+    if rows[2].height >= 1 && rows[2].width >= 1 {
+        app.push_settings_item_hit(
+            HitRect {
+                x: rows[2].x,
+                y: rows[2].y,
+                width: rows[2].width,
+                height: 1,
+            },
+            about_idx,
+        );
+    }
 }
 
-fn draw_playback_settings(frame: &mut Frame, app: &App, inner: Rect) {
+fn draw_playback_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -192,11 +231,6 @@ fn draw_playback_settings(frame: &mut Frame, app: &App, inner: Rect) {
         ),
         format!(
             "{}: {}",
-            l(app, "页面歌词", "Page Lyrics"),
-            on_off(app, app.config.page_lyrics)
-        ),
-        format!(
-            "{}: {}",
             l(app, "音质", "Audio Quality"),
             audio_quality_label(app, app.config.audio_quality)
         ),
@@ -230,9 +264,107 @@ fn draw_playback_settings(frame: &mut Frame, app: &App, inner: Rect) {
         Paragraph::new("").style(Style::default().bg(app.theme.color_surface())),
         rows[2],
     );
+
+    // 命中区：与上面的渲染同源的逐行排布（放不下的行不登记）。
+    for idx in 0..items.len() {
+        if idx as u16 >= rows[1].height {
+            break;
+        }
+        app.push_settings_item_hit(
+            HitRect {
+                x: rows[1].x,
+                y: rows[1].y + idx as u16,
+                width: rows[1].width,
+                height: 1,
+            },
+            idx,
+        );
+    }
 }
 
-fn draw_keybind_settings(frame: &mut Frame, app: &App, inner: Rect) {
+fn draw_lyrics_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new("").style(Style::default().bg(app.theme.color_surface())),
+        rows[0],
+    );
+
+    // “边缘吸附”只在拖动开启时可选：关闭时灰置（与播放设置有别，这里明确表达依赖关系）。
+    let drag_enabled = app.config.page_lyrics_drag;
+    let items = [
+        format!(
+            "{}: {}",
+            l(app, "歌词浮窗", "Lyrics Overlay"),
+            on_off(app, app.config.page_lyrics)
+        ),
+        format!(
+            "{}: {}",
+            l(app, "歌词浮窗拖动", "Lyrics Overlay Drag"),
+            on_off(app, drag_enabled)
+        ),
+        format!(
+            "{}: {}",
+            l(app, "歌词浮窗边缘吸附", "Lyrics Overlay Edge Snap"),
+            on_off(app, app.config.page_lyrics_snap)
+        ),
+    ];
+
+    let lines: Vec<Line> = items
+        .iter()
+        .enumerate()
+        .map(|(idx, text)| {
+            let disabled = idx == 2 && !drag_enabled;
+            let style = if idx == app.settings_lyrics_selected {
+                if disabled {
+                    Style::default().fg(app.theme.color_subtext())
+                } else {
+                    Style::default()
+                        .fg(app.theme.color_accent2())
+                        .add_modifier(Modifier::BOLD)
+                }
+            } else if disabled {
+                Style::default().fg(app.theme.color_subtext())
+            } else {
+                Style::default().fg(app.theme.color_text())
+            };
+            Line::from(Span::styled(format!("  {}", text), style))
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(app.theme.color_surface())),
+        rows[1],
+    );
+
+    frame.render_widget(
+        Paragraph::new("").style(Style::default().bg(app.theme.color_surface())),
+        rows[2],
+    );
+
+    // 命中区：与上面的渲染同源的逐行排布（放不下的行不登记）。
+    for idx in 0..items.len() {
+        if idx as u16 >= rows[1].height {
+            break;
+        }
+        app.push_settings_item_hit(
+            HitRect {
+                x: rows[1].x,
+                y: rows[1].y + idx as u16,
+                width: rows[1].width,
+                height: 1,
+            },
+            idx,
+        );
+    }
+}
+
+fn draw_keybind_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -305,12 +437,7 @@ fn draw_keybind_settings(frame: &mut Frame, app: &App, inner: Rect) {
         .unwrap_or(app.settings_keybind_selected);
     let visible_rows = rows[1].height as usize;
     let total_rows = lines.len();
-    let max_scroll = total_rows.saturating_sub(visible_rows);
-    let scroll = if visible_rows == 0 || focus_index < visible_rows {
-        0
-    } else {
-        (focus_index + 1 - visible_rows).min(max_scroll)
-    };
+    let scroll = scroll_for_focus(total_rows, visible_rows, focus_index);
 
     frame.render_widget(
         Paragraph::new(lines)
@@ -349,6 +476,43 @@ fn draw_keybind_settings(frame: &mut Frame, app: &App, inner: Rect) {
             .wrap(ratatui::widgets::Wrap { trim: true }),
         rows[2],
     );
+
+    // 命中区：只登记窗口内可见的快捷键行（渲染带 `scroll` 偏移；末尾三行
+    // 是说明文字、不属于任何条目）。
+    for (idx, offset) in scrolled_rows(crate::app::SETTINGS_KEYBIND_ITEMS, visible_rows, scroll) {
+        app.push_settings_item_hit(
+            HitRect {
+                x: rows[1].x,
+                y: rows[1].y + offset,
+                width: rows[1].width,
+                height: 1,
+            },
+            idx,
+        );
+    }
+}
+
+/// 让 `focus` 落在可视窗口内的滚动偏移（渲染与命中区共用同一算法）。
+fn scroll_for_focus(total: usize, visible_rows: usize, focus: usize) -> usize {
+    if visible_rows == 0 || focus < visible_rows {
+        return 0;
+    }
+
+    (focus + 1 - visible_rows).min(total.saturating_sub(visible_rows))
+}
+
+/// 窗口内可见的条目：(条目序号, 相对行号)。渲染带同一 `scroll`，
+/// 因此这份映射就是"第几行画的是第几个条目"。
+fn scrolled_rows(total: usize, visible_rows: usize, scroll: usize) -> Vec<(usize, u16)> {
+    if visible_rows == 0 {
+        return Vec::new();
+    }
+
+    (scroll.min(total)..total)
+        .take(visible_rows)
+        .enumerate()
+        .map(|(offset, idx)| (idx, offset as u16))
+        .collect()
 }
 
 fn draw_about_modal(frame: &mut Frame, app: &mut App, size: Rect) {
@@ -865,6 +1029,59 @@ fn l<'a>(app: &App, zh: &'a str, en: &'a str) -> &'a str {
     match app.config.language {
         Language::Zh => zh,
         Language::En => en,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 焦点条目必须始终落在可视窗口内——否则键盘选中的那一行点不到，
+    /// 鼠标点的行也不是看到的那一行。
+    #[test]
+    fn focused_keybind_row_is_always_inside_the_window() {
+        let total = crate::app::SETTINGS_KEYBIND_ITEMS + 3;
+
+        for visible_rows in 1..=total {
+            for focus in 0..crate::app::SETTINGS_KEYBIND_ITEMS {
+                let scroll = scroll_for_focus(total, visible_rows, focus);
+                let end = (scroll + visible_rows).min(total);
+
+                assert!(
+                    scroll <= focus && focus < end,
+                    "visible_rows={visible_rows} focus={focus} scroll={scroll}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scroll_is_zero_when_everything_fits() {
+        assert_eq!(scroll_for_focus(23, 23, 19), 0);
+        assert_eq!(scroll_for_focus(23, 40, 19), 0);
+    }
+
+    /// 命中区行号必须与渲染行号一致：条目 i 画在 `i - scroll` 行。
+    #[test]
+    fn scrolled_rows_match_the_rendered_offsets() {
+        for scroll in [0usize, 1, 7, 12] {
+            let rows = scrolled_rows(crate::app::SETTINGS_KEYBIND_ITEMS, 8, scroll);
+            for (idx, offset) in &rows {
+                assert_eq!(*idx as isize - *offset as isize, scroll as isize);
+                assert!(*offset < 8);
+            }
+            // 窗口内的条目一个不漏
+            let expected: Vec<usize> = (scroll..crate::app::SETTINGS_KEYBIND_ITEMS)
+                .take(8)
+                .collect();
+            let got: Vec<usize> = rows.iter().map(|(idx, _)| *idx).collect();
+            assert_eq!(got, expected);
+        }
+    }
+
+    #[test]
+    fn scrolled_rows_is_empty_without_room() {
+        assert!(scrolled_rows(crate::app::SETTINGS_KEYBIND_ITEMS, 0, 3).is_empty());
     }
 }
 

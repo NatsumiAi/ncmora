@@ -1,4 +1,5 @@
 use crate::data::config::GraphicsProtocol;
+pub use crate::data::config::VisualizeMode;
 use crate::tmplayer::data::assets;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,20 @@ pub struct Config {
     #[serde(default)]
     pub page_lyrics: bool,
 
+    /// 歌词浮窗的从属项（与主应用同步）：是否允许鼠标拖动。
+    #[serde(default = "default_page_lyrics_drag")]
+    pub page_lyrics_drag: bool,
+
+    /// 拖动结束后是否吸附到最近的边（左/右/上/下，另一轴保持自由；仅拖动开启时可改）。
+    #[serde(default = "default_page_lyrics_snap")]
+    pub page_lyrics_snap: bool,
+
+    /// 歌词浮窗左上角的归一化位置（0..=1）。
+    #[serde(default = "default_page_lyrics_pos")]
+    pub page_lyrics_pos_x: f32,
+    #[serde(default = "default_page_lyrics_pos")]
+    pub page_lyrics_pos_y: f32,
+
     #[serde(default = "default_kitty_cover_scale_percent")]
     pub kitty_cover_scale_percent: u8,
 
@@ -52,6 +67,9 @@ pub struct Config {
 
     #[serde(default = "default_show_hints")]
     pub show_hints: bool,
+
+    #[serde(default = "default_small_window_display")]
+    pub small_window_display: bool,
 
     #[serde(default)]
     pub home_more_recommend: bool,
@@ -133,43 +151,9 @@ pub struct Config {
 
     #[serde(default = "default_keybind_toggle_like_fullscreen")]
     pub keybind_toggle_like_fullscreen: String,
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum VisualizeMode {
-    Off,
-    Bars,
-    Oscilloscope,
-}
-
-impl VisualizeMode {
-    /// 该模式是否依赖 cava 的频谱数据。示波器读播放链路上的 PCM 抽头，不需要。
-    pub fn needs_cava(self) -> bool {
-        matches!(self, VisualizeMode::Bars)
-    }
-
-    /// 数据源就绪，可供用户选中。
-    pub fn is_available(self) -> bool {
-        !self.needs_cava() || crate::tmplayer::audio::cava::is_available()
-    }
-
-    /// 切到下一个**可用**模式：数据源缺失的模式被跳过，而不是让整项无法调整。
-    pub fn cycle(self, delta: i32) -> Self {
-        const MODES: [VisualizeMode; 3] = [
-            VisualizeMode::Off,
-            VisualizeMode::Bars,
-            VisualizeMode::Oscilloscope,
-        ];
-
-        let len = MODES.len() as i32;
-        let step = if delta < 0 { -1 } else { 1 };
-        let start = MODES.iter().position(|mode| *mode == self).unwrap_or(1) as i32;
-        (1..=len)
-            .map(|offset| MODES[(start + step * offset).rem_euclid(len) as usize])
-            .find(|mode| mode.is_available())
-            .unwrap_or(self)
-    }
+    #[serde(default = "default_keybind_small_window_toggle")]
+    pub keybind_small_window_toggle: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,6 +258,18 @@ fn default_album_border() -> bool {
     true
 }
 
+fn default_page_lyrics_drag() -> bool {
+    true
+}
+
+fn default_page_lyrics_snap() -> bool {
+    true
+}
+
+fn default_page_lyrics_pos() -> f32 {
+    1.0
+}
+
 fn default_eq_bands_db() -> [f32; crate::tmplayer::app::state::EQ_BANDS] {
     DEFAULT_EQ_BANDS_DB
 }
@@ -376,6 +372,14 @@ fn default_keybind_toggle_like_fullscreen() -> String {
     "L".to_string()
 }
 
+fn default_small_window_display() -> bool {
+    true
+}
+
+fn default_keybind_small_window_toggle() -> String {
+    "Alt+X".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -389,12 +393,17 @@ impl Default for Config {
             album_border: default_album_border(),
             graphics_protocol: GraphicsProtocol::default(),
             page_lyrics: false,
+            page_lyrics_drag: default_page_lyrics_drag(),
+            page_lyrics_snap: default_page_lyrics_snap(),
+            page_lyrics_pos_x: default_page_lyrics_pos(),
+            page_lyrics_pos_y: default_page_lyrics_pos(),
             kitty_cover_scale_percent: default_kitty_cover_scale_percent(),
             super_smooth_bar: false,
             bars_gap: false,
             audio_quality: default_audio_quality(),
             playback_memory: false,
             show_hints: default_show_hints(),
+            small_window_display: default_small_window_display(),
             home_more_recommend: false,
             bar_number: default_bar_number(),
             bar_channels: default_bar_channels(),
@@ -422,6 +431,7 @@ impl Default for Config {
             keybind_fullscreen_eq: default_keybind_fullscreen_eq(),
             keybind_fullscreen_eq_reset: default_keybind_fullscreen_eq_reset(),
             keybind_toggle_like_fullscreen: default_keybind_toggle_like_fullscreen(),
+            keybind_small_window_toggle: default_keybind_small_window_toggle(),
         }
     }
 }
@@ -468,6 +478,10 @@ impl Config {
             || !raw.contains("audio_quality")
             || !raw.contains("playback_memory")
             || !raw.contains("page_lyrics")
+            || !raw.contains("page_lyrics_drag")
+            || !raw.contains("page_lyrics_snap")
+            || !raw.contains("page_lyrics_pos_x")
+            || !raw.contains("page_lyrics_pos_y")
             || !raw.contains("show_hints")
             || !raw.contains("home_more_recommend")
             || !raw.contains("keybind_search_box")
@@ -488,6 +502,8 @@ impl Config {
             || !raw.contains("keybind_fullscreen_eq")
             || !raw.contains("keybind_fullscreen_eq_reset")
             || !raw.contains("keybind_toggle_like_fullscreen")
+            || !raw.contains("small_window_display")
+            || !raw.contains("keybind_small_window_toggle")
             || legacy_startup_folder_key_present
             || !raw.contains("spectrum_hz")
             || forced_visualize_fallback

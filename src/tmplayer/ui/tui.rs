@@ -25,6 +25,8 @@ pub struct UiLayout {
     pub info_progress: Rect,
     pub info_volume: Rect,
     pub info_controls: Rect,
+    /// 标题/爱心行（爱心贴该行右端）。
+    pub info_meta: Rect,
 
     pub info_cover_image: Rect,
 
@@ -35,6 +37,8 @@ pub struct UiLayout {
     pub playlist_cover_image: Rect,
 
     pub spectrum_rect: Rect,
+    /// 当前弹窗（若有）的条目行。
+    pub modal_rows: ModalRows,
 }
 
 pub struct Tui {
@@ -85,6 +89,16 @@ impl Tui {
         }
 
         let mut layout_out = UiLayout::default();
+
+        // 小窗口显示开启时，全屏页过小不再显示提示，而是直接请求退出回主程序。
+        // 在 draw 之前检测，避免过小提示闪现一帧。
+        if app.config.small_window_display
+            && let Ok((width, height)) = terminal::size()
+            && (width < 50 || height < 12)
+        {
+            self.should_quit = true;
+            return Ok(layout_out);
+        }
 
         self.terminal.draw(|f| {
             let size = f.area();
@@ -164,6 +178,11 @@ impl Tui {
             layout_out.info_progress = info_l.progress;
             layout_out.info_volume = info_l.volume;
             layout_out.info_controls = info_l.controls;
+            layout_out.info_meta = if info_panel::core_rows_visible(&info_l) {
+                info_l.meta
+            } else {
+                Rect::default()
+            };
 
             // For kitty graphics, we draw into the inner area (optional border).
             layout_out.info_cover_image = info_l.cover.inner(ratatui::layout::Margin {
@@ -251,12 +270,21 @@ impl Tui {
 
             // modals (top-most)
             match app.overlay {
-                Overlay::SettingsModal => render_settings_modal(f, size, app),
-                Overlay::BarSettingsModal => render_bar_settings_modal(f, size, app),
-                Overlay::LocalAudioSettingsModal => render_local_audio_settings_modal(f, size, app),
+                Overlay::SettingsModal => {
+                    render_settings_modal(f, size, app, &mut layout_out.modal_rows)
+                }
+                Overlay::BarSettingsModal => {
+                    render_bar_settings_modal(f, size, app, &mut layout_out.modal_rows)
+                }
+                Overlay::LocalAudioSettingsModal => {
+                    render_local_audio_settings_modal(f, size, app, &mut layout_out.modal_rows)
+                }
+                Overlay::LyricsSettingsModal => {
+                    render_lyrics_settings_modal(f, size, app, &mut layout_out.modal_rows)
+                }
                 Overlay::AboutModal => render_about_modal(f, size, app),
                 Overlay::AcoustIdModal => render_acoustid_modal(f, size, app),
-                Overlay::HelpModal => render_help_modal(f, size, app),
+                Overlay::HelpModal => render_help_modal(f, size, app, &mut layout_out.modal_rows),
                 Overlay::EqModal => render_eq_modal(f, size, app),
                 _ => {}
             }
@@ -278,12 +306,7 @@ impl Tui {
     /// ratatui 在这些占位处跳过写入，于是底边框残留成 `─ ─ ─` 的断连样子。
     /// 这一点已用 TestBackend 逐 cell 验证：仅 Block 时该行完整，叠加重绘
     /// 后才出现空格。
-    fn render_hint_in_border(
-        f: &mut ratatui::Frame,
-        app: &AppState,
-        area: Rect,
-        left_panel: Rect,
-    ) {
+    fn render_hint_in_border(f: &mut ratatui::Frame, app: &AppState, area: Rect, left_panel: Rect) {
         // 只覆盖左面板横向范围，且要留出它自己的左右下角
         if left_panel.width < 4 || area.height == 0 {
             return;
@@ -387,7 +410,71 @@ fn centered_rect(size: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
+/// 当前弹窗里可点击的条目行，按条目序号逐行登记。
+///
+/// `Copy` 且定长，好跟着 `UiLayout` 一起传出来；渲染时填、`hit_test` 时查，
+/// 两边共用同一份矩形，不会各算一遍偏移。
+#[derive(Debug, Clone, Copy)]
+pub struct ModalRows {
+    rows: [(usize, Rect); ModalRows::MAX],
+    len: usize,
+}
+
+impl ModalRows {
+    /// 单个弹窗的行数上限。取最长的一个（按键提示弹窗 17 条）再留些余量；
+    /// 超出的行会被丢弃，所以新增更长的弹窗列表时要同步调大。
+    pub const MAX: usize = 24;
+
+    /// 登记一行：`index` 是该行代表的**条目序号**，不是登记次序。
+    ///
+    /// 弹窗列表会被截断（终端太矮）或被滚动（按键提示弹窗），行号与条目号
+    /// 并不相等，消费端要的是条目号，所以两者必须分开存。
+    /// 超出上限的行被丢弃（渲染本身也会被裁掉）。
+    fn push(&mut self, rect: Rect, index: usize) {
+        if self.len < Self::MAX && rect.width > 0 && rect.height > 0 {
+            self.rows[self.len] = (index, rect);
+            self.len += 1;
+        }
+    }
+
+    /// 某个条目序号画在哪一行（该条目未显示时为 `None`）。
+    pub fn get(&self, index: usize) -> Option<Rect> {
+        self.rows[..self.len]
+            .iter()
+            .find(|(row_index, _)| *row_index == index)
+            .map(|(_, rect)| *rect)
+    }
+
+    /// 已登记的行数（只在测试里用，release 构建不该带上）。
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// 命中的条目序号。
+    fn hit(&self, col: u16, row: u16) -> Option<usize> {
+        self.rows[..self.len]
+            .iter()
+            .find(|(_, rect)| contains(*rect, col, row))
+            .map(|(index, _)| *index)
+    }
+}
+
+impl Default for ModalRows {
+    fn default() -> Self {
+        Self {
+            rows: [(0, Rect::default()); Self::MAX],
+            len: 0,
+        }
+    }
+}
+
+fn render_settings_modal(
+    f: &mut ratatui::Frame,
+    size: Rect,
+    app: &mut AppState,
+    modal_rows: &mut ModalRows,
+) {
     let area = centered_rect(size, 70, 20);
     f.render_widget(ratatui::widgets::Clear, area);
 
@@ -437,10 +524,16 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
         ),
         format!("{}...", lang_text(app, "播放设置", "Playback Settings")),
         format!("{}...", lang_text(app, "按键绑定", "Keybinds")),
+        format!("{}...", lang_text(app, "歌词浮窗", "Lyrics Overlay")),
         format!(
             "{}: {}",
             lang_text(app, "显示提示", "Show Hints"),
             lang_on_off(app, app.config.show_hints)
+        ),
+        format!(
+            "{}: {}",
+            lang_text(app, "小窗口显示", "Small Window Display"),
+            lang_on_off(app, app.config.small_window_display)
         ),
         format!(
             "{}: {}",
@@ -464,24 +557,36 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
     // "about" is pinned to the bottom row of the modal; the rest stack from the top.
     let about_idx = items.len().saturating_sub(1);
     for (idx, text) in items.iter().take(about_idx).enumerate() {
+        if idx as u16 >= rows[1].height {
+            break;
+        }
+        let rect = Rect {
+            x: rows[1].x,
+            y: rows[1].y + idx as u16,
+            width: rows[1].width,
+            height: 1,
+        };
         f.render_widget(
             Paragraph::new(Line::styled(format!("  {}", text), item_style(idx))),
-            Rect {
-                x: rows[1].x,
-                y: rows[1].y + idx as u16,
-                width: rows[1].width,
-                height: 1,
-            },
+            rect,
         );
+        modal_rows.push(rect, idx);
     }
+
+    let bottom_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(rows[2]);
 
     f.render_widget(
         Paragraph::new(Line::styled(
             format!("  {}", items[about_idx]),
             item_style(about_idx),
         )),
-        rows[2],
+        bottom_cols[0],
     );
+    modal_rows.push(bottom_cols[0], about_idx);
+    f.render_widget(Paragraph::new(""), bottom_cols[1]);
 }
 
 fn render_acoustid_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
@@ -532,7 +637,12 @@ fn render_acoustid_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
     f.render_widget(p, inner);
 }
 
-fn render_bar_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
+fn render_bar_settings_modal(
+    f: &mut ratatui::Frame,
+    size: Rect,
+    app: &mut AppState,
+    modal_rows: &mut ModalRows,
+) {
     let area = centered_rect(size, 70, 20);
     f.render_widget(ratatui::widgets::Clear, area);
 
@@ -612,11 +722,6 @@ fn render_bar_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppSt
         ),
         format!(
             "{}: {}",
-            lang_text(app, "页面歌词", "Page Lyrics"),
-            lang_on_off(app, app.config.page_lyrics)
-        ),
-        format!(
-            "{}: {}",
             lang_text(app, "音质", "Audio Quality"),
             match app.config.audio_quality {
                 crate::tmplayer::data::config::AudioQuality::Standard =>
@@ -650,6 +755,9 @@ fn render_bar_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppSt
     ];
 
     for (idx, text) in items.iter().enumerate() {
+        if idx as u16 >= rows[1].height {
+            break;
+        }
         let style = if idx == app.bar_settings_selected {
             Style::default()
                 .fg(app.theme.color_accent2())
@@ -657,21 +765,116 @@ fn render_bar_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppSt
         } else {
             Style::default().fg(app.theme.color_text())
         };
+        let rect = Rect {
+            x: rows[1].x,
+            y: rows[1].y + idx as u16,
+            width: rows[1].width,
+            height: 1,
+        };
         f.render_widget(
             Paragraph::new(Line::styled(format!("  {}", text), style)),
-            Rect {
-                x: rows[1].x,
-                y: rows[1].y + idx as u16,
-                width: rows[1].width,
-                height: 1,
-            },
+            rect,
         );
+        modal_rows.push(rect, idx);
     }
 
     f.render_widget(Paragraph::new(""), rows[2]);
 }
 
-fn render_local_audio_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
+fn render_lyrics_settings_modal(
+    f: &mut ratatui::Frame,
+    size: Rect,
+    app: &mut AppState,
+    modal_rows: &mut ModalRows,
+) {
+    let area = centered_rect(size, 70, 20);
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_set(crate::tmplayer::ui::borders::SOLID_BORDER)
+        .title(lang_text(app, " 歌词浮窗 ", " Lyrics Overlay "))
+        .style(
+            Style::default()
+                .fg(app.theme.color_subtext())
+                .bg(app.theme.color_surface()),
+        );
+    f.render_widget(block, area);
+
+    let inner = area.inner(ratatui::layout::Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    f.render_widget(Paragraph::new(""), rows[0]);
+
+    // 与主应用设置同构：吸附行只在拖动开启时可改，关闭时灰置。
+    let drag_enabled = app.config.page_lyrics_drag;
+    let items = [
+        format!(
+            "{}: {}",
+            lang_text(app, "歌词浮窗", "Lyrics Overlay"),
+            lang_on_off(app, app.config.page_lyrics)
+        ),
+        format!(
+            "{}: {}",
+            lang_text(app, "歌词浮窗拖动", "Lyrics Overlay Drag"),
+            lang_on_off(app, drag_enabled)
+        ),
+        format!(
+            "{}: {}",
+            lang_text(app, "歌词浮窗边缘吸附", "Lyrics Overlay Edge Snap"),
+            lang_on_off(app, app.config.page_lyrics_snap)
+        ),
+    ];
+
+    for (idx, text) in items.iter().enumerate() {
+        if idx as u16 >= rows[1].height {
+            break;
+        }
+        let disabled = idx == 2 && !drag_enabled;
+        let style = if idx == app.lyrics_settings_selected {
+            if disabled {
+                Style::default().fg(app.theme.color_subtext())
+            } else {
+                Style::default()
+                    .fg(app.theme.color_accent2())
+                    .add_modifier(Modifier::BOLD)
+            }
+        } else if disabled {
+            Style::default().fg(app.theme.color_subtext())
+        } else {
+            Style::default().fg(app.theme.color_text())
+        };
+        let rect = Rect {
+            x: rows[1].x,
+            y: rows[1].y + idx as u16,
+            width: rows[1].width,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Line::styled(format!("  {}", text), style)),
+            rect,
+        );
+        modal_rows.push(rect, idx);
+    }
+
+    f.render_widget(Paragraph::new(""), rows[2]);
+}
+
+fn render_local_audio_settings_modal(
+    f: &mut ratatui::Frame,
+    size: Rect,
+    app: &mut AppState,
+    modal_rows: &mut ModalRows,
+) {
     let area = centered_rect(size, 60, 12);
     f.render_widget(ratatui::widgets::Clear, area);
 
@@ -798,6 +1001,24 @@ fn render_local_audio_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &m
         .style(Style::default().bg(app.theme.color_surface()))
         .wrap(Wrap { trim: true });
     f.render_widget(p, inner);
+
+    // 命中区：条目从 inner 的第 3 行起（上面两句是空行）。标签都短于弹窗宽度，
+    // 不会被 `Wrap` 折行，故行号与条目号一一对应。
+    for idx in 0..items.len() {
+        let offset = 2 + idx;
+        if offset >= inner.height as usize {
+            break;
+        }
+        modal_rows.push(
+            Rect {
+                x: inner.x,
+                y: inner.y + offset as u16,
+                width: inner.width,
+                height: 1,
+            },
+            idx,
+        );
+    }
 }
 
 fn render_about_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
@@ -1048,7 +1269,83 @@ fn select_about_braille_art(
         })
 }
 
-fn render_help_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
+/// 按键提示弹窗的条目 `(说明, 按键)`。
+///
+/// 渲染与键盘/滚轮翻页共用同一份，避免"条目数写死"与列表实际长度不一致
+/// （此前末尾几行因此无法用键盘选中）。
+pub fn help_items(app: &AppState) -> Vec<(String, String)> {
+    let item = |zh: &'static str, en: &'static str, key: &str| {
+        (lang_text(app, zh, en).to_string(), key.to_string())
+    };
+
+    vec![
+        item("搜索框", "Search Box", &app.config.keybind_search_box),
+        item("全屏播放页", "Fullscreen", &app.config.keybind_fullscreen),
+        item("设置弹窗", "Settings Modal", &app.config.keybind_settings),
+        item("侧边栏", "Sidebar", &app.config.keybind_sidebar),
+        item("退出应用", "Quit", &app.config.keybind_quit),
+        item(
+            "快速上翻页（主程序）",
+            "Quick Page Up (Host)",
+            &app.config.keybind_page_up,
+        ),
+        item(
+            "快速下翻页（主程序）",
+            "Quick Page Down (Host)",
+            &app.config.keybind_page_down,
+        ),
+        item("上一首", "Previous", &app.config.keybind_fullscreen_prev),
+        item("下一首", "Next", &app.config.keybind_fullscreen_next),
+        item(
+            "播放/暂停",
+            "Play/Pause",
+            &app.config.keybind_fullscreen_toggle_play_pause,
+        ),
+        item(
+            "全屏模式切换",
+            "Fullscreen Mode Switch",
+            &app.config.keybind_fullscreen_toggle_mode,
+        ),
+        item(
+            "EQ均衡器",
+            "EQ Equalizer",
+            &app.config.keybind_fullscreen_eq,
+        ),
+        item(
+            "EQ重置",
+            "EQ Reset",
+            &app.config.keybind_fullscreen_eq_reset,
+        ),
+        item(
+            "收藏/取消收藏",
+            "Like/Unlike",
+            &app.config.keybind_toggle_like_fullscreen,
+        ),
+        item(
+            "小窗口切换显示",
+            "Small Window Switch",
+            &app.config.keybind_small_window_toggle,
+        ),
+        item(
+            "侧边栏歌单区切换",
+            "Sidebar Playlist Section Switch",
+            "Ctrl+Up/Down",
+        ),
+        item("按键绑定", "Keybinds", "Ctrl+K"),
+    ]
+}
+
+/// 按键提示弹窗的条目数（键盘/滚轮翻页用）。
+pub fn help_item_count(app: &AppState) -> usize {
+    help_items(app).len()
+}
+
+fn render_help_modal(
+    f: &mut ratatui::Frame,
+    size: Rect,
+    app: &mut AppState,
+    modal_rows: &mut ModalRows,
+) {
     let area = centered_rect(size, 70, 20);
     f.render_widget(ratatui::widgets::Clear, area);
 
@@ -1078,69 +1375,7 @@ fn render_help_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
         .split(inner);
     f.render_widget(Paragraph::new(""), rows[0]);
 
-    let items = [
-        (
-            lang_text(app, "搜索框", "Search Box"),
-            app.config.keybind_search_box.as_str(),
-        ),
-        (
-            lang_text(app, "全屏播放页", "Fullscreen"),
-            app.config.keybind_fullscreen.as_str(),
-        ),
-        (
-            lang_text(app, "设置弹窗", "Settings Modal"),
-            app.config.keybind_settings.as_str(),
-        ),
-        (
-            lang_text(app, "侧边栏", "Sidebar"),
-            app.config.keybind_sidebar.as_str(),
-        ),
-        (
-            lang_text(app, "退出应用", "Quit"),
-            app.config.keybind_quit.as_str(),
-        ),
-        (
-            lang_text(app, "快速上翻页（主程序）", "Quick Page Up (Host)"),
-            app.config.keybind_page_up.as_str(),
-        ),
-        (
-            lang_text(app, "快速下翻页（主程序）", "Quick Page Down (Host)"),
-            app.config.keybind_page_down.as_str(),
-        ),
-        (
-            lang_text(app, "上一首", "Previous"),
-            app.config.keybind_fullscreen_prev.as_str(),
-        ),
-        (
-            lang_text(app, "下一首", "Next"),
-            app.config.keybind_fullscreen_next.as_str(),
-        ),
-        (
-            lang_text(app, "播放/暂停", "Play/Pause"),
-            app.config.keybind_fullscreen_toggle_play_pause.as_str(),
-        ),
-        (
-            lang_text(app, "全屏模式切换", "Fullscreen Mode Switch"),
-            app.config.keybind_fullscreen_toggle_mode.as_str(),
-        ),
-        (
-            lang_text(app, "EQ均衡器", "EQ Equalizer"),
-            app.config.keybind_fullscreen_eq.as_str(),
-        ),
-        (
-            lang_text(app, "EQ重置", "EQ Reset"),
-            app.config.keybind_fullscreen_eq_reset.as_str(),
-        ),
-        (
-            lang_text(app, "收藏/取消收藏", "Like/Unlike"),
-            app.config.keybind_toggle_like_fullscreen.as_str(),
-        ),
-        (
-            lang_text(app, "侧边栏歌单区切换", "Sidebar Playlist Section Switch"),
-            "Ctrl+Up/Down",
-        ),
-        (lang_text(app, "按键绑定", "Keybinds"), "Ctrl+K"),
-    ];
+    let items = help_items(app);
 
     let visible_rows = rows[1].height as usize;
     let total_rows = items.len();
@@ -1160,15 +1395,17 @@ fn render_help_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
         } else {
             Style::default().fg(app.theme.color_text())
         };
+        let rect = Rect {
+            x: rows[1].x,
+            y: rows[1].y + (idx - scroll) as u16,
+            width: rows[1].width,
+            height: 1,
+        };
         f.render_widget(
             Paragraph::new(Line::styled(format!("  {}: {}", label, key), style)),
-            Rect {
-                x: rows[1].x,
-                y: rows[1].y + (idx - scroll) as u16,
-                width: rows[1].width,
-                height: 1,
-            },
+            rect,
         );
+        modal_rows.push(rect, idx);
     }
 
     f.render_widget(
@@ -1452,6 +1689,17 @@ fn render_eq_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
     );
 }
 
+/// 标题行爱心所在的单元格（`compose_left_right_line` 把爱心右对齐到该行最后一格）。
+///
+/// `meta` 为 3 行块，只有首行画标题与爱心；未绘制（尺寸为 0）时返回 `None`。
+fn heart_cell(meta: Rect) -> Option<(u16, u16)> {
+    if meta.width == 0 || meta.height == 0 {
+        return None;
+    }
+
+    Some((meta.x + meta.width - 1, meta.y))
+}
+
 pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option<Action> {
     // Eq modal consumes clicks first
     if app.overlay == Overlay::EqModal {
@@ -1545,12 +1793,30 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
         }
     }
 
+    // 其余弹窗盖住整页：未命中弹窗自身的点击一律吞掉，不许穿透到底层的
+    // 进度条/音量/控制/播放列表（否则在设置弹窗上点一下就可能误播、
+    // 误 seek、误改音量）。播放列表面板只占左栏，不在拦截范围内。
+    if app.overlay != Overlay::None && app.overlay != Overlay::Playlist {
+        // 设置类弹窗的条目行：单击聚焦（双击在事件循环里判定为 Enter）。
+        if let Some(index) = layout.modal_rows.hit(col, row) {
+            return Some(Action::ModalSelect(index));
+        }
+        return None;
+    }
+
     if contains(layout.info_controls, col, row) {
         return control_buttons::hit_test(layout.info_controls, app, col, row);
     }
 
-    if contains(layout.info_volume, col, row) {
-        return Some(Action::SetVolume(ratio_in_bar(layout.info_volume, col)));
+    // 爱心贴标题行右端，只有那一格可点；meta 下面的艺术字/专辑行没有爱心。
+    if let Some((heart_x, heart_y)) = heart_cell(layout.info_meta) {
+        if col == heart_x && row == heart_y {
+            return Some(Action::ToggleFavorite);
+        }
+    }
+
+    if let Some(volume) = volume_at(layout, col, row) {
+        return Some(Action::SetVolume(volume));
     }
 
     if contains(layout.info_progress, col, row) {
@@ -1561,11 +1827,32 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
     }
 
     if contains(layout.playlist_list_inner, col, row) {
-        let idx = row.saturating_sub(layout.playlist_list_inner.y) as usize;
-        return Some(Action::PlaylistSelect(idx));
+        // 渲染带虚拟滚动窗口 + 末尾 2 行 footer，命中区必须用同一份映射，
+        // 否则列表滚过一屏后点到的不是看到的那首。
+        let offset = row.saturating_sub(layout.playlist_list_inner.y) as usize;
+        if offset < app.playlist_list_rows {
+            return Some(Action::PlaylistSelect(app.playlist_list_scroll + offset));
+        }
+        return None;
     }
 
     None
+}
+
+/// 滚轮是否落在播放列表面板上（面板打开时才响应滚动聚焦）。
+pub fn wheel_over_playlist(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> bool {
+    app.overlay == Overlay::Playlist && contains(layout.playlist_rect, col, row)
+}
+
+/// 音量条上某列对应的音量（0..=1）；不在条内时返回 `None`（点击用）。
+pub fn volume_at(layout: &UiLayout, col: u16, row: u16) -> Option<f32> {
+    contains(layout.info_volume, col, row).then(|| ratio_in_bar(layout.info_volume, col))
+}
+
+/// 按住拖动时的音量换算：列超出条子按端点钳制、不再要求落在条内，
+/// 这样"起点在条内、拖出条外"仍持续生效。
+pub fn volume_for_drag(layout: &UiLayout, col: u16) -> Option<f32> {
+    (layout.info_volume.width > 2).then(|| ratio_in_bar(layout.info_volume, col))
 }
 
 fn contains(r: Rect, col: u16, row: u16) -> bool {
@@ -1613,5 +1900,453 @@ fn lang_on_off(app: &AppState, enabled: bool) -> &'static str {
                 "Off"
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tmplayer::ui::theme::{ColorCapability, Theme, ThemeName, ThemePalette};
+
+    fn rect(x: u16, y: u16, width: u16, height: u16) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn state(overlay: Overlay) -> AppState {
+        let theme = Theme {
+            name: ThemeName::System,
+            palette: ThemePalette {
+                text: (255, 255, 255),
+                subtext: (128, 128, 128),
+                base: (0, 0, 0),
+                surface: (16, 16, 16),
+                buff: (64, 64, 64),
+                accent: (255, 0, 0),
+                accent2: (0, 255, 0),
+                accent3: (0, 0, 255),
+            },
+            capability: ColorCapability::TrueColor,
+        };
+        let mut app = AppState::new(
+            crate::tmplayer::data::config::Config::default(),
+            theme,
+            crate::data::config::Language::Zh,
+        );
+        app.overlay = overlay;
+        app
+    }
+
+    /// 控件矩形都在左栏同一列上，互不重叠；用于验证"点击到底落在哪"。
+    fn page_layout() -> UiLayout {
+        UiLayout {
+            info_controls: rect(0, 0, 30, 1),
+            info_progress: rect(0, 1, 30, 1),
+            info_volume: rect(0, 2, 30, 1),
+            playlist_list_inner: rect(0, 3, 30, 4),
+            ..UiLayout::default()
+        }
+    }
+
+    /// 弹窗盖住整页：未命中弹窗自身的点击必须被吞掉，不许穿透到底层控件。
+    #[test]
+    fn modal_overlays_swallow_page_clicks() {
+        let layout = page_layout();
+        // 播放列表命中要按渲染窗口换算：给一行都放得下的窗口。
+        let mut plain = state(Overlay::None);
+        plain.playlist_list_scroll = 0;
+        plain.playlist_list_rows = layout.playlist_list_inner.height as usize;
+
+        // 先确认坐标确实压在活控件上，否则下面的断言是空的
+        assert!(matches!(
+            hit_test(&layout, &plain, 0, 1),
+            Some(Action::SeekToFraction(_))
+        ));
+        assert!(matches!(
+            hit_test(&layout, &plain, 0, 2),
+            Some(Action::SetVolume(_))
+        ));
+        assert!(matches!(
+            hit_test(&layout, &plain, 0, 3),
+            Some(Action::PlaylistSelect(_))
+        ));
+
+        for overlay in [
+            Overlay::SettingsModal,
+            Overlay::BarSettingsModal,
+            Overlay::LocalAudioSettingsModal,
+            Overlay::AboutModal,
+            Overlay::AcoustIdModal,
+            Overlay::HelpModal,
+            Overlay::EqModal,
+        ] {
+            let app = state(overlay);
+            for row in [0u16, 1, 2, 3] {
+                assert_eq!(
+                    hit_test(&layout, &app, 0, row),
+                    None,
+                    "{overlay:?} 在 ({0},{row}) 的点击应被吞掉",
+                    0
+                );
+            }
+        }
+    }
+
+    /// 播放列表面板只占左栏，不拦整页。
+    #[test]
+    fn playlist_overlay_keeps_the_page_clickable() {
+        let layout = page_layout();
+        let app = state(Overlay::Playlist);
+
+        assert_eq!(
+            hit_test(&layout, &app, 0, 1),
+            Some(Action::SeekToFraction(0.0))
+        );
+    }
+
+    /// 爱心落在标题行（meta 块首行）最后一格，不是块内任意一行。
+    #[test]
+    fn heart_cell_is_the_last_column_of_the_first_meta_row() {
+        let meta = rect(10, 4, 26, 3);
+
+        assert_eq!(heart_cell(meta), Some((10 + 26 - 1, 4)));
+        // 同一列的下面两行是艺术字/专辑，不是爱心
+        assert_ne!(heart_cell(meta), Some((35, 5)));
+        assert_ne!(heart_cell(meta), Some((35, 6)));
+    }
+
+    #[test]
+    fn heart_cell_is_absent_when_the_row_is_not_drawn() {
+        assert_eq!(heart_cell(Rect::default()), None);
+        assert_eq!(heart_cell(rect(3, 7, 0, 3)), None);
+        assert_eq!(heart_cell(rect(3, 7, 12, 0)), None);
+    }
+
+    /// 1 格宽的 meta 行：爱心就在那一格。
+    #[test]
+    fn heart_cell_handles_a_single_cell_row() {
+        assert_eq!(heart_cell(rect(0, 0, 1, 1)), Some((0, 0)));
+    }
+
+    /// 标题行的点击落在爱心那一格才切收藏，其余位置不误触。
+    #[test]
+    fn clicking_the_heart_cell_toggles_favorite() {
+        let layout = UiLayout {
+            info_meta: rect(2, 5, 20, 3),
+            ..UiLayout::default()
+        };
+        let app = state(Overlay::None);
+
+        assert_eq!(
+            hit_test(&layout, &app, 2 + 20 - 1, 5),
+            Some(Action::ToggleFavorite)
+        );
+        assert_eq!(
+            hit_test(&layout, &app, 2 + 20 - 2, 5),
+            None,
+            "标题文字不算爱心"
+        );
+        assert_eq!(
+            hit_test(&layout, &app, 2 + 20 - 1, 6),
+            None,
+            "专辑行没有爱心"
+        );
+    }
+
+    /// 设置弹窗：命中条目行 → ModalSelect(序号)，弹窗内其余位置仍被吞掉。
+    #[test]
+    fn settings_modal_rows_are_clickable() {
+        let mut layout = page_layout();
+        layout.modal_rows.push(rect(2, 10, 20, 1), 0);
+        layout.modal_rows.push(rect(2, 11, 20, 1), 1);
+        layout.modal_rows.push(rect(2, 12, 20, 1), 2);
+
+        let app = state(Overlay::SettingsModal);
+
+        assert_eq!(hit_test(&layout, &app, 5, 10), Some(Action::ModalSelect(0)));
+        assert_eq!(hit_test(&layout, &app, 5, 11), Some(Action::ModalSelect(1)));
+        assert_eq!(hit_test(&layout, &app, 5, 12), Some(Action::ModalSelect(2)));
+        assert_eq!(hit_test(&layout, &app, 5, 13), None, "行外不命中");
+        assert_eq!(hit_test(&layout, &app, 0, 1), None, "底层进度条仍被吞掉");
+    }
+
+    /// 空矩形与超上限的行不登记（渲染本来就画不出来）。
+    #[test]
+    fn modal_rows_ignore_degenerate_and_overflowing_rows() {
+        let mut rows = ModalRows::default();
+        rows.push(Rect::default(), 0);
+        assert_eq!(rows.hit(0, 0), None);
+
+        for idx in 0..(ModalRows::MAX + 5) {
+            rows.push(rect(0, idx as u16, 10, 1), idx);
+        }
+
+        assert_eq!(rows.get(ModalRows::MAX), None, "超上限的行被丢弃");
+        assert_eq!(
+            rows.get(ModalRows::MAX - 1),
+            Some(rect(0, (ModalRows::MAX - 1) as u16, 10, 1))
+        );
+        assert_eq!(rows.hit(3, 0), Some(0));
+    }
+
+    /// 登记的是条目序号而不是登记次序：滚动过的窗口与固定在底部的行
+    /// 都要能按条目号取回（否则点击会落到别的条目上）。
+    #[test]
+    fn modal_rows_key_on_item_index_not_registration_order() {
+        let mut rows = ModalRows::default();
+        rows.push(rect(0, 5, 10, 1), 7);
+        rows.push(rect(0, 6, 10, 1), 8);
+        rows.push(rect(0, 9, 10, 1), 11);
+
+        assert_eq!(rows.hit(1, 5), Some(7), "窗口首行回的是条目序号");
+        assert_eq!(rows.hit(1, 6), Some(8));
+        assert_eq!(rows.hit(1, 9), Some(11));
+        assert_eq!(rows.get(7), Some(rect(0, 5, 10, 1)));
+        assert_eq!(rows.get(11), Some(rect(0, 9, 10, 1)));
+        assert_eq!(rows.get(0), None, "没画出来的条目不登记");
+        assert_eq!(rows.get(10), None);
+    }
+
+    /// 播放列表命中区必须用渲染的虚拟滚动窗口：滚过一屏后点到的仍是看到的那首，
+    /// 末尾两行 footer 不命中。
+    #[test]
+    fn playlist_click_uses_the_render_window() {
+        let layout = UiLayout {
+            playlist_list_inner: rect(0, 10, 30, 6),
+            ..UiLayout::default()
+        };
+        let mut app = state(Overlay::Playlist);
+        app.playlist_list_scroll = 7;
+        app.playlist_list_rows = 4;
+
+        assert_eq!(
+            hit_test(&layout, &app, 1, 10),
+            Some(Action::PlaylistSelect(7)),
+            "首行对应窗口起点"
+        );
+        assert_eq!(
+            hit_test(&layout, &app, 1, 13),
+            Some(Action::PlaylistSelect(10))
+        );
+        assert_eq!(hit_test(&layout, &app, 1, 14), None, "footer 行不命中");
+        assert_eq!(hit_test(&layout, &app, 1, 15), None, "footer 行不命中");
+    }
+
+    /// 滚轮只在播放列表面板内生效（面板未打开时不响应）。
+    #[test]
+    fn wheel_scrolls_only_over_the_playlist_panel() {
+        let layout = UiLayout {
+            playlist_rect: rect(2, 5, 30, 20),
+            ..UiLayout::default()
+        };
+
+        let open = state(Overlay::Playlist);
+        assert!(wheel_over_playlist(&layout, &open, 10, 10));
+        assert!(!wheel_over_playlist(&layout, &open, 40, 10), "面板外不响应");
+        assert!(
+            !wheel_over_playlist(&layout, &state(Overlay::None), 10, 10),
+            "面板未打开时不响应"
+        );
+    }
+
+    /// 音量拖动与点击用同一条换算（否则按住拖会和点一下的落点不一致）。
+    #[test]
+    fn volume_at_matches_the_volume_bar() {
+        let layout = UiLayout {
+            info_volume: rect(0, 2, 12, 1),
+            ..UiLayout::default()
+        };
+        assert_eq!(volume_at(&layout, 0, 2), Some(0.0));
+        assert_eq!(volume_at(&layout, 11, 2), Some(1.0));
+        assert_eq!(volume_at(&layout, 6, 2), Some(0.5));
+        assert_eq!(volume_at(&layout, 12, 2), None, "条外不响应");
+        assert_eq!(volume_at(&layout, 6, 3), None, "行外不响应");
+    }
+
+    /// 拖动一旦从条内开始就不再要求光标留在条上：拖出左右边界按端点钳制，
+    /// 上下拖出行也照样生效。
+    #[test]
+    fn volume_drag_clamps_outside_the_bar() {
+        let layout = UiLayout {
+            info_volume: rect(0, 2, 12, 1),
+            ..UiLayout::default()
+        };
+
+        assert_eq!(volume_for_drag(&layout, 0), Some(0.0));
+        assert_eq!(volume_for_drag(&layout, 11), Some(1.0));
+        assert_eq!(
+            volume_for_drag(&layout, 200),
+            Some(1.0),
+            "拖到右边之外仍生效"
+        );
+        assert_eq!(volume_for_drag(&layout, 6), Some(0.5));
+
+        // 音量条没有绘制（宽度退化）时不改音量。
+        let empty = UiLayout::default();
+        assert_eq!(volume_for_drag(&empty, 3), None);
+    }
+
+    /// 按键提示弹窗的条目数必须由列表本身决定：写死会让末尾几行选不中
+    /// （历史上常量 14 对不上 16 行就是这么来的），小窗口切换也已从设置弹窗搬到这里。
+    #[test]
+    fn help_items_cover_every_row_and_include_the_moved_hint() {
+        let app = state(Overlay::HelpModal);
+        let items = help_items(&app);
+
+        assert_eq!(help_item_count(&app), items.len(), "翻页计数与列表同源");
+        assert!(items.len() > 14, "条目数应随列表增长，不再写死");
+        assert!(
+            items.iter().any(|(label, _)| label.contains("小窗口")),
+            "“小窗口切换显示”应从设置弹窗移到按键提示里"
+        );
+    }
+
+    /// 读回一行的实际渲染文本（用 TestBackend 的缓冲，等价于看画面）。
+    fn line_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        let area = *buf.area();
+        (area.x..area.x + area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect()
+    }
+
+    /// 去掉空白后再比较：宽字符（CJK）在缓冲里会占一个额外空位。
+    fn compact(text: &str) -> String {
+        text.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    fn render_to_buffer(
+        app: &mut AppState,
+        draw: impl FnOnce(&mut ratatui::Frame, &mut AppState, &mut ModalRows),
+    ) -> (ModalRows, ratatui::buffer::Buffer) {
+        render_to_buffer_sized(80, 24, app, draw)
+    }
+
+    /// 指定尺寸渲染：矮终端下弹窗条目区会被截断，命中区必须跟着截断。
+    fn render_to_buffer_sized(
+        width: u16,
+        height: u16,
+        app: &mut AppState,
+        draw: impl FnOnce(&mut ratatui::Frame, &mut AppState, &mut ModalRows),
+    ) -> (ModalRows, ratatui::buffer::Buffer) {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        let mut rows = ModalRows::default();
+        terminal.draw(|f| draw(f, app, &mut rows)).expect("draw");
+        let buf = terminal.backend().buffer().clone();
+        (rows, buf)
+    }
+
+    /// 歌词浮窗弹窗：命中行必须落在真正画着该条目的那一行上
+    /// （否则就是"看得见点不动"或"点到的不是看到的"）。
+    #[test]
+    fn lyrics_modal_hit_rows_sit_on_the_drawn_rows() {
+        let mut app = state(Overlay::LyricsSettingsModal);
+        let (rows, buf) = render_to_buffer(&mut app, |f, app, rows| {
+            render_lyrics_settings_modal(f, f.area(), app, rows)
+        });
+
+        let expected = ["歌词浮窗:", "歌词浮窗拖动:", "歌词浮窗边缘吸附:"];
+        assert_eq!(rows.len(), expected.len());
+
+        for (idx, label) in expected.iter().enumerate() {
+            let rect = rows.get(idx).expect("登记了命中行");
+            let text = line_text(&buf, rect.y);
+            assert!(
+                compact(&text).contains(&compact(label)),
+                "第 {idx} 行画的是 {text:?}"
+            );
+        }
+    }
+
+    /// 按键提示弹窗：命中行落在条目行上，且移到这里的“小窗口切换显示”能显示出来。
+    #[test]
+    fn help_modal_hit_rows_sit_on_the_drawn_rows() {
+        let mut app = state(Overlay::HelpModal);
+        let items = help_items(&app);
+        let moved = items
+            .iter()
+            .position(|(label, _)| label.contains("小窗口"))
+            .expect("小窗口条目");
+        // 选中它，渲染窗口就会滚到它，从而一定在命中区内。
+        app.help_keybind_selected = moved;
+
+        let (rows, buf) = render_to_buffer(&mut app, |f, app, rows| {
+            render_help_modal(f, f.area(), app, rows)
+        });
+
+        assert!(rows.len() > 0, "条目行要登记出来才能点");
+        let mut saw_hint = false;
+        for idx in 0..rows.len() {
+            let rect = rows.get(idx).expect("命中行");
+            let text = compact(&line_text(&buf, rect.y));
+            assert!(
+                items
+                    .iter()
+                    .any(|(label, key)| text.contains(&compact(label))
+                        && text.contains(&compact(key))),
+                "命中行落在非条目行上: {text:?}"
+            );
+            saw_hint |= text.contains(&compact("小窗口"));
+        }
+        assert!(saw_hint, "“小窗口切换显示”应出现在按键提示弹窗里");
+    }
+
+    /// 矮终端下设置弹窗的条目区放不下全部条目，但 about 行仍要按条目序号 11
+    /// 登记——否则单击它会选中别的条目、双击会执行别的条目。
+    #[test]
+    fn settings_modal_about_row_keeps_its_item_index_when_items_are_truncated() {
+        let mut app = state(Overlay::SettingsModal);
+        let (rows, buf) = render_to_buffer_sized(80, 18, &mut app, |f, app, rows| {
+            render_settings_modal(f, f.area(), app, rows)
+        });
+
+        let about = rows.get(11).expect("about 行按条目序号 11 登记");
+        assert!(
+            compact(&line_text(&buf, about.y)).contains("about"),
+            "11 号条目行画的是 about"
+        );
+        assert!(rows.len() < 12, "18 行终端下条目区放不下 11 条");
+
+        let mut layout = page_layout();
+        layout.modal_rows = rows;
+        assert_eq!(
+            hit_test(&layout, &app, about.x, about.y),
+            Some(Action::ModalSelect(11)),
+            "点 about 行要回条目序号 11"
+        );
+    }
+
+    /// 按键提示弹窗滚动后，每一行的命中序号必须等于画在该行的条目序号
+    /// （否则点“第 2 行显示的那条”会选中上一条）。
+    #[test]
+    fn help_modal_hit_index_matches_the_row_after_scrolling() {
+        let mut app = state(Overlay::HelpModal);
+        let items = help_items(&app);
+        // 选末条：24 行终端放不下 17 条，渲染窗口必然滚动，滚动量 = 1。
+        app.help_keybind_selected = items.len() - 1;
+
+        let (rows, buf) = render_to_buffer(&mut app, |f, app, rows| {
+            render_help_modal(f, f.area(), app, rows)
+        });
+
+        let mut hits = 0;
+        for y in 0..buf.area().height {
+            let Some(index) = (0..buf.area().width).find_map(|x| rows.hit(x, y)) else {
+                continue;
+            };
+            let text = compact(&line_text(&buf, y));
+            let (label, key) = &items[index];
+            assert!(
+                text.contains(&compact(label)) && text.contains(&compact(key)),
+                "第 {y} 行的命中序号 {index} 与画面 {text:?} 不符"
+            );
+            hits += 1;
+        }
+        assert_eq!(hits, rows.len(), "登记的行都该画在屏幕上");
+        assert!(hits > 0, "至少要有一行可点");
     }
 }

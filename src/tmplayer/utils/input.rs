@@ -13,6 +13,8 @@ pub enum Action {
     SetVolume(f32),
     ToggleRepeatMode,
     ToggleFavorite,
+    /// 弹窗条目行被点击（序号）；单击聚焦，双击等同 Enter。
+    ModalSelect(usize),
     TogglePlaylist,
     Confirm,
     CloseOverlay,
@@ -47,6 +49,22 @@ pub enum Action {
     FolderBackspace,
 
     MouseClick { col: u16, row: u16 },
+
+    /// 滚轮：`col/row` 用于判断落在哪个面板上，`forward` 为向下滚。
+    MouseScroll {
+        col: u16,
+        row: u16,
+        forward: bool,
+    },
+
+    /// 按住左键拖动（音量条这类需要按住拖的控件）。
+    MouseDrag {
+        col: u16,
+        row: u16,
+    },
+
+    /// 松开左键。
+    MouseUp,
 
     None,
 }
@@ -94,6 +112,18 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay, config: &Config) -> Action {
     }
 
     if overlay == Overlay::LocalAudioSettingsModal {
+        return match ev.code {
+            KeyCode::Esc => Action::CloseOverlay,
+            KeyCode::Enter => Action::Confirm,
+            KeyCode::Up => Action::ModalUp,
+            KeyCode::Down => Action::ModalDown,
+            KeyCode::Left => Action::ModalLeft,
+            KeyCode::Right => Action::ModalRight,
+            _ => Action::None,
+        };
+    }
+
+    if overlay == Overlay::LyricsSettingsModal {
         return match ev.code {
             KeyCode::Esc => Action::CloseOverlay,
             KeyCode::Enter => Action::Confirm,
@@ -243,13 +273,28 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay, config: &Config) -> Action {
 }
 
 pub fn map_mouse(ev: MouseEvent) -> Action {
-    if let MouseEventKind::Down(MouseButton::Left) = ev.kind {
-        return Action::MouseClick {
+    match ev.kind {
+        MouseEventKind::Down(MouseButton::Left) => Action::MouseClick {
             col: ev.column,
             row: ev.row,
-        };
+        },
+        MouseEventKind::ScrollUp => Action::MouseScroll {
+            col: ev.column,
+            row: ev.row,
+            forward: false,
+        },
+        MouseEventKind::ScrollDown => Action::MouseScroll {
+            col: ev.column,
+            row: ev.row,
+            forward: true,
+        },
+        MouseEventKind::Drag(MouseButton::Left) => Action::MouseDrag {
+            col: ev.column,
+            row: ev.row,
+        },
+        MouseEventKind::Up(MouseButton::Left) => Action::MouseUp,
+        _ => Action::None,
     }
-    Action::None
 }
 
 fn keybind_matches(binding: &str, key: KeyEvent) -> bool {
@@ -428,5 +473,86 @@ fn key_code_to_keybind_token(code: KeyCode) -> Option<String> {
         }
         KeyCode::Esc => Some("Esc".to_string()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{MouseEvent, MouseEventKind};
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// 鼠标事件映射：滚轮与拖动都要带坐标传给事件循环（此前只认左键按下）。
+    #[test]
+    fn mouse_mapping_covers_wheel_drag_and_release() {
+        assert_eq!(
+            map_mouse(mouse(MouseEventKind::ScrollDown, 3, 4)),
+            Action::MouseScroll {
+                col: 3,
+                row: 4,
+                forward: true
+            }
+        );
+        assert_eq!(
+            map_mouse(mouse(MouseEventKind::ScrollUp, 3, 4)),
+            Action::MouseScroll {
+                col: 3,
+                row: 4,
+                forward: false
+            }
+        );
+        assert_eq!(
+            map_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 5, 6)),
+            Action::MouseDrag { col: 5, row: 6 }
+        );
+        assert_eq!(
+            map_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 5, 6)),
+            Action::MouseUp
+        );
+        assert_eq!(
+            map_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 1, 2)),
+            Action::MouseClick { col: 1, row: 2 }
+        );
+        assert_eq!(map_mouse(mouse(MouseEventKind::Moved, 1, 2)), Action::None);
+    }
+
+    fn esc() -> KeyEvent {
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    }
+
+    /// 设置类弹窗里的 Esc 必须走"关闭弹窗"而不是退出全屏页。
+    ///
+    /// 曾经漏了 LyricsSettingsModal 的分支，Esc 于是落到默认的 Action::Quit，
+    /// 在歌词浮窗子页按 Esc 会直接把全屏页关掉。
+    #[test]
+    fn esc_in_settings_submodals_closes_the_modal() {
+        let config = crate::tmplayer::data::config::Config::default();
+
+        for overlay in [
+            Overlay::SettingsModal,
+            Overlay::BarSettingsModal,
+            Overlay::LocalAudioSettingsModal,
+            Overlay::LyricsSettingsModal,
+            Overlay::HelpModal,
+            Overlay::AboutModal,
+            Overlay::EqModal,
+        ] {
+            assert_eq!(
+                map_key(esc(), overlay, &config),
+                Action::CloseOverlay,
+                "{overlay:?} 里 Esc 应该是返回上一级"
+            );
+        }
+
+        // 没有弹窗时 Esc 才是退出全屏页。
+        assert_eq!(map_key(esc(), Overlay::None, &config), Action::Quit);
     }
 }
