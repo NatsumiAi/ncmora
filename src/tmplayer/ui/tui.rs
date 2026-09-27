@@ -37,6 +37,8 @@ pub struct UiLayout {
     pub playlist_cover_image: Rect,
 
     pub spectrum_rect: Rect,
+    /// 当前弹窗（若有）的条目行。
+    pub modal_rows: ModalRows,
 }
 
 pub struct Tui {
@@ -268,9 +270,15 @@ impl Tui {
 
             // modals (top-most)
             match app.overlay {
-                Overlay::SettingsModal => render_settings_modal(f, size, app),
-                Overlay::BarSettingsModal => render_bar_settings_modal(f, size, app),
-                Overlay::LocalAudioSettingsModal => render_local_audio_settings_modal(f, size, app),
+                Overlay::SettingsModal => {
+                    render_settings_modal(f, size, app, &mut layout_out.modal_rows)
+                }
+                Overlay::BarSettingsModal => {
+                    render_bar_settings_modal(f, size, app, &mut layout_out.modal_rows)
+                }
+                Overlay::LocalAudioSettingsModal => {
+                    render_local_audio_settings_modal(f, size, app, &mut layout_out.modal_rows)
+                }
                 Overlay::AboutModal => render_about_modal(f, size, app),
                 Overlay::AcoustIdModal => render_acoustid_modal(f, size, app),
                 Overlay::HelpModal => render_help_modal(f, size, app),
@@ -399,7 +407,55 @@ fn centered_rect(size: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
+/// 当前弹窗里可点击的条目行，按条目序号逐行登记。
+///
+/// `Copy` 且定长，好跟着 `UiLayout` 一起传出来；渲染时填、`hit_test` 时查，
+/// 两边共用同一份矩形，不会各算一遍偏移。
+#[derive(Debug, Clone, Copy)]
+pub struct ModalRows {
+    rows: [Rect; ModalRows::MAX],
+    len: usize,
+}
+
+impl ModalRows {
+    /// 单个弹窗的条目数上限（当前最多的是设置根页：10 项 + about）。
+    pub const MAX: usize = 12;
+
+    /// 登记一行；超出上限的行被丢弃（渲染本身也会被裁掉）。
+    fn push(&mut self, rect: Rect) {
+        if self.len < Self::MAX && rect.width > 0 && rect.height > 0 {
+            self.rows[self.len] = rect;
+            self.len += 1;
+        }
+    }
+
+    pub fn get(&self, index: usize) -> Option<Rect> {
+        (index < self.len).then(|| self.rows[index])
+    }
+
+    /// 命中的条目序号。
+    fn hit(&self, col: u16, row: u16) -> Option<usize> {
+        self.rows[..self.len]
+            .iter()
+            .position(|rect| contains(*rect, col, row))
+    }
+}
+
+impl Default for ModalRows {
+    fn default() -> Self {
+        Self {
+            rows: [Rect::default(); Self::MAX],
+            len: 0,
+        }
+    }
+}
+
+fn render_settings_modal(
+    f: &mut ratatui::Frame,
+    size: Rect,
+    app: &mut AppState,
+    modal_rows: &mut ModalRows,
+) {
     let area = centered_rect(size, 70, 20);
     f.render_widget(ratatui::widgets::Clear, area);
 
@@ -481,15 +537,20 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
     // "about" is pinned to the bottom row of the modal; the rest stack from the top.
     let about_idx = items.len().saturating_sub(1);
     for (idx, text) in items.iter().take(about_idx).enumerate() {
+        if idx as u16 >= rows[1].height {
+            break;
+        }
+        let rect = Rect {
+            x: rows[1].x,
+            y: rows[1].y + idx as u16,
+            width: rows[1].width,
+            height: 1,
+        };
         f.render_widget(
             Paragraph::new(Line::styled(format!("  {}", text), item_style(idx))),
-            Rect {
-                x: rows[1].x,
-                y: rows[1].y + idx as u16,
-                width: rows[1].width,
-                height: 1,
-            },
+            rect,
         );
+        modal_rows.push(rect);
     }
 
     let bottom_cols = Layout::default()
@@ -504,6 +565,7 @@ fn render_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
         )),
         bottom_cols[0],
     );
+    modal_rows.push(bottom_cols[0]);
     f.render_widget(
         Paragraph::new(format!(
             "{}: {}",
@@ -564,7 +626,12 @@ fn render_acoustid_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState)
     f.render_widget(p, inner);
 }
 
-fn render_bar_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
+fn render_bar_settings_modal(
+    f: &mut ratatui::Frame,
+    size: Rect,
+    app: &mut AppState,
+    modal_rows: &mut ModalRows,
+) {
     let area = centered_rect(size, 70, 20);
     f.render_widget(ratatui::widgets::Clear, area);
 
@@ -682,6 +749,9 @@ fn render_bar_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppSt
     ];
 
     for (idx, text) in items.iter().enumerate() {
+        if idx as u16 >= rows[1].height {
+            break;
+        }
         let style = if idx == app.bar_settings_selected {
             Style::default()
                 .fg(app.theme.color_accent2())
@@ -689,21 +759,28 @@ fn render_bar_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppSt
         } else {
             Style::default().fg(app.theme.color_text())
         };
+        let rect = Rect {
+            x: rows[1].x,
+            y: rows[1].y + idx as u16,
+            width: rows[1].width,
+            height: 1,
+        };
         f.render_widget(
             Paragraph::new(Line::styled(format!("  {}", text), style)),
-            Rect {
-                x: rows[1].x,
-                y: rows[1].y + idx as u16,
-                width: rows[1].width,
-                height: 1,
-            },
+            rect,
         );
+        modal_rows.push(rect);
     }
 
     f.render_widget(Paragraph::new(""), rows[2]);
 }
 
-fn render_local_audio_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
+fn render_local_audio_settings_modal(
+    f: &mut ratatui::Frame,
+    size: Rect,
+    app: &mut AppState,
+    modal_rows: &mut ModalRows,
+) {
     let area = centered_rect(size, 60, 12);
     f.render_widget(ratatui::widgets::Clear, area);
 
@@ -830,6 +907,21 @@ fn render_local_audio_settings_modal(f: &mut ratatui::Frame, size: Rect, app: &m
         .style(Style::default().bg(app.theme.color_surface()))
         .wrap(Wrap { trim: true });
     f.render_widget(p, inner);
+
+    // 命中区：条目从 inner 的第 3 行起（上面两句是空行）。标签都短于弹窗宽度，
+    // 不会被 `Wrap` 折行，故行号与条目号一一对应。
+    for idx in 0..items.len() {
+        let offset = 2 + idx;
+        if offset >= inner.height as usize {
+            break;
+        }
+        modal_rows.push(Rect {
+            x: inner.x,
+            y: inner.y + offset as u16,
+            width: inner.width,
+            height: 1,
+        });
+    }
 }
 
 fn render_about_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
@@ -1592,6 +1684,10 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
     // 进度条/音量/控制/播放列表（否则在设置弹窗上点一下就可能误播、
     // 误 seek、误改音量）。播放列表面板只占左栏，不在拦截范围内。
     if app.overlay != Overlay::None && app.overlay != Overlay::Playlist {
+        // 设置类弹窗的条目行：单击聚焦（双击在事件循环里判定为 Enter）。
+        if let Some(index) = layout.modal_rows.hit(col, row) {
+            return Some(Action::ModalSelect(index));
+        }
         return None;
     }
 
@@ -1822,5 +1918,41 @@ mod tests {
             None,
             "专辑行没有爱心"
         );
+    }
+
+    /// 设置弹窗：命中条目行 → ModalSelect(序号)，弹窗内其余位置仍被吞掉。
+    #[test]
+    fn settings_modal_rows_are_clickable() {
+        let mut layout = page_layout();
+        layout.modal_rows.push(rect(2, 10, 20, 1));
+        layout.modal_rows.push(rect(2, 11, 20, 1));
+        layout.modal_rows.push(rect(2, 12, 20, 1));
+
+        let app = state(Overlay::SettingsModal);
+
+        assert_eq!(hit_test(&layout, &app, 5, 10), Some(Action::ModalSelect(0)));
+        assert_eq!(hit_test(&layout, &app, 5, 11), Some(Action::ModalSelect(1)));
+        assert_eq!(hit_test(&layout, &app, 5, 12), Some(Action::ModalSelect(2)));
+        assert_eq!(hit_test(&layout, &app, 5, 13), None, "行外不命中");
+        assert_eq!(hit_test(&layout, &app, 0, 1), None, "底层进度条仍被吞掉");
+    }
+
+    /// 空矩形与超上限的行不登记（渲染本来就画不出来）。
+    #[test]
+    fn modal_rows_ignore_degenerate_and_overflowing_rows() {
+        let mut rows = ModalRows::default();
+        rows.push(Rect::default());
+        assert_eq!(rows.hit(0, 0), None);
+
+        for idx in 0..(ModalRows::MAX + 5) {
+            rows.push(rect(0, idx as u16, 10, 1));
+        }
+
+        assert_eq!(rows.get(ModalRows::MAX), None, "超上限的行被丢弃");
+        assert_eq!(
+            rows.get(ModalRows::MAX - 1),
+            Some(rect(0, (ModalRows::MAX - 1) as u16, 10, 1))
+        );
+        assert_eq!(rows.hit(3, 0), Some(0));
     }
 }

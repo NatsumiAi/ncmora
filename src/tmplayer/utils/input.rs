@@ -13,6 +13,8 @@ pub enum Action {
     SetVolume(f32),
     ToggleRepeatMode,
     ToggleFavorite,
+    /// 弹窗条目行被点击（序号）；单击聚焦，双击等同 Enter。
+    ModalSelect(usize),
     TogglePlaylist,
     Confirm,
     CloseOverlay,

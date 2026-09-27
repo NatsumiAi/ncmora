@@ -1250,6 +1250,30 @@ async fn handle_action(
                 Box::pin(handle_action(app, host_bridge, a, layout)).await?;
             }
         }
+        Action::ModalSelect(idx) => {
+            let Some(rect) = layout.modal_rows.get(idx) else {
+                return Ok(());
+            };
+
+            match app.overlay {
+                Overlay::SettingsModal => app.settings_selected = idx,
+                Overlay::BarSettingsModal => app.bar_settings_selected = idx,
+                Overlay::LocalAudioSettingsModal => app.local_audio_settings_selected = idx,
+                _ => return Ok(()),
+            }
+
+            // 同一行 400ms 内再点一次 = Enter（与播放列表双击同款判定）。
+            // 列归一化到行首，行内任意位置都算同一个目标。
+            let now = Instant::now();
+            let is_double = app.last_mouse_click.is_some_and(|(at, col, row)| {
+                now.duration_since(at) <= Duration::from_millis(400)
+                    && (col, row) == (rect.x, rect.y)
+            });
+            app.last_mouse_click = Some((now, rect.x, rect.y));
+            if is_double {
+                return Box::pin(handle_action(app, host_bridge, Action::Confirm, layout)).await;
+            }
+        }
         Action::None => {}
     }
 
