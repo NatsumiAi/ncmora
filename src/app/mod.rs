@@ -20,7 +20,7 @@ use crate::tmplayer::audio::pcm_tap::PcmRing;
 use crate::tmplayer::playback::metadata::{parse_lrc, parse_plain_lyrics};
 use crate::ui::page_lyrics;
 use crate::ui::theme::Theme;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -6536,23 +6536,15 @@ impl App {
     }
 
     fn lang_text<'a>(&self, zh: &'a str, en: &'a str) -> &'a str {
-        match self.config.language {
-            Language::Zh => zh,
-            Language::En => en,
-        }
+        lang_text(self.config.language, zh, en)
     }
 
     async fn refresh_vip_audio_access(&mut self) {
-        let mut unlocked = false;
+        let unlocked = fetch_vip_unlocked(&mut self.api).await;
+        self.apply_vip_audio_access(unlocked);
+    }
 
-        if let Ok(response) = self.api.vip_info_v2().await {
-            unlocked = response_indicates_vip(&response);
-        }
-
-        if !unlocked && let Ok(response) = self.api.vip_info().await {
-            unlocked = response_indicates_vip(&response);
-        }
-
+    fn apply_vip_audio_access(&mut self, unlocked: bool) {
         self.vip_audio_unlocked = unlocked;
         self.set_audio_quality(self.config.audio_quality);
     }
@@ -6698,37 +6690,21 @@ impl App {
 
     async fn refresh_qr_login(&mut self) {
         self.qr_last_poll_at = None;
-        let key_resp = match self.api.login_qr_key().await {
-            Ok(response) => response,
+
+        let code = match fetch_qr_login_code(&mut self.api, self.config.language).await {
+            Ok(code) => code,
             Err(err) => {
-                self.login.status_line = format!("二维码 key 获取失败: {}", err);
+                self.login.status_line = format!("{err}");
                 return;
             }
         };
 
-        let key = extract_qr_key(&key_resp);
-
-        if key.is_empty() {
-            self.login.status_line = "二维码 key 为空，请重试".to_string();
-            return;
-        }
-
-        let qr_resp = match self.api.login_qr_create(&key).await {
-            Ok(response) => response,
-            Err(err) => {
-                self.login.status_line = format!("二维码创建失败: {}", err);
-                return;
-            }
-        };
-
-        let qr_url = extract_qr_url(&qr_resp);
-
-        self.login.qr_key = key;
-        self.login.qr_url = qr_url.clone();
-        self.login.status_line = if qr_url.is_empty() {
+        self.login.qr_key = code.key;
+        self.login.qr_url = code.url.clone();
+        self.login.status_line = if code.url.is_empty() {
             "二维码已刷新，请按 Enter 轮询状态".to_string()
         } else {
-            format!("二维码已刷新: {}", truncate_text(&qr_url, 48))
+            format!("二维码已刷新: {}", truncate_text(&code.url, 48))
         };
     }
 
@@ -6844,92 +6820,15 @@ impl App {
         self.login.status_line = format!("登录失败({}): {}", code, response_message(&response));
     }
 
-    async fn fetch_home_private_radar_cover(&mut self, playlist_id: &str) -> Option<String> {
-        let response = self.api.playlist_detail(playlist_id).await.ok()?;
-        if response_code(&response) != 200 {
-            return None;
-        }
-
-        if let Some(playlist) = response.body.get("playlist") {
-            if let Some(cover_url) = first_non_empty(playlist, &["/coverImgUrl", "/picUrl"]) {
-                return Some(cover_url);
-            }
-        }
-
-        response
-            .body
-            .pointer("/playlist/tracks")
-            .and_then(|value| value.as_array())
-            .and_then(|items| items.first())
-            .and_then(|track| first_non_empty(track, &["/al/picUrl", "/album/picUrl"]))
-            .map(|s| s.to_string())
+    async fn load_home_recommendations(&mut self) -> Result<()> {
+        let tiles = fetch_home_tiles(&mut self.api, self.config.home_more_recommend).await;
+        self.apply_home_tiles(tiles);
+        Ok(())
     }
 
-    async fn load_home_recommendations(&mut self) -> Result<()> {
-        let mut daily_tile = HomeTile::placeholder_daily();
-        if let Ok(response) = self.api.recommend_songs().await {
-            if response_code(&response) == 200 {
-                if let Some(songs) = home_daily_song_items(&response.body) {
-                    if let Some(cover_url) = songs
-                        .iter()
-                        .find_map(|item| first_non_empty(item, &["/al/picUrl", "/album/picUrl"]))
-                    {
-                        daily_tile.cover.load(self.api.clone(), cover_url);
-                    }
-                }
-            }
-        }
-
-        let mut cards = Vec::new();
-
-        if let Ok(response) = self.api.recommend_resource().await {
-            cards = parse_recommend_cards(&response, 24);
-        }
-
-        if cards.is_empty() {
-            if let Ok(response) = self.api.personalized(24).await {
-                cards = parse_personalized_cards(&response, 24);
-            }
-        }
-
-        let mut tiles = Vec::with_capacity(cards.len().saturating_add(1));
-        tiles.push(daily_tile);
-
-        for card in cards {
-            let pinned_title = normalize_home_pinned_title(&card.title);
-            if pinned_title == Some("每日推荐") {
-                continue;
-            }
-
-            let mut tile = HomeTile::from_recommendation(
-                &self.api,
-                card.id,
-                card.title,
-                card.subtitle,
-                card.cover_url,
-            );
-
-            if pinned_title == Some("私人雷达") {
-                if let Some(playlist_id) = tile.id.clone() {
-                    if let Some(cover_url) = self.fetch_home_private_radar_cover(&playlist_id).await
-                    {
-                        tile.cover.load(self.api.clone(), cover_url);
-                    }
-                }
-            }
-
-            if pinned_title == Some("私人漫游") {
-                tile.id = Some(HOME_PRIVATE_ROAM_TILE_ID.to_string());
-            }
-
-            tiles.push(tile);
-        }
-
-        self.home.set_tiles(prioritize_home_tiles(
-            &self.api,
-            tiles,
-            self.config.home_more_recommend,
-        ));
+    /// 应用首页推荐 tile（首页刷新与启动初始化共用）。
+    fn apply_home_tiles(&mut self, tiles: Vec<HomeTile>) {
+        self.home.set_tiles(tiles);
         // 私人漫游 tile 封面：未播放过时为首歌封面，播放后为最后播放歌曲的封面
         self.sync_home_roam_tile_cover();
         self.home.status_line = self
@@ -6938,7 +6837,6 @@ impl App {
                 "Use arrows/Tab to focus, Enter to open playlist",
             )
             .to_string();
-        Ok(())
     }
 
     async fn resolve_current_user_id(&mut self) -> Result<String> {
@@ -6946,50 +6844,35 @@ impl App {
             return Ok(uid.clone());
         }
 
-        let account = match self.api.user_account().await {
-            Ok(v) => v,
-            Err(_) => self.api.login_status().await?,
-        };
-        let code = response_code(&account);
-        if code != 200 {
-            return Err(anyhow!(
-                "{}({}): {}",
-                self.lang_text("账号信息请求失败", "Failed to fetch account profile"),
-                code,
-                response_message(&account)
-            ));
-        }
+        let profile = fetch_account_profile(&mut self.api, self.config.language).await?;
+        self.apply_account_profile(profile);
+        Ok(self
+            .home_sidebar
+            .user_id
+            .clone()
+            .unwrap_or_default())
+    }
 
-        let uid = extract_current_user_id(&account).ok_or_else(|| {
-            anyhow!(self.lang_text("未找到当前用户 ID", "Current user id not found"))
-        })?;
-
-        self.home_sidebar.user_id = Some(uid.clone());
-        self.home_sidebar.liked_playlist_id = extract_liked_playlist_id(&account);
-        if let Some(name) = extract_current_user_name(&account) {
+    /// 应用账号档案（侧边栏用户名 / uid / 我喜欢歌单 id）。
+    fn apply_account_profile(&mut self, profile: AccountProfile) {
+        self.home_sidebar.user_id = Some(profile.uid);
+        self.home_sidebar.liked_playlist_id = profile.liked_playlist_id;
+        if let Some(name) = profile.name {
             self.home_sidebar.user_name = name;
         }
-
-        Ok(uid)
     }
 
     async fn refresh_liked_song_cache(&mut self) -> Result<()> {
         let uid = self.resolve_current_user_id().await?;
-        let response = self.api.likelist(&uid).await?;
-        let code = response_code(&response);
-        if code != 200 {
-            return Err(anyhow!(
-                "{}({}): {}",
-                self.lang_text("喜爱列表请求失败", "Failed to fetch liked songs"),
-                code,
-                response_message(&response)
-            ));
-        }
-
-        self.like_machine
-            .replace_confirmed(parse_likelist_song_ids(&response.body));
-        self.refresh_now_playing_like_state();
+        let ids = fetch_liked_song_ids(&mut self.api, &uid, self.config.language).await?;
+        self.apply_liked_song_ids(ids);
         Ok(())
+    }
+
+    /// 应用「我喜欢的音乐」全量 id 集合。
+    fn apply_liked_song_ids(&mut self, ids: HashSet<String>) {
+        self.like_machine.replace_confirmed(ids);
+        self.refresh_now_playing_like_state();
     }
 
     fn is_liked_playlist(&self, playlist_id: &str, title: Option<&str>) -> bool {
@@ -7155,12 +7038,22 @@ impl App {
 
     /// 每日首次启动时刷新一次：上次最后播放的歌曲保留在首位，其后追加新歌
     async fn refresh_private_roam_daily(&mut self) {
-        let today = today_day_number();
-        if self.private_roam.last_refresh_day == Some(today) {
+        if self.private_roam_refreshed_today() {
             return;
         }
 
         let fetched = fetch_private_roam_songs(&mut self.api).await;
+        self.apply_private_roam_refresh(fetched);
+    }
+
+    /// 今天是否已刷新过私人漫游（刷新判据只有这一处）。
+    fn private_roam_refreshed_today(&self) -> bool {
+        self.private_roam.last_refresh_day == Some(today_day_number())
+    }
+
+    /// 应用一批新拉取的漫游歌曲（启动初始化与每日刷新共用）。
+    fn apply_private_roam_refresh(&mut self, fetched: Vec<PlaylistTrack>) {
+        let today = today_day_number();
         if fetched.is_empty() {
             // 拉取失败保留旧列表，下次启动再试
             return;
@@ -8107,6 +8000,197 @@ fn normalize_home_pinned_title(title: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+/// 与 `App::lang_text` 同一套文案选择，供拿不到 `App` 的请求函数使用。
+fn lang_text<'a>(lang: Language, zh: &'a str, en: &'a str) -> &'a str {
+    match lang {
+        Language::Zh => zh,
+        Language::En => en,
+    }
+}
+
+/// 账号档案：uid / 昵称 /「我喜欢的音乐」歌单 id。
+struct AccountProfile {
+    uid: String,
+    name: Option<String>,
+    liked_playlist_id: Option<String>,
+}
+
+/// 当前账号档案：`user/account`，失败时回退 `login/status`。
+async fn fetch_account_profile(api: &mut ApiState, lang: Language) -> Result<AccountProfile> {
+    let account = match api.user_account().await {
+        Ok(response) => response,
+        Err(_) => api.login_status().await?,
+    };
+    let code = response_code(&account);
+    if code != 200 {
+        return Err(anyhow!(
+            "{}({}): {}",
+            lang_text(lang, "账号信息请求失败", "Failed to fetch account profile"),
+            code,
+            response_message(&account)
+        ));
+    }
+
+    let uid = extract_current_user_id(&account).ok_or_else(|| {
+        anyhow!(lang_text(
+            lang,
+            "未找到当前用户 ID",
+            "Current user id not found"
+        ))
+    })?;
+
+    Ok(AccountProfile {
+        uid,
+        name: extract_current_user_name(&account),
+        liked_playlist_id: extract_liked_playlist_id(&account),
+    })
+}
+
+///「我喜欢的音乐」全量 id 集合。
+async fn fetch_liked_song_ids(
+    api: &mut ApiState,
+    uid: &str,
+    lang: Language,
+) -> Result<HashSet<String>> {
+    let response = api.likelist(uid).await?;
+    let code = response_code(&response);
+    if code != 200 {
+        return Err(anyhow!(
+            "{}({}): {}",
+            lang_text(lang, "喜爱列表请求失败", "Failed to fetch liked songs"),
+            code,
+            response_message(&response)
+        ));
+    }
+
+    Ok(parse_likelist_song_ids(&response.body))
+}
+
+/// 会员音质权限：先查 `vip/info/v2`，未命中再回退 `vip/info`。
+async fn fetch_vip_unlocked(api: &mut ApiState) -> bool {
+    let mut unlocked = false;
+
+    if let Ok(response) = api.vip_info_v2().await {
+        unlocked = response_indicates_vip(&response);
+    }
+
+    if !unlocked && let Ok(response) = api.vip_info().await {
+        unlocked = response_indicates_vip(&response);
+    }
+
+    unlocked
+}
+
+/// 歌单封面（私人雷达 tile 用）。
+async fn fetch_playlist_cover_url(api: &mut ApiState, playlist_id: &str) -> Option<String> {
+    let response = api.playlist_detail(playlist_id).await.ok()?;
+    if response_code(&response) != 200 {
+        return None;
+    }
+
+    if let Some(playlist) = response.body.get("playlist") {
+        if let Some(cover_url) = first_non_empty(playlist, &["/coverImgUrl", "/picUrl"]) {
+            return Some(cover_url);
+        }
+    }
+
+    response
+        .body
+        .pointer("/playlist/tracks")
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.first())
+        .and_then(|track| first_non_empty(track, &["/al/picUrl", "/album/picUrl"]))
+        .map(|s| s.to_string())
+}
+
+/// 首页推荐 tile：每日推荐 + 推荐歌单卡片，已按固定顺序排好。
+async fn fetch_home_tiles(api: &mut ApiState, show_more: bool) -> Vec<HomeTile> {
+    let mut daily_tile = HomeTile::placeholder_daily();
+    if let Ok(response) = api.recommend_songs().await {
+        if response_code(&response) == 200 {
+            if let Some(songs) = home_daily_song_items(&response.body) {
+                if let Some(cover_url) = songs
+                    .iter()
+                    .find_map(|item| first_non_empty(item, &["/al/picUrl", "/album/picUrl"]))
+                {
+                    daily_tile.cover.load(api.clone(), cover_url);
+                }
+            }
+        }
+    }
+
+    let mut cards = Vec::new();
+
+    if let Ok(response) = api.recommend_resource().await {
+        cards = parse_recommend_cards(&response, 24);
+    }
+
+    if cards.is_empty() {
+        if let Ok(response) = api.personalized(24).await {
+            cards = parse_personalized_cards(&response, 24);
+        }
+    }
+
+    let mut tiles = Vec::with_capacity(cards.len().saturating_add(1));
+    tiles.push(daily_tile);
+
+    for card in cards {
+        let pinned_title = normalize_home_pinned_title(&card.title);
+        if pinned_title == Some("每日推荐") {
+            continue;
+        }
+
+        let mut tile =
+            HomeTile::from_recommendation(api, card.id, card.title, card.subtitle, card.cover_url);
+
+        if pinned_title == Some("私人雷达") {
+            if let Some(playlist_id) = tile.id.clone() {
+                if let Some(cover_url) = fetch_playlist_cover_url(api, &playlist_id).await {
+                    tile.cover.load(api.clone(), cover_url);
+                }
+            }
+        }
+
+        if pinned_title == Some("私人漫游") {
+            tile.id = Some(HOME_PRIVATE_ROAM_TILE_ID.to_string());
+        }
+
+        tiles.push(tile);
+    }
+
+    prioritize_home_tiles(api, tiles, show_more)
+}
+
+/// 扫码登录二维码：key 与二维码链接。
+struct QrLoginCode {
+    key: String,
+    url: String,
+}
+
+async fn fetch_qr_login_code(api: &mut ApiState, lang: Language) -> Result<QrLoginCode> {
+    let key_resp = api.login_qr_key().await.with_context(|| {
+        lang_text(lang, "二维码 key 获取失败", "Failed to fetch QR login key")
+    })?;
+
+    let key = extract_qr_key(&key_resp);
+    if key.is_empty() {
+        bail!(lang_text(
+            lang,
+            "二维码 key 为空，请重试",
+            "Empty QR login key, please retry"
+        ));
+    }
+
+    let qr_resp = api.login_qr_create(&key).await.with_context(|| {
+        lang_text(lang, "二维码创建失败", "Failed to create QR login code")
+    })?;
+
+    Ok(QrLoginCode {
+        key,
+        url: extract_qr_url(&qr_resp),
+    })
 }
 
 fn prioritize_home_tiles(
