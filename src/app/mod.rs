@@ -968,6 +968,29 @@ pub struct HomeSidebarHit {
     pub index: usize,
 }
 
+/// 滚轮落在侧边栏时该滚哪个分区：光标所在分区优先（分区按整块算，列表短时
+/// 下方的空白也命中），否则用当前聚焦分区；光标不在侧边栏面板内返回 `None`。
+fn home_sidebar_wheel_target(
+    panel: Option<HitRect>,
+    sections: &[(HitRect, HomeSidebarSection)],
+    focused: HomeSidebarSection,
+    col: u16,
+    row: u16,
+) -> Option<HomeSidebarSection> {
+    let panel = panel?;
+    if !panel.contains(col, row) {
+        return None;
+    }
+
+    Some(
+        sections
+            .iter()
+            .find(|(rect, _)| rect.contains(col, row))
+            .map(|(_, section)| *section)
+            .unwrap_or(focused),
+    )
+}
+
 pub struct HomeSidebarState {
     pub expanded: bool,
     pub loading: bool,
@@ -1139,6 +1162,34 @@ impl HomeSidebarState {
             self.focused_index - 1
         };
         self.sync_memory_from_current();
+    }
+
+    /// 滚轮滚动一格：在当前分区内移动焦点（到顶/到底即停，不回卷——键盘的
+    /// `focus_next/prev` 会绕回，滚轮从列表末尾跳回开头会很突兀）。
+    /// 侧边栏的视图跟随焦点，所以这就是它唯一的滚动方式。
+    pub fn scroll_by(&mut self, forward: bool) {
+        let len = self.section_len(self.focused_section);
+        if len == 0 {
+            return;
+        }
+
+        let next = if forward {
+            self.focused_index.saturating_add(1).min(len - 1)
+        } else {
+            self.focused_index.saturating_sub(1)
+        };
+        self.focused_index = next;
+        self.sync_memory_from_current();
+    }
+
+    /// 滚轮落到某个分区：先切到该分区（沿用它的位置记忆），再走一格，
+    /// 这样"指着收藏区滚滚轮"不会把创建区的焦点带走。
+    pub fn scroll_section_by(&mut self, section: HomeSidebarSection, forward: bool) {
+        if section != self.focused_section {
+            let index = self.section_memory(section);
+            self.set_focus(section, index);
+        }
+        self.scroll_by(forward);
     }
 
     pub fn switch_section_prev(&mut self) {
@@ -2124,6 +2175,8 @@ pub struct App {
     /// 正在拖动歌词浮窗时，光标相对浮窗左上角的偏移。
     page_lyrics_grab: Option<(u16, u16)>,
     pub home_sidebar_playlist_hits: Vec<(HitRect, HomeSidebarHit)>,
+    /// 侧边栏两个分区的矩形（滚轮据此判断光标落在哪个分区）。
+    pub home_sidebar_section_hits: Vec<(HitRect, HomeSidebarSection)>,
     pub home_tile_hits: Vec<(HitRect, usize)>,
     pub playlist_track_hits: Vec<(HitRect, usize)>,
     pub author_tile_hits: Vec<(HitRect, usize)>,
@@ -2257,6 +2310,7 @@ impl App {
             page_lyrics_layout: None,
             page_lyrics_grab: None,
             home_sidebar_playlist_hits: Vec::new(),
+            home_sidebar_section_hits: Vec::new(),
             home_tile_hits: Vec::new(),
             playlist_track_hits: Vec::new(),
             author_tile_hits: Vec::new(),
@@ -2609,8 +2663,29 @@ impl App {
                     let _ = self.playlist.focus_prev();
                 }
             }
+            Page::Home => self.scroll_home_sidebar(col, row, forward),
             _ => {}
         };
+    }
+
+    /// 主页侧边栏的滚轮滚动：光标指到哪个分区就滚哪个（没有则滚当前聚焦分区），
+    /// 一格一步、到端点即停。侧边栏收起或光标在面板外时不动。
+    fn scroll_home_sidebar(&mut self, col: u16, row: u16, forward: bool) {
+        if !self.home_sidebar.expanded {
+            return;
+        }
+
+        let Some(section) = home_sidebar_wheel_target(
+            self.home_sidebar_panel_hit,
+            &self.home_sidebar_section_hits,
+            self.home_sidebar.focused_section,
+            col,
+            row,
+        ) else {
+            return;
+        };
+
+        self.home_sidebar.scroll_section_by(section, forward);
     }
 
     async fn advance_search_focus(&mut self) {
@@ -2653,6 +2728,7 @@ impl App {
     pub fn clear_content_hits(&mut self) {
         self.home_sidebar_panel_hit = None;
         self.home_sidebar_playlist_hits.clear();
+        self.home_sidebar_section_hits.clear();
         self.home_tile_hits.clear();
         self.playlist_track_hits.clear();
         self.author_tile_hits.clear();
@@ -2743,6 +2819,10 @@ impl App {
 
     pub fn push_home_sidebar_playlist_hit(&mut self, rect: HitRect, hit: HomeSidebarHit) {
         self.home_sidebar_playlist_hits.push((rect, hit));
+    }
+
+    pub fn push_home_sidebar_section_hit(&mut self, rect: HitRect, section: HomeSidebarSection) {
+        self.home_sidebar_section_hits.push((rect, section));
     }
 
     pub fn push_home_tile_hit(&mut self, rect: HitRect, index: usize) {
@@ -9345,5 +9425,140 @@ mod tests {
         assert!(machine.displayed("s1"), "其他曲目仍按已确认值");
         assert!(machine.displayed("s2"));
         assert!(!machine.is_confirmed("s2"));
+    }
+
+    fn sidebar_item(title: &str) -> HomeSidebarPlaylist {
+        HomeSidebarPlaylist {
+            id: Some(title.to_string()),
+            title: title.to_string(),
+            creator: String::new(),
+            track_count: 1,
+        }
+    }
+
+    fn sidebar_state(created: usize, collected: usize) -> HomeSidebarState {
+        let mut state = HomeSidebarState::default();
+        state.created_playlists = (0..created)
+            .map(|i| sidebar_item(&format!("created-{i}")))
+            .collect();
+        state.collected_playlists = (0..collected)
+            .map(|i| sidebar_item(&format!("collected-{i}")))
+            .collect();
+        state.clamp_focus();
+        state
+    }
+
+    /// 滚轮一格一步、到端点即停（不回卷），且焦点记忆跟着走。
+    #[test]
+    fn home_sidebar_wheel_steps_and_clamps_at_ends() {
+        let mut state = sidebar_state(3, 0);
+        state.expanded = true;
+
+        state.scroll_by(true);
+        assert_eq!(state.focused_index, 1);
+        assert_eq!(state.created_focused_index, 1, "焦点位置写回分区记忆");
+
+        state.scroll_by(true);
+        state.scroll_by(true);
+        assert_eq!(state.focused_index, 2, "到底即停，不像键盘那样绕回开头");
+
+        state.scroll_by(false);
+        assert_eq!(state.focused_index, 1);
+
+        state.focused_index = 0;
+        state.scroll_by(false);
+        assert_eq!(state.focused_index, 0, "到顶即停");
+    }
+
+    /// 空分区没有可滚的内容，不动焦点。
+    #[test]
+    fn home_sidebar_wheel_without_items_does_nothing() {
+        let mut state = sidebar_state(0, 0);
+        state.expanded = true;
+
+        state.scroll_by(true);
+
+        assert_eq!(state.focused_index, 0);
+        assert_eq!(state.focused_section, HomeSidebarSection::Created);
+    }
+
+    /// 指着另一个分区滚：先切过去（沿用该分区的位置记忆）再走一格。
+    #[test]
+    fn home_sidebar_wheel_switches_section_then_steps() {
+        let mut state = sidebar_state(3, 4);
+        state.expanded = true;
+        state.collected_focused_index = 2;
+
+        state.scroll_section_by(HomeSidebarSection::Collected, true);
+
+        assert_eq!(state.focused_section, HomeSidebarSection::Collected);
+        assert_eq!(state.focused_index, 3, "先回到记忆位置 2，再前进一格");
+        assert_eq!(state.created_focused_index, 0, "原分区焦点已存回");
+        assert_eq!(state.collected_focused_index, 3);
+    }
+
+    /// 指到空分区时不会把焦点放进空列表：仍留在有内容的分区里走一格。
+    #[test]
+    fn home_sidebar_wheel_on_empty_section_keeps_full_one() {
+        let mut state = sidebar_state(2, 0);
+        state.expanded = true;
+
+        state.scroll_section_by(HomeSidebarSection::Collected, true);
+
+        assert_eq!(state.focused_section, HomeSidebarSection::Created);
+        assert_eq!(state.focused_index, 1);
+    }
+
+    /// 分区判定：光标所在分区优先，落在分区之间的空隙时用当前聚焦分区，
+    /// 面板外或面板未登记则不响应（收起态由调用方先挡掉）。
+    #[test]
+    fn home_sidebar_wheel_targets_section_under_cursor() {
+        let panel = HitRect {
+            x: 0,
+            y: 0,
+            width: 30,
+            height: 20,
+        };
+        let sections = [
+            (
+                HitRect {
+                    x: 0,
+                    y: 5,
+                    width: 30,
+                    height: 6,
+                },
+                HomeSidebarSection::Created,
+            ),
+            (
+                HitRect {
+                    x: 0,
+                    y: 11,
+                    width: 30,
+                    height: 6,
+                },
+                HomeSidebarSection::Collected,
+            ),
+        ];
+
+        assert_eq!(
+            home_sidebar_wheel_target(Some(panel), &sections, HomeSidebarSection::Created, 3, 12),
+            Some(HomeSidebarSection::Collected),
+            "指到收藏区就滚收藏区"
+        );
+        assert_eq!(
+            home_sidebar_wheel_target(Some(panel), &sections, HomeSidebarSection::Collected, 3, 2),
+            Some(HomeSidebarSection::Collected),
+            "落在分区外的面板空白处 → 用聚焦分区"
+        );
+        assert_eq!(
+            home_sidebar_wheel_target(Some(panel), &sections, HomeSidebarSection::Created, 40, 12),
+            None,
+            "面板外不响应"
+        );
+        assert_eq!(
+            home_sidebar_wheel_target(None, &sections, HomeSidebarSection::Created, 3, 12),
+            None,
+            "面板未登记（侧边栏宽度不足）不响应"
+        );
     }
 }

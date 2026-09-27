@@ -43,7 +43,7 @@ Playback belongs to the host: streaming with a local cache, queue memory, privat
 ### Browsing
 
 - Home: a recommendation tile grid whose first three slots are always `每日推荐` (Daily Recommendations), `私人雷达` (Private Radar) and `私人漫游` (Private Roam); `home_more_recommend` expands the remaining recommendations
-- Home sidebar (toggle keybind, default `P`): your created and collected playlists, up to 100 each; `Ctrl+Up/Down` switches section, Enter opens, Esc collapses
+- Home sidebar (toggle keybind, default `P`): your created and collected playlists, up to 100 each; `Ctrl+Up/Down` switches section, Enter opens, Esc collapses; the wheel scrolls the section under the cursor (stopping at either end), a click focuses and a double click opens
 - Playlist page — also used for albums, there is no separate album page; a header (cover, title, author, description, track count) above a virtualized track list
 - Artist page: avatar, name, hot-song / album / EP / single counts and a tile grid per section
 - Search page: 50 results per request, appended as you scroll further

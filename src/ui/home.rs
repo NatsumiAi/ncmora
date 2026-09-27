@@ -421,6 +421,17 @@ fn draw_home_sidebar_section(
         return;
     }
 
+    // 整块分区都要能接住滚轮：列表短时下方空白处也属于该分区。
+    app.push_home_sidebar_section_hit(
+        crate::app::HitRect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: area.height,
+        },
+        section,
+    );
+
     let section_focused = app.home_sidebar.expanded && app.home_sidebar.focused_section == section;
     let section_title_style = if section_focused {
         Style::default()
