@@ -2461,6 +2461,13 @@ impl App {
     }
 
     pub async fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // 松开左键总是收尾拖拽：即使中途切到小窗口/弹窗也不会卡住拖动状态
+        // （卡住会让 should_continuous_redraw 一直按高帧率重绘）。
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
+            self.page_lyrics_release();
+            return;
+        }
+
         if self.page == Page::Login || self.page == Page::Loading {
             return;
         }
@@ -2522,9 +2529,6 @@ impl App {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 self.page_lyrics_drag(col, row);
-            }
-            MouseEventKind::Up(MouseButton::Left) => {
-                self.page_lyrics_release();
             }
             _ => {}
         }

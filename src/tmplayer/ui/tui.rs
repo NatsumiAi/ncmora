@@ -421,8 +421,9 @@ pub struct ModalRows {
 }
 
 impl ModalRows {
-    /// 单个弹窗的条目数上限（当前最多的是设置根页：10 项 + about）。
-    pub const MAX: usize = 12;
+    /// 单个弹窗的行数上限。取最长的一个（按键提示弹窗 17 条）再留些余量；
+    /// 超出的行会被丢弃，所以新增更长的弹窗列表时要同步调大。
+    pub const MAX: usize = 24;
 
     /// 登记一行；超出上限的行被丢弃（渲染本身也会被裁掉）。
     fn push(&mut self, rect: Rect) {
@@ -434,6 +435,11 @@ impl ModalRows {
 
     pub fn get(&self, index: usize) -> Option<Rect> {
         (index < self.len).then(|| self.rows[index])
+    }
+
+    /// 已登记的行数。
+    pub fn len(&self) -> usize {
+        self.len
     }
 
     /// 命中的条目序号。
@@ -2137,5 +2143,85 @@ mod tests {
             items.iter().any(|(label, _)| label.contains("小窗口")),
             "“小窗口切换显示”应从设置弹窗移到按键提示里"
         );
+    }
+
+    /// 读回一行的实际渲染文本（用 TestBackend 的缓冲，等价于看画面）。
+    fn line_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        let area = *buf.area();
+        (area.x..area.x + area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect()
+    }
+
+    /// 去掉空白后再比较：宽字符（CJK）在缓冲里会占一个额外空位。
+    fn compact(text: &str) -> String {
+        text.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    fn render_to_buffer(
+        app: &mut AppState,
+        draw: impl FnOnce(&mut ratatui::Frame, &mut AppState, &mut ModalRows),
+    ) -> (ModalRows, ratatui::buffer::Buffer) {
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        let mut rows = ModalRows::default();
+        terminal.draw(|f| draw(f, app, &mut rows)).expect("draw");
+        let buf = terminal.backend().buffer().clone();
+        (rows, buf)
+    }
+
+    /// 歌词浮窗弹窗：命中行必须落在真正画着该条目的那一行上
+    /// （否则就是"看得见点不动"或"点到的不是看到的"）。
+    #[test]
+    fn lyrics_modal_hit_rows_sit_on_the_drawn_rows() {
+        let mut app = state(Overlay::LyricsSettingsModal);
+        let (rows, buf) = render_to_buffer(&mut app, |f, app, rows| {
+            render_lyrics_settings_modal(f, f.area(), app, rows)
+        });
+
+        let expected = ["歌词浮窗:", "歌词浮窗拖动:", "歌词浮窗边缘吸附:"];
+        assert_eq!(rows.len(), expected.len());
+
+        for (idx, label) in expected.iter().enumerate() {
+            let rect = rows.get(idx).expect("登记了命中行");
+            let text = line_text(&buf, rect.y);
+            assert!(
+                compact(&text).contains(&compact(label)),
+                "第 {idx} 行画的是 {text:?}"
+            );
+        }
+    }
+
+    /// 按键提示弹窗：命中行落在条目行上，且移到这里的“小窗口切换显示”能显示出来。
+    #[test]
+    fn help_modal_hit_rows_sit_on_the_drawn_rows() {
+        let mut app = state(Overlay::HelpModal);
+        let items = help_items(&app);
+        let moved = items
+            .iter()
+            .position(|(label, _)| label.contains("小窗口"))
+            .expect("小窗口条目");
+        // 选中它，渲染窗口就会滚到它，从而一定在命中区内。
+        app.help_keybind_selected = moved;
+
+        let (rows, buf) = render_to_buffer(&mut app, |f, app, rows| {
+            render_help_modal(f, f.area(), app, rows)
+        });
+
+        assert!(rows.len() > 0, "条目行要登记出来才能点");
+        let mut saw_hint = false;
+        for idx in 0..rows.len() {
+            let rect = rows.get(idx).expect("命中行");
+            let text = compact(&line_text(&buf, rect.y));
+            assert!(
+                items
+                    .iter()
+                    .any(|(label, key)| text.contains(&compact(label))
+                        && text.contains(&compact(key))),
+                "命中行落在非条目行上: {text:?}"
+            );
+            saw_hint |= text.contains(&compact("小窗口"));
+        }
+        assert!(saw_hint, "“小窗口切换显示”应出现在按键提示弹窗里");
     }
 }
