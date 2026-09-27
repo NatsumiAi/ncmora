@@ -1142,31 +1142,26 @@ async fn handle_action(
                 app.playlist_view.clamp_selected();
                 sync_playlists_when_viewing_playback(app);
 
+                // 单击只聚焦；400ms 内再点同一行才切歌（按条目序号判定，
+                // 与滚动窗口无关，聚焦本身可能引起列表滚动）。
+                let now = Instant::now();
+                let is_double = app.last_playlist_click.is_some_and(|(at, last)| {
+                    now.duration_since(at) <= Duration::from_millis(400) && last == idx
+                });
+                app.last_playlist_click = Some((now, idx));
+
+                if !is_double {
+                    return Ok(());
+                }
+
                 if let Some(bridge) = host_bridge.as_mut() {
                     (*bridge).play_queue_index(idx).await;
                     let snapshot = (*bridge).snapshot();
                     sync_from_host_snapshot(app, snapshot);
-                    return Ok(());
+                } else {
+                    // 本地模式：双击等价 Enter。
+                    Box::pin(handle_action(app, host_bridge, Action::Confirm, layout)).await?;
                 }
-
-                // double click => play
-                let now = Instant::now();
-                if let Some((at, last_col, last_row)) = app.last_mouse_click {
-                    if now.duration_since(at) <= Duration::from_millis(400) {
-                        // same row (best-effort)
-                        if last_row == (layout.playlist_list_inner.y + idx as u16) {
-                            return Box::pin(handle_action(
-                                app,
-                                host_bridge,
-                                Action::Confirm,
-                                layout,
-                            ))
-                            .await;
-                        }
-                        let _ = last_col;
-                    }
-                }
-                app.last_mouse_click = Some((now, 0, layout.playlist_list_inner.y + idx as u16));
             }
         }
         Action::TogglePlayPause => {
@@ -1230,6 +1225,8 @@ async fn handle_action(
         },
         Action::SetVolume(v) => match app.player.mode {
             PlayMode::Idle => {
+                // 音量条：按下即开始拖动，MouseDrag 持续跟随。
+                app.volume_drag = true;
                 let next = v.clamp(0.0, 1.0);
                 if let Some(bridge) = host_bridge.as_mut() {
                     (*bridge).set_volume(next);
@@ -1282,6 +1279,31 @@ async fn handle_action(
             if let Some(a) = crate::tmplayer::ui::tui::hit_test(layout, app, col, row) {
                 Box::pin(handle_action(app, host_bridge, a, layout)).await?;
             }
+        }
+        Action::MouseScroll { col, row, forward } => {
+            // 侧边栏（播放列表面板）：滚轮滚动聚焦。
+            if crate::tmplayer::ui::tui::wheel_over_playlist(layout, app, col, row) {
+                let action = if forward {
+                    Action::PlaylistDown
+                } else {
+                    Action::PlaylistUp
+                };
+                Box::pin(handle_action(app, host_bridge, action, layout)).await?;
+            }
+        }
+        Action::MouseDrag { col, row } => {
+            // 按住音量条拖动：连续改音量（不松手也跟随）。
+            if app.volume_drag {
+                if let Some(volume) = crate::tmplayer::ui::tui::volume_at(layout, col, row) {
+                    app.player.volume = volume;
+                    if let Some(bridge) = host_bridge.as_mut() {
+                        (*bridge).set_volume(volume);
+                    }
+                }
+            }
+        }
+        Action::MouseUp => {
+            app.volume_drag = false;
         }
         Action::ModalSelect(idx) => {
             let Some(rect) = layout.modal_rows.get(idx) else {

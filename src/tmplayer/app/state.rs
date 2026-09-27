@@ -438,6 +438,13 @@ pub struct AppState {
     pub request_host_settings_open: bool,
 
     pub last_mouse_click: Option<(Instant, u16, u16)>,
+    /// 播放列表上一次点击的条目序号（双击切歌判定）。
+    pub last_playlist_click: Option<(Instant, usize)>,
+    /// 播放列表上一帧的虚拟滚动窗口（起始条目 + 可见行数），命中区据此换算。
+    pub playlist_list_scroll: usize,
+    pub playlist_list_rows: usize,
+    /// 正在按住拖动全屏页音量条。
+    pub volume_drag: bool,
 
     // playlist slide animation（time-based，与帧率解耦；与主页侧边栏共用时长/缓动）
     pub playlist_slide_x: i16,
@@ -547,6 +554,10 @@ impl AppState {
             toast: None,
             request_host_settings_open: false,
             last_mouse_click: None,
+            last_playlist_click: None,
+            playlist_list_scroll: 0,
+            playlist_list_rows: 0,
+            volume_drag: false,
             playlist_slide_x: 0,
             playlist_slide_target_x: 0,
             playlist_slide_from_x: 0,

@@ -50,6 +50,22 @@ pub enum Action {
 
     MouseClick { col: u16, row: u16 },
 
+    /// 滚轮：`col/row` 用于判断落在哪个面板上，`forward` 为向下滚。
+    MouseScroll {
+        col: u16,
+        row: u16,
+        forward: bool,
+    },
+
+    /// 按住左键拖动（音量条这类需要按住拖的控件）。
+    MouseDrag {
+        col: u16,
+        row: u16,
+    },
+
+    /// 松开左键。
+    MouseUp,
+
     None,
 }
 
@@ -245,13 +261,28 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay, config: &Config) -> Action {
 }
 
 pub fn map_mouse(ev: MouseEvent) -> Action {
-    if let MouseEventKind::Down(MouseButton::Left) = ev.kind {
-        return Action::MouseClick {
+    match ev.kind {
+        MouseEventKind::Down(MouseButton::Left) => Action::MouseClick {
             col: ev.column,
             row: ev.row,
-        };
+        },
+        MouseEventKind::ScrollUp => Action::MouseScroll {
+            col: ev.column,
+            row: ev.row,
+            forward: false,
+        },
+        MouseEventKind::ScrollDown => Action::MouseScroll {
+            col: ev.column,
+            row: ev.row,
+            forward: true,
+        },
+        MouseEventKind::Drag(MouseButton::Left) => Action::MouseDrag {
+            col: ev.column,
+            row: ev.row,
+        },
+        MouseEventKind::Up(MouseButton::Left) => Action::MouseUp,
+        _ => Action::None,
     }
-    Action::None
 }
 
 fn keybind_matches(binding: &str, key: KeyEvent) -> bool {

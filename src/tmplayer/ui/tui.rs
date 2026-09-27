@@ -1801,11 +1801,26 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
     }
 
     if contains(layout.playlist_list_inner, col, row) {
-        let idx = row.saturating_sub(layout.playlist_list_inner.y) as usize;
-        return Some(Action::PlaylistSelect(idx));
+        // 渲染带虚拟滚动窗口 + 末尾 2 行 footer，命中区必须用同一份映射，
+        // 否则列表滚过一屏后点到的不是看到的那首。
+        let offset = row.saturating_sub(layout.playlist_list_inner.y) as usize;
+        if offset < app.playlist_list_rows {
+            return Some(Action::PlaylistSelect(app.playlist_list_scroll + offset));
+        }
+        return None;
     }
 
     None
+}
+
+/// 滚轮是否落在播放列表面板上（面板打开时才响应滚动聚焦）。
+pub fn wheel_over_playlist(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> bool {
+    app.overlay == Overlay::Playlist && contains(layout.playlist_rect, col, row)
+}
+
+/// 音量条上某列对应的音量（0..=1）；不在条内时返回 `None`。
+pub fn volume_at(layout: &UiLayout, col: u16, row: u16) -> Option<f32> {
+    contains(layout.info_volume, col, row).then(|| ratio_in_bar(layout.info_volume, col))
 }
 
 fn contains(r: Rect, col: u16, row: u16) -> bool {
@@ -1909,7 +1924,10 @@ mod tests {
     #[test]
     fn modal_overlays_swallow_page_clicks() {
         let layout = page_layout();
-        let plain = state(Overlay::None);
+        // 播放列表命中要按渲染窗口换算：给一行都放得下的窗口。
+        let mut plain = state(Overlay::None);
+        plain.playlist_list_scroll = 0;
+        plain.playlist_list_rows = layout.playlist_list_inner.height as usize;
 
         // 先确认坐标确实压在活控件上，否则下面的断言是空的
         assert!(matches!(
@@ -2041,5 +2059,62 @@ mod tests {
             Some(rect(0, (ModalRows::MAX - 1) as u16, 10, 1))
         );
         assert_eq!(rows.hit(3, 0), Some(0));
+    }
+
+    /// 播放列表命中区必须用渲染的虚拟滚动窗口：滚过一屏后点到的仍是看到的那首，
+    /// 末尾两行 footer 不命中。
+    #[test]
+    fn playlist_click_uses_the_render_window() {
+        let layout = UiLayout {
+            playlist_list_inner: rect(0, 10, 30, 6),
+            ..UiLayout::default()
+        };
+        let mut app = state(Overlay::Playlist);
+        app.playlist_list_scroll = 7;
+        app.playlist_list_rows = 4;
+
+        assert_eq!(
+            hit_test(&layout, &app, 1, 10),
+            Some(Action::PlaylistSelect(7)),
+            "首行对应窗口起点"
+        );
+        assert_eq!(
+            hit_test(&layout, &app, 1, 13),
+            Some(Action::PlaylistSelect(10))
+        );
+        assert_eq!(hit_test(&layout, &app, 1, 14), None, "footer 行不命中");
+        assert_eq!(hit_test(&layout, &app, 1, 15), None, "footer 行不命中");
+    }
+
+    /// 滚轮只在播放列表面板内生效（面板未打开时不响应）。
+    #[test]
+    fn wheel_scrolls_only_over_the_playlist_panel() {
+        let layout = UiLayout {
+            playlist_rect: rect(2, 5, 30, 20),
+            ..UiLayout::default()
+        };
+
+        let open = state(Overlay::Playlist);
+        assert!(wheel_over_playlist(&layout, &open, 10, 10));
+        assert!(!wheel_over_playlist(&layout, &open, 40, 10), "面板外不响应");
+        assert!(
+            !wheel_over_playlist(&layout, &state(Overlay::None), 10, 10),
+            "面板未打开时不响应"
+        );
+    }
+
+    /// 音量拖动与点击用同一条换算（否则按住拖会和点一下的落点不一致）。
+    #[test]
+    fn volume_at_matches_the_volume_bar() {
+        let layout = UiLayout {
+            info_volume: rect(0, 2, 12, 1),
+            ..UiLayout::default()
+        };
+
+        assert_eq!(volume_at(&layout, 0, 2), Some(0.0));
+        assert_eq!(volume_at(&layout, 11, 2), Some(1.0));
+        assert_eq!(volume_at(&layout, 6, 2), Some(0.5));
+        assert_eq!(volume_at(&layout, 12, 2), None, "条外不响应");
+        assert_eq!(volume_at(&layout, 6, 3), None, "行外不响应");
     }
 }
