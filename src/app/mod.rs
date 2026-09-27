@@ -399,6 +399,228 @@ pub fn peek_shared_future<T>(cover_bytes: &Option<SharedFuture<T>>) -> Option<&T
     cover_bytes.as_ref()?.peek()?.as_ref()
 }
 
+/// 句柄不在 `Option` 里时的取值变体。
+fn peek_shared<T>(fut: &SharedFuture<T>) -> Option<&T> {
+    fut.peek()?.as_ref()
+}
+
+/// 收藏写入请求。成功 `Ok(())`；失败带可展示的原因（接口错误码或传输错误）。
+///
+/// 返回 `String` 而非 `anyhow::Error`：结果要跨 future 边界搬运，需 `Clone`。
+async fn like_song_request(mut api: ApiState, song_id: String, target: bool) -> Result<(), String> {
+    match api.like_song(&song_id, target).await {
+        Ok(response) => {
+            let code = response
+                .body
+                .get("code")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(response.status);
+            if code == 200 {
+                Ok(())
+            } else {
+                Err(code.to_string())
+            }
+        }
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// 服务端收藏态确认请求（切歌后核对账号里的真实状态）。
+async fn song_like_check_request(mut api: ApiState, song_id: String) -> Result<bool, ()> {
+    let Ok(song_id_num) = song_id.parse::<u64>() else {
+        return Err(());
+    };
+
+    let ids_json = format!("[{song_id_num}]");
+    let Ok(response) = api.song_like_check(&ids_json).await else {
+        return Err(());
+    };
+    if response_code(&response) != 200 {
+        return Err(());
+    }
+
+    parse_song_like_check_result(&response.body, &song_id).ok_or(())
+}
+
+type LikeToggleFuture = SharedFuture<Result<(), String>>;
+type LikeVerifyFuture = SharedFuture<Result<bool, ()>>;
+/// 装箱后的任务体（`shot_and_share` 的入参类型）。
+type LikeToggleTask = Pin<Box<dyn Future<Output = Option<Result<(), String>>>>>;
+type LikeVerifyTask = Pin<Box<dyn Future<Output = Option<Result<bool, ()>>>>>;
+
+/// 在途的收藏写入。
+struct PendingLikeToggle {
+    song_id: String,
+    target: bool,
+    fut: LikeToggleFuture,
+}
+
+/// 在途的收藏确认。
+struct PendingLikeVerify {
+    song_id: String,
+    fut: LikeVerifyFuture,
+}
+
+/// 一次收藏写入回包的收敛结果。
+#[derive(Debug, PartialEq, Eq)]
+enum ToggleOutcome {
+    /// 仍是当前意图：确认值已写入，界面据此提示。
+    Settled { liked: bool },
+    /// 已被更新的意图取代：确认值已写入，不提示，由 reconcile 补发新意图。
+    Superseded,
+    /// 失败且仍是当前意图：意图已放弃，显示应回滚到已确认值。
+    Failed { message: String },
+    /// 失败但已被取代：忽略。
+    StaleFailure,
+}
+
+/// 收藏的「期望 / 已确认」双轨状态机。
+///
+/// 点击只写 `desired` 并把界面切到期望值（乐观更新），真实请求由
+/// `App::tick_like_sync` 在每帧派发与收敛——输入路径上不再 `await` 网络，
+/// 收藏不会冻结单线程事件循环的动画。
+///
+/// - 连点：只保留最后一次期望；在途请求串行化，其回包不会覆盖更新的意图。
+/// - 失败：回滚显示到已确认集合，并写状态行。
+///
+/// 本结构不依赖 `App` 与网络：回包由调用方（tick 或单测）喂进 `on_*_result`。
+#[derive(Default)]
+struct LikeMachine {
+    /// 用户最后一次意图（song_id, target）。
+    desired: Option<(String, bool)>,
+    toggle: Option<PendingLikeToggle>,
+    verify: Option<PendingLikeVerify>,
+    /// 已确认的收藏集合（服务端口径）。
+    confirmed: HashSet<String>,
+}
+
+impl LikeMachine {
+    /// 服务端已确认该曲目被收藏。
+    fn is_confirmed(&self, song_id: &str) -> bool {
+        self.confirmed.contains(song_id)
+    }
+
+    /// 该曲目当前应显示的状态：未决意图优先，其次已确认值。
+    fn displayed(&self, song_id: &str) -> bool {
+        match self.desired.as_ref() {
+            Some((id, target)) if id == song_id => *target,
+            _ => self.is_confirmed(song_id),
+        }
+    }
+
+    /// 用整份「喜欢的歌曲」列表覆盖已确认集合。
+    fn replace_confirmed(&mut self, confirmed: HashSet<String>) {
+        self.confirmed = confirmed;
+    }
+
+    /// 记录一次点击。新意图优先于任何在途的服务端确认。
+    fn set_intent(&mut self, song_id: String, target: bool) {
+        self.desired = Some((song_id, target));
+        self.verify = None;
+    }
+
+    /// 现在该补发的写入请求；`None` 表示无需发（无意图、已满足、或有在途）。
+    fn pending_dispatch(&self) -> Option<(String, bool)> {
+        if self.toggle.is_some() {
+            return None;
+        }
+        let (song_id, target) = self.desired.as_ref()?;
+        if self.is_confirmed(song_id) == *target {
+            return None;
+        }
+        Some((song_id.clone(), *target))
+    }
+
+    /// 期望已被满足（例如连点两次回到原状态）时清掉意图，返回该曲目 id。
+    fn drop_satisfied_intent(&mut self) -> Option<String> {
+        let (song_id, target) = self.desired.as_ref()?;
+        if self.is_confirmed(song_id) != *target {
+            return None;
+        }
+        let song_id = song_id.clone();
+        self.desired = None;
+        Some(song_id)
+    }
+
+    fn begin_toggle(&mut self, song_id: String, target: bool, fut: LikeToggleFuture) {
+        self.toggle = Some(PendingLikeToggle {
+            song_id,
+            target,
+            fut,
+        });
+    }
+
+    fn begin_verify(&mut self, song_id: String, fut: LikeVerifyFuture) {
+        self.verify = Some(PendingLikeVerify { song_id, fut });
+    }
+
+    /// 收敛一次写入回包。
+    fn on_toggle_result(
+        &mut self,
+        song_id: &str,
+        target: bool,
+        result: Result<(), String>,
+    ) -> ToggleOutcome {
+        let still_wanted = matches!(
+            self.desired.as_ref(),
+            Some((id, value)) if id == song_id && *value == target
+        );
+        if still_wanted {
+            self.desired = None;
+        }
+
+        match result {
+            Ok(()) => {
+                self.set_confirmed(song_id, target);
+                if still_wanted {
+                    ToggleOutcome::Settled { liked: target }
+                } else {
+                    ToggleOutcome::Superseded
+                }
+            }
+            Err(message) => {
+                if still_wanted {
+                    ToggleOutcome::Failed { message }
+                } else {
+                    ToggleOutcome::StaleFailure
+                }
+            }
+        }
+    }
+
+    /// 收敛一次确认回包；返回是否真的写入了确认值。
+    fn on_verify_result(&mut self, song_id: &str, result: Result<bool, ()>) -> bool {
+        let Ok(liked) = result else {
+            return false;
+        };
+        // 更新的意图 / 在途写入优先，别被旧确认覆盖。
+        let superseded = matches!(self.desired.as_ref(), Some((id, _)) if id == song_id)
+            || self
+                .toggle
+                .as_ref()
+                .is_some_and(|pending| pending.song_id == song_id);
+        if superseded {
+            return false;
+        }
+
+        self.set_confirmed(song_id, liked);
+        true
+    }
+
+    fn set_confirmed(&mut self, song_id: &str, liked: bool) {
+        if liked {
+            self.confirmed.insert(song_id.to_string());
+        } else {
+            self.confirmed.remove(song_id);
+        }
+    }
+
+    /// 登出等场景：连已确认集合一起丢弃。
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct CoverFetchState {
     pub url: Option<String>,
@@ -1801,7 +2023,8 @@ pub struct App {
     pub search: SearchState,
     pub now_playing: Option<PlaybackTrack>,
     pub now_playing_liked: bool,
-    pub liked_song_ids: HashSet<String>,
+    /// 收藏的期望/已确认双轨状态机（乐观更新 + 每帧收敛）。
+    like_machine: LikeMachine,
     pub playback_queue: Vec<PlaybackTrack>,
     /// 当前播放队列来源列表（专辑/歌单）的封面 URL。
     /// 与 `self.playlist` 解耦：后者是"最后访问的页面"，会随浏览漂移。
@@ -1940,7 +2163,7 @@ impl App {
             search: SearchState::default(),
             now_playing: None,
             now_playing_liked: false,
-            liked_song_ids: HashSet::new(),
+            like_machine: LikeMachine::default(),
             playback_queue: Vec::new(),
             playback_queue_cover_url: None,
             playback_queue_source_id: None,
@@ -2062,6 +2285,7 @@ impl App {
         self.tick_search_box_animation();
         self.tick_home_sidebar_animation();
         self.tick_home_sidebar_fetch();
+        self.tick_like_sync();
         self.tick_stderr_log_trim();
         self.tick_startup_loading();
         #[cfg(feature = "easter-egg")]
@@ -2761,6 +2985,8 @@ impl App {
         self.tick_lyric_fetch();
         self.apply_mpris_control_events().await;
         self.sync_mpris_exposure();
+        // 全屏页不跑宿主主循环，收藏的派发/收敛要在这里推进。
+        self.tick_like_sync();
     }
 
     async fn apply_mpris_control_events(&mut self) {
@@ -2955,7 +3181,7 @@ impl App {
     }
 
     pub async fn fullscreen_toggle_like(&mut self) {
-        self.toggle_like_hotkey().await;
+        self.toggle_like_hotkey();
     }
 
     async fn handle_overlay_key(&mut self, overlay: Overlay, key: KeyEvent) {
@@ -3034,7 +3260,7 @@ impl App {
             KeybindAction::FullscreenEq => {}
             KeybindAction::FullscreenEqReset => {}
             KeybindAction::ToggleLikeFullscreen => {}
-            KeybindAction::ToggleLikeCollapsed => self.toggle_like_hotkey().await,
+            KeybindAction::ToggleLikeCollapsed => self.toggle_like_hotkey(),
             KeybindAction::SmallWindowToggle => {}
         }
     }
@@ -3152,7 +3378,7 @@ impl App {
 
         if self.is_liked_playlist(&playlist_id, Some(&title)) {
             let _ = self.refresh_liked_song_cache().await;
-            self.refresh_now_playing_like_state().await;
+            self.refresh_now_playing_like_state();
         }
 
         self.home.status_line = format!("{} {}", self.lang_text("正在加载", "Loading"), title);
@@ -3523,41 +3749,36 @@ impl App {
         }
     }
 
-    async fn refresh_now_playing_like_state(&mut self) {
-        let Some(song_id) = self.now_playing.as_ref().map(|track| track.song_id.clone()) else {
+    /// 切歌后刷新收藏态：先用本地缓存（含未决意图）立即显示，服务端确认
+    /// 交给 `tick_like_sync` 收敛——不再阻塞事件循环。
+    fn refresh_now_playing_like_state(&mut self) {
+        let Some(song_id) = self.current_song_id() else {
             self.now_playing_liked = false;
             return;
         };
 
-        self.now_playing_liked = self.liked_song_ids.contains(&song_id);
+        self.sync_like_display(&song_id);
 
-        let Ok(song_id_num) = song_id.parse::<u64>() else {
-            return;
-        };
+        let fut = song_like_check_request(self.api.clone(), song_id.clone());
+        let fut: LikeVerifyTask = Box::pin(async move { Some(fut.await) });
+        self.like_machine.begin_verify(song_id, shot_and_share(fut));
+    }
 
-        let ids_json = format!("[{song_id_num}]");
-        let Ok(response) = self.api.song_like_check(&ids_json).await else {
-            return;
-        };
+    /// 当前曲目 id。
+    fn current_song_id(&self) -> Option<String> {
+        self.now_playing.as_ref().map(|track| track.song_id.clone())
+    }
 
-        if response_code(&response) != 200 {
-            return;
-        }
-
-        let Some(liked) = parse_song_like_check_result(&response.body, &song_id) else {
-            return;
-        };
-
-        self.now_playing_liked = liked;
-        if liked {
-            self.liked_song_ids.insert(song_id);
-        } else {
-            self.liked_song_ids.remove(&song_id);
+    /// 把某首歌的显示值同步到状态机（未决意图优先，其次已确认值）。
+    fn sync_like_display(&mut self, song_id: &str) {
+        if self.current_song_id().as_deref() == Some(song_id) {
+            self.now_playing_liked = self.like_machine.displayed(song_id);
         }
     }
 
-    async fn toggle_like_hotkey(&mut self) {
-        let Some(song_id) = self.now_playing.as_ref().map(|track| track.song_id.clone()) else {
+    /// 收藏切换：立刻按期望值改界面（乐观更新），请求由 `tick_like_sync` 派发。
+    fn toggle_like_hotkey(&mut self) {
+        let Some(song_id) = self.current_song_id() else {
             self.set_runtime_status(self.lang_text(
                 "当前没有可收藏的歌曲",
                 "No song is available for like/unlike",
@@ -3566,43 +3787,83 @@ impl App {
         };
 
         let target = !self.now_playing_liked;
-        match self.api.like_song(&song_id, target).await {
-            Ok(response) => {
-                let code = response
-                    .body
-                    .get("code")
-                    .and_then(|value| value.as_i64())
-                    .unwrap_or(response.status);
-                if code == 200 {
-                    if target {
-                        self.liked_song_ids.insert(song_id.clone());
-                    } else {
-                        self.liked_song_ids.remove(&song_id);
-                    }
-                    self.now_playing_liked = self.liked_song_ids.contains(&song_id);
-                    self.set_runtime_status(if target {
-                        self.lang_text("已收藏当前歌曲", "Liked current song")
-                            .to_string()
-                    } else {
-                        self.lang_text("已取消收藏当前歌曲", "Unliked current song")
-                            .to_string()
-                    });
+        self.like_machine.set_intent(song_id, target);
+        self.now_playing_liked = target;
+    }
+
+    /// 每帧收敛收藏状态：先搬在途结果，再按需补发请求。
+    fn tick_like_sync(&mut self) {
+        self.pump_like_toggle();
+        self.pump_like_verify();
+        self.dispatch_like_toggle();
+    }
+
+    fn pump_like_toggle(&mut self) {
+        let Some(pending) = self.like_machine.toggle.as_ref() else {
+            return;
+        };
+        let Some(result) = peek_shared(&pending.fut).cloned() else {
+            return;
+        };
+
+        let song_id = pending.song_id.clone();
+        let target = pending.target;
+        self.like_machine.toggle = None;
+
+        match self.like_machine.on_toggle_result(&song_id, target, result) {
+            ToggleOutcome::Settled { liked } => {
+                self.sync_like_display(&song_id);
+                self.set_runtime_status(if liked {
+                    self.lang_text("已收藏当前歌曲", "Liked current song")
+                        .to_string()
                 } else {
-                    self.set_runtime_status(format!(
-                        "{}: {}",
-                        self.lang_text("收藏操作失败", "Like operation failed"),
-                        code
-                    ));
-                }
+                    self.lang_text("已取消收藏当前歌曲", "Unliked current song")
+                        .to_string()
+                });
             }
-            Err(err) => {
+            ToggleOutcome::Superseded => self.sync_like_display(&song_id),
+            ToggleOutcome::Failed { message } => {
+                // 意图已被状态机放弃，显示回滚到已确认值。
+                self.sync_like_display(&song_id);
                 self.set_runtime_status(format!(
                     "{}: {}",
                     self.lang_text("收藏操作失败", "Like operation failed"),
-                    err
+                    message
                 ));
             }
+            ToggleOutcome::StaleFailure => {}
         }
+    }
+
+    fn pump_like_verify(&mut self) {
+        let Some(pending) = self.like_machine.verify.as_ref() else {
+            return;
+        };
+        let Some(result) = peek_shared(&pending.fut).cloned() else {
+            return;
+        };
+
+        let song_id = pending.song_id.clone();
+        self.like_machine.verify = None;
+
+        if self.like_machine.on_verify_result(&song_id, result) {
+            self.sync_like_display(&song_id);
+        }
+    }
+
+    fn dispatch_like_toggle(&mut self) {
+        if let Some(song_id) = self.like_machine.drop_satisfied_intent() {
+            self.sync_like_display(&song_id);
+        }
+
+        let Some((song_id, target)) = self.like_machine.pending_dispatch() else {
+            return;
+        };
+
+        let fut = like_song_request(self.api.clone(), song_id.clone(), target);
+        let fut: LikeToggleTask = Box::pin(async move { Some(fut.await) });
+        self.like_machine
+            .begin_toggle(song_id, target, shot_and_share(fut));
     }
 
     async fn tick_audio(&mut self) {
@@ -3687,7 +3948,7 @@ impl App {
         }
         self.trim_non_current_cover_memory(index);
         self.now_playing = Some(enriched.clone());
-        self.refresh_now_playing_like_state().await;
+        self.refresh_now_playing_like_state();
         self.playback_index = Some(index);
         self.cover_fetch_inflight_url = None;
         self.cover_fetch_last_attempt_at = None;
@@ -5965,7 +6226,7 @@ impl App {
         self.audio_player.stop();
         self.now_playing = None;
         self.now_playing_liked = false;
-        self.liked_song_ids.clear();
+        self.like_machine.clear();
         self.playback_queue.clear();
         self.playback_index = None;
         self.playback_state = PlaybackRuntimeState::Stopped;
@@ -6319,8 +6580,9 @@ impl App {
             ));
         }
 
-        self.liked_song_ids = parse_likelist_song_ids(&response.body);
-        self.refresh_now_playing_like_state().await;
+        self.like_machine
+            .replace_confirmed(parse_likelist_song_ids(&response.body));
+        self.refresh_now_playing_like_state();
         Ok(())
     }
 
@@ -8615,5 +8877,147 @@ mod tests {
         assert_eq!(lufs_to_bar_level(VU_LUFS_FLOOR), 0.0);
         assert_eq!(lufs_to_bar_level(0.0), 1.0);
         assert_eq!(lufs_to_mean_square(VU_LUFS_FLOOR), 0.0);
+    }
+
+    fn pending_toggle_future() -> LikeToggleFuture {
+        let fut: Pin<Box<dyn Future<Output = Option<Result<(), String>>>>> =
+            Box::pin(async { None });
+        fut.shared()
+    }
+
+    fn pending_verify_future() -> LikeVerifyFuture {
+        let fut: Pin<Box<dyn Future<Output = Option<Result<bool, ()>>>>> = Box::pin(async { None });
+        fut.shared()
+    }
+
+    /// 点击必须立刻改变显示值（乐观），并把请求排进派发队列。
+    #[test]
+    fn like_click_is_optimistic_and_queues_one_request() {
+        let mut machine = LikeMachine::default();
+        machine.set_intent("s1".to_string(), true);
+
+        assert!(machine.displayed("s1"), "点击后立即显示为已收藏");
+        assert_eq!(machine.pending_dispatch(), Some(("s1".to_string(), true)));
+    }
+
+    /// 连点两次回到原状态：一个请求都不该发。
+    #[test]
+    fn like_double_click_back_to_start_sends_nothing() {
+        let mut machine = LikeMachine::default();
+        machine.set_intent("s1".to_string(), true);
+        machine.set_intent("s1".to_string(), false);
+
+        assert!(!machine.displayed("s1"));
+        assert_eq!(machine.pending_dispatch(), None);
+        assert_eq!(machine.drop_satisfied_intent(), Some("s1".to_string()));
+        assert!(machine.desired.is_none());
+    }
+
+    /// 在途请求未收敛前不再并发派发，但显示跟随最后一次意图。
+    #[test]
+    fn like_inflight_toggle_blocks_a_second_request() {
+        let mut machine = LikeMachine::default();
+        machine.set_intent("s1".to_string(), true);
+        machine.begin_toggle("s1".to_string(), true, pending_toggle_future());
+
+        machine.set_intent("s1".to_string(), false);
+
+        assert_eq!(machine.pending_dispatch(), None, "串行化：一次只发一个");
+        assert!(!machine.displayed("s1"));
+    }
+
+    /// 旧回包不得覆盖更新的意图：确认值照写，显示与补发按新意图走。
+    #[test]
+    fn like_stale_response_keeps_newer_intent() {
+        let mut machine = LikeMachine::default();
+        machine.set_intent("s1".to_string(), true);
+        machine.begin_toggle("s1".to_string(), true, pending_toggle_future());
+        machine.set_intent("s1".to_string(), false);
+        // 真实路径里 pump 先取走回包句柄，再交给状态机收敛
+        machine.toggle = None;
+
+        let outcome = machine.on_toggle_result("s1", true, Ok(()));
+
+        assert_eq!(outcome, ToggleOutcome::Superseded);
+        assert!(machine.is_confirmed("s1"), "回包写入已确认值");
+        assert!(!machine.displayed("s1"), "显示仍按最后一次意图");
+        assert_eq!(machine.pending_dispatch(), Some(("s1".to_string(), false)));
+    }
+
+    /// 仍是最新意图的失败要回滚显示并报错。
+    #[test]
+    fn like_failure_rolls_back_to_confirmed() {
+        let mut machine = LikeMachine::default();
+        machine.set_intent("s1".to_string(), true);
+
+        let outcome = machine.on_toggle_result("s1", true, Err("502".to_string()));
+
+        assert_eq!(
+            outcome,
+            ToggleOutcome::Failed {
+                message: "502".to_string()
+            }
+        );
+        assert!(!machine.is_confirmed("s1"));
+        assert!(!machine.displayed("s1"), "失败后回滚到已确认值");
+        assert_eq!(machine.pending_dispatch(), None, "失败的意图已被放弃");
+    }
+
+    /// 已被取代的旧失败直接忽略，不影响新意图。
+    #[test]
+    fn like_stale_failure_is_ignored() {
+        let mut machine = LikeMachine::default();
+        machine.set_intent("s1".to_string(), true);
+        machine.begin_toggle("s1".to_string(), true, pending_toggle_future());
+        machine.set_intent("s1".to_string(), false);
+        machine.toggle = None;
+
+        let outcome = machine.on_toggle_result("s1", true, Err("timeout".to_string()));
+
+        assert_eq!(outcome, ToggleOutcome::StaleFailure, "旧失败不打断新意图");
+        assert!(!machine.displayed("s1"));
+        assert!(!machine.is_confirmed("s1"));
+        // 新意图（取消收藏）与已确认状态一致，无需再发请求
+        assert_eq!(machine.pending_dispatch(), None);
+        assert_eq!(machine.drop_satisfied_intent(), Some("s1".to_string()));
+    }
+
+    /// 服务端确认不能覆盖未决意图。
+    #[test]
+    fn like_verify_does_not_override_pending_intent() {
+        let mut machine = LikeMachine::default();
+        machine.begin_verify("s1".to_string(), pending_verify_future());
+        machine.set_intent("s1".to_string(), true);
+
+        assert!(
+            !machine.on_verify_result("s1", Ok(false)),
+            "确认被未决意图挡住"
+        );
+        assert!(!machine.is_confirmed("s1"));
+        assert!(machine.displayed("s1"));
+    }
+
+    /// 无未决意图时确认写入已确认集合；确认失败保持本地缓存。
+    #[test]
+    fn like_verify_applies_without_pending_intent() {
+        let mut machine = LikeMachine::default();
+
+        assert!(machine.on_verify_result("s1", Ok(true)));
+        assert!(machine.is_confirmed("s1"));
+        assert!(machine.displayed("s1"));
+        assert!(!machine.on_verify_result("s1", Err(())));
+        assert!(machine.is_confirmed("s1"), "确认失败不改动本地缓存");
+    }
+
+    /// 未决意图只作用于它自己的曲目。
+    #[test]
+    fn like_display_is_per_song() {
+        let mut machine = LikeMachine::default();
+        machine.set_confirmed("s1", true);
+        machine.set_intent("s2".to_string(), true);
+
+        assert!(machine.displayed("s1"), "其他曲目仍按已确认值");
+        assert!(machine.displayed("s2"));
+        assert!(!machine.is_confirmed("s2"));
     }
 }
