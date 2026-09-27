@@ -2089,6 +2089,10 @@ pub struct App {
     pub settings_playback_selected: usize,
     pub settings_keybind_selected: usize,
     pub settings_keybind_rebinding: Option<usize>,
+    /// 设置弹窗当前页的行命中区（每帧由 `draw_settings_modal` 重注册）。
+    pub settings_item_hits: Vec<(HitRect, usize)>,
+    /// 设置弹窗内上一次点击（用于双击判定）。
+    last_settings_click: Option<(Instant, Overlay, usize)>,
     /// about 弹窗里的形象彩蛋状态。
     #[cfg(feature = "easter-egg")]
     pub about_egg: AboutEasterEgg,
@@ -2214,6 +2218,8 @@ impl App {
             settings_playback_selected: 0,
             settings_keybind_selected: 0,
             settings_keybind_rebinding: None,
+            settings_item_hits: Vec::new(),
+            last_settings_click: None,
             #[cfg(feature = "easter-egg")]
             about_egg: AboutEasterEgg::default(),
             session_cookie: None,
@@ -2437,7 +2443,9 @@ impl App {
                     return;
                 }
 
-                if self.overlay.is_some() {
+                if let Some(overlay) = self.overlay {
+                    // 设置弹窗：命中行则聚焦/执行，其余位置一律吞掉。
+                    self.handle_settings_modal_click(overlay, col, row).await;
                     return;
                 }
 
@@ -2574,6 +2582,14 @@ impl App {
         self.playlist_track_hits.clear();
         self.author_tile_hits.clear();
         self.search_item_hits.clear();
+    }
+
+    pub fn clear_settings_item_hits(&mut self) {
+        self.settings_item_hits.clear();
+    }
+
+    pub fn push_settings_item_hit(&mut self, rect: HitRect, index: usize) {
+        self.settings_item_hits.push((rect, index));
     }
 
     pub fn set_home_sidebar_panel_hit(&mut self, rect: Option<HitRect>) {
@@ -4819,6 +4835,89 @@ impl App {
         self.search_box_cursor = char_index_for_display_column(&self.search_box_input, rel);
     }
 
+    /// 设置弹窗内的鼠标点击：单击聚焦该行，400ms 内再点同一行等同 Enter。
+    ///
+    /// 弹窗盖住整页，未命中行的点击由调用方直接丢弃（不穿透到底层页面）。
+    async fn handle_settings_modal_click(&mut self, overlay: Overlay, col: u16, row: u16) {
+        let Some((_, index)) = self
+            .settings_item_hits
+            .iter()
+            .find(|(rect, _)| rect.contains(col, row))
+            .copied()
+        else {
+            self.last_settings_click = None;
+            return;
+        };
+
+        match overlay {
+            Overlay::Settings => {
+                self.settings_selected = index;
+                if self.is_double_settings_click(overlay, index) {
+                    self.activate_settings_root_item().await;
+                }
+            }
+            Overlay::SettingsPlayback => {
+                self.settings_playback_selected = index;
+                if self.is_double_settings_click(overlay, index) {
+                    self.apply_settings_playback_delta(1);
+                }
+            }
+            Overlay::SettingsKeybinds => {
+                self.settings_keybind_selected = index;
+                if self.is_double_settings_click(overlay, index) {
+                    self.begin_keybind_rebind(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn is_double_settings_click(&mut self, overlay: Overlay, index: usize) -> bool {
+        let now = Instant::now();
+        let is_double = self
+            .last_settings_click
+            .map(|(at, o, i)| {
+                o == overlay
+                    && i == index
+                    && now.duration_since(at) <= Duration::from_millis(CONTENT_DOUBLE_CLICK_MS)
+            })
+            .unwrap_or(false);
+        self.last_settings_click = Some((now, overlay, index));
+        is_double
+    }
+
+    /// 设置根页选中项的执行（键盘 Enter 与双击共用）。
+    async fn activate_settings_root_item(&mut self) {
+        match self.settings_selected {
+            0..=3 => self.apply_settings_root_delta(1).await,
+            4 => {
+                self.settings_playback_selected = 0;
+                self.overlay = Some(Overlay::SettingsPlayback);
+            }
+            5 => self.open_keybind_settings(),
+            6..=8 => self.apply_settings_root_delta(1).await,
+            9 => self.logout_to_login().await,
+            10 => {
+                self.overlay = Some(Overlay::SettingsAbout);
+            }
+            _ => {}
+        }
+    }
+
+    /// 开始重绑某条快捷键（键盘 Enter 与双击共用）。
+    fn begin_keybind_rebind(&mut self, index: usize) {
+        self.settings_keybind_rebinding = Some(index);
+        self.set_runtime_status(format!(
+            "{} [{}]，{}",
+            self.lang_text("正在重绑", "Rebinding"),
+            self.keybind_name_for_index(index),
+            self.lang_text(
+                "请按新快捷键（Esc 取消）",
+                "press a new shortcut (Esc to cancel)"
+            )
+        ));
+    }
+
     async fn handle_settings_root_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => self.close_overlay(),
@@ -4839,24 +4938,7 @@ impl App {
             }
             KeyCode::Left => self.apply_settings_root_delta(-1).await,
             KeyCode::Right => self.apply_settings_root_delta(1).await,
-            KeyCode::Enter => match self.settings_selected {
-                0..=3 => self.apply_settings_root_delta(1).await,
-                4 => {
-                    self.settings_playback_selected = 0;
-                    self.overlay = Some(Overlay::SettingsPlayback);
-                }
-                5 => {
-                    self.open_keybind_settings();
-                }
-                6 => self.apply_settings_root_delta(1).await,
-                7 => self.apply_settings_root_delta(1).await,
-                8 => self.apply_settings_root_delta(1).await,
-                9 => self.logout_to_login().await,
-                10 => {
-                    self.overlay = Some(Overlay::SettingsAbout);
-                }
-                _ => {}
-            },
+            KeyCode::Enter => self.activate_settings_root_item().await,
             _ => {}
         }
     }
@@ -4982,16 +5064,7 @@ impl App {
             }
             KeyCode::Enter => {
                 let idx = self.settings_keybind_selected;
-                self.settings_keybind_rebinding = Some(idx);
-                self.set_runtime_status(format!(
-                    "{} [{}]，{}",
-                    self.lang_text("正在重绑", "Rebinding"),
-                    self.keybind_name_for_index(idx),
-                    self.lang_text(
-                        "请按新快捷键（Esc 取消）",
-                        "press a new shortcut (Esc to cancel)"
-                    )
-                ));
+                self.begin_keybind_rebind(idx);
             }
             _ => {}
         }
@@ -5629,6 +5702,8 @@ impl App {
         self.overlay = None;
         self.search_box_anim_height = 0;
         self.search_box_anim_started_at = None;
+        self.last_settings_click = None;
+        self.clear_settings_item_hits();
     }
 
     async fn execute_search_from_box(&mut self) {
