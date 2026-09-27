@@ -1803,8 +1803,8 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
         }
     }
 
-    if contains(layout.info_volume, col, row) {
-        return Some(Action::SetVolume(ratio_in_bar(layout.info_volume, col)));
+    if let Some(volume) = volume_at(layout, col, row) {
+        return Some(Action::SetVolume(volume));
     }
 
     if contains(layout.info_progress, col, row) {
