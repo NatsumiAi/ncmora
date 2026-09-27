@@ -69,6 +69,10 @@ fn host_config_sync_from_app(app: &AppState) -> HostConfigSync {
         language: app.language,
         graphics_protocol: app.config.graphics_protocol,
         page_lyrics: app.config.page_lyrics,
+        page_lyrics_drag: app.config.page_lyrics_drag,
+        page_lyrics_snap: app.config.page_lyrics_snap,
+        page_lyrics_pos_x: app.config.page_lyrics_pos_x,
+        page_lyrics_pos_y: app.config.page_lyrics_pos_y,
         audio_quality: match app.config.audio_quality {
             AudioQuality::Standard => crate::data::config::AudioQuality::Standard,
             AudioQuality::Higher => crate::data::config::AudioQuality::Higher,
@@ -118,6 +122,10 @@ fn apply_host_config_sync(app: &mut AppState, config: HostConfigSync) {
     app.config.album_border = config.album_border;
     app.language = config.language;
     app.config.page_lyrics = config.page_lyrics;
+    app.config.page_lyrics_drag = config.page_lyrics_drag;
+    app.config.page_lyrics_snap = config.page_lyrics_snap;
+    app.config.page_lyrics_pos_x = config.page_lyrics_pos_x.clamp(0.0, 1.0);
+    app.config.page_lyrics_pos_y = config.page_lyrics_pos_y.clamp(0.0, 1.0);
     app.vip_audio_unlocked = config.vip_audio_unlocked;
     app.config.audio_quality = match config.audio_quality {
         crate::data::config::AudioQuality::Standard => AudioQuality::Standard,
@@ -711,7 +719,7 @@ async fn handle_action(
             app.set_toast("Bye");
         }
         Action::OpenSettingsModal => {
-            app.settings_selected = app.settings_selected.min(10);
+            app.settings_selected = app.settings_selected.min(11);
             app.overlay = Overlay::SettingsModal;
         }
         Action::OpenHelpModal => {
@@ -759,6 +767,7 @@ async fn handle_action(
             } else if app.overlay == Overlay::AcoustIdModal
                 || app.overlay == Overlay::BarSettingsModal
                 || app.overlay == Overlay::LocalAudioSettingsModal
+                || app.overlay == Overlay::LyricsSettingsModal
                 || app.overlay == Overlay::AboutModal
             {
                 app.overlay = Overlay::SettingsModal;
@@ -825,7 +834,8 @@ async fn handle_action(
                     app.overlay = Overlay::HelpModal;
                 }
                 6 => {
-                    apply_settings_delta(app, host_bridge, 1).await;
+                    app.lyrics_settings_selected = app.lyrics_settings_selected.min(2);
+                    app.overlay = Overlay::LyricsSettingsModal;
                 }
                 7 => {
                     apply_settings_delta(app, host_bridge, 1).await;
@@ -834,9 +844,12 @@ async fn handle_action(
                     apply_settings_delta(app, host_bridge, 1).await;
                 }
                 9 => {
-                    app.set_toast("Logout is unavailable in fullscreen");
+                    apply_settings_delta(app, host_bridge, 1).await;
                 }
                 10 => {
+                    app.set_toast("Logout is unavailable in fullscreen");
+                }
+                11 => {
                     app.overlay = Overlay::AboutModal;
                 }
                 _ => {}
@@ -867,17 +880,31 @@ async fn handle_action(
                     save_and_sync_host_config(app, host_bridge).await;
                 }
                 6 => {
-                    app.config.page_lyrics = !app.config.page_lyrics;
-                    save_and_sync_host_config(app, host_bridge).await;
-                }
-                7 => {
                     app.config.audio_quality =
                         app.config.audio_quality.cycle(1, app.vip_audio_unlocked);
                     save_and_sync_host_config(app, host_bridge).await;
                 }
-                8 => {
+                7 => {
                     app.config.playback_memory = !app.config.playback_memory;
                     save_and_sync_host_config(app, host_bridge).await;
+                }
+                _ => {}
+            },
+            Overlay::LyricsSettingsModal => match app.lyrics_settings_selected {
+                0 => {
+                    app.config.page_lyrics = !app.config.page_lyrics;
+                    save_and_sync_host_config(app, host_bridge).await;
+                }
+                1 => {
+                    app.config.page_lyrics_drag = !app.config.page_lyrics_drag;
+                    save_and_sync_host_config(app, host_bridge).await;
+                }
+                2 => {
+                    // 拖动关闭时吸附无意义：灰置且不可改。
+                    if app.config.page_lyrics_drag {
+                        app.config.page_lyrics_snap = !app.config.page_lyrics_snap;
+                        save_and_sync_host_config(app, host_bridge).await;
+                    }
                 }
                 _ => {}
             },
@@ -941,18 +968,25 @@ async fn handle_action(
         Action::PrevAlbum | Action::NextAlbum => (),
         Action::ModalUp => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 11;
+                let count = 12;
                 if app.settings_selected == 0 {
                     app.settings_selected = count - 1;
                 } else {
                     app.settings_selected -= 1;
                 }
             } else if app.overlay == Overlay::BarSettingsModal {
-                let count = 9;
+                let count = 8;
                 if app.bar_settings_selected == 0 {
                     app.bar_settings_selected = count - 1;
                 } else {
                     app.bar_settings_selected -= 1;
+                }
+            } else if app.overlay == Overlay::LyricsSettingsModal {
+                let count = 3;
+                if app.lyrics_settings_selected == 0 {
+                    app.lyrics_settings_selected = count - 1;
+                } else {
+                    app.lyrics_settings_selected -= 1;
                 }
             } else if app.overlay == Overlay::LocalAudioSettingsModal {
                 let count = 5;
@@ -978,11 +1012,14 @@ async fn handle_action(
         }
         Action::ModalDown => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 11;
+                let count = 12;
                 app.settings_selected = (app.settings_selected + 1) % count;
             } else if app.overlay == Overlay::BarSettingsModal {
-                let count = 9;
+                let count = 8;
                 app.bar_settings_selected = (app.bar_settings_selected + 1) % count;
+            } else if app.overlay == Overlay::LyricsSettingsModal {
+                let count = 3;
+                app.lyrics_settings_selected = (app.lyrics_settings_selected + 1) % count;
             } else if app.overlay == Overlay::LocalAudioSettingsModal {
                 let count = 5;
                 app.local_audio_settings_selected = (app.local_audio_settings_selected + 1) % count;
@@ -1027,20 +1064,18 @@ async fn handle_action(
                         save_and_sync_host_config(app, host_bridge).await;
                     }
                     6 => {
-                        app.config.page_lyrics = !app.config.page_lyrics;
-                        save_and_sync_host_config(app, host_bridge).await;
-                    }
-                    7 => {
                         app.config.audio_quality =
                             app.config.audio_quality.cycle(-1, app.vip_audio_unlocked);
                         save_and_sync_host_config(app, host_bridge).await;
                     }
-                    8 => {
+                    7 => {
                         app.config.playback_memory = !app.config.playback_memory;
                         save_and_sync_host_config(app, host_bridge).await;
                     }
                     _ => {}
                 }
+            } else if app.overlay == Overlay::LyricsSettingsModal {
+                apply_lyrics_settings_delta(app, host_bridge, -1).await;
             } else if app.overlay == Overlay::LocalAudioSettingsModal {
                 apply_local_audio_settings_delta(app, -1);
             } else if app.overlay == Overlay::EqModal {
@@ -1082,20 +1117,18 @@ async fn handle_action(
                         save_and_sync_host_config(app, host_bridge).await;
                     }
                     6 => {
-                        app.config.page_lyrics = !app.config.page_lyrics;
-                        save_and_sync_host_config(app, host_bridge).await;
-                    }
-                    7 => {
                         app.config.audio_quality =
                             app.config.audio_quality.cycle(1, app.vip_audio_unlocked);
                         save_and_sync_host_config(app, host_bridge).await;
                     }
-                    8 => {
+                    7 => {
                         app.config.playback_memory = !app.config.playback_memory;
                         save_and_sync_host_config(app, host_bridge).await;
                     }
                     _ => {}
                 }
+            } else if app.overlay == Overlay::LyricsSettingsModal {
+                apply_lyrics_settings_delta(app, host_bridge, 1).await;
             } else if app.overlay == Overlay::LocalAudioSettingsModal {
                 apply_local_audio_settings_delta(app, 1);
             } else if app.overlay == Overlay::EqModal {
@@ -1259,6 +1292,7 @@ async fn handle_action(
                 Overlay::SettingsModal => app.settings_selected = idx,
                 Overlay::BarSettingsModal => app.bar_settings_selected = idx,
                 Overlay::LocalAudioSettingsModal => app.local_audio_settings_selected = idx,
+                Overlay::LyricsSettingsModal => app.lyrics_settings_selected = idx,
                 _ => return Ok(()),
             }
 
@@ -1361,24 +1395,55 @@ async fn apply_settings_delta(
                 save_and_sync_host_config(app, host_bridge).await;
             }
         }
+        // “歌词浮窗...”是可进入项：左右键不改变配置。
+        6 => {}
         // Show hints
-        6 => {
+        7 => {
             if delta != 0 {
                 app.config.show_hints = !app.config.show_hints;
                 save_and_sync_host_config(app, host_bridge).await;
             }
         }
         // Small window display
-        7 => {
+        8 => {
             if delta != 0 {
                 app.config.small_window_display = !app.config.small_window_display;
                 save_and_sync_host_config(app, host_bridge).await;
             }
         }
         // Home more recommendations
-        8 => {
+        9 => {
             if delta != 0 {
                 app.config.home_more_recommend = !app.config.home_more_recommend;
+                save_and_sync_host_config(app, host_bridge).await;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// “歌词浮窗”子页三行开关；吸附行只在拖动开启时可改。
+async fn apply_lyrics_settings_delta(
+    app: &mut AppState,
+    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+    delta: i32,
+) {
+    if delta == 0 {
+        return;
+    }
+
+    match app.lyrics_settings_selected {
+        0 => {
+            app.config.page_lyrics = !app.config.page_lyrics;
+            save_and_sync_host_config(app, host_bridge).await;
+        }
+        1 => {
+            app.config.page_lyrics_drag = !app.config.page_lyrics_drag;
+            save_and_sync_host_config(app, host_bridge).await;
+        }
+        2 => {
+            if app.config.page_lyrics_drag {
+                app.config.page_lyrics_snap = !app.config.page_lyrics_snap;
                 save_and_sync_host_config(app, host_bridge).await;
             }
         }

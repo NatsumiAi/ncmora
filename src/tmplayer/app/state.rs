@@ -351,6 +351,7 @@ pub enum Overlay {
     SettingsModal,
     BarSettingsModal,
     LocalAudioSettingsModal,
+    LyricsSettingsModal,
     AboutModal,
     AcoustIdModal,
     HelpModal,
@@ -401,6 +402,7 @@ pub struct AppState {
     pub settings_selected: usize,
     pub bar_settings_selected: usize,
     pub local_audio_settings_selected: usize,
+    pub lyrics_settings_selected: usize,
     pub help_keybind_selected: usize,
     pub vip_audio_unlocked: bool,
 
@@ -520,6 +522,7 @@ impl AppState {
             settings_selected: 0,
             bar_settings_selected: 0,
             local_audio_settings_selected: 0,
+            lyrics_settings_selected: 0,
             help_keybind_selected: 0,
             vip_audio_unlocked: false,
 

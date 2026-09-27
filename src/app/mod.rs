@@ -5935,6 +5935,10 @@ impl App {
             language: self.config.language,
             graphics_protocol: self.config.graphics_protocol,
             page_lyrics: self.config.page_lyrics,
+            page_lyrics_drag: self.config.page_lyrics_drag,
+            page_lyrics_snap: self.config.page_lyrics_snap,
+            page_lyrics_pos_x: self.config.page_lyrics_pos_x,
+            page_lyrics_pos_y: self.config.page_lyrics_pos_y,
             audio_quality: self.config.audio_quality,
             eq_bands_db: self.config.eq_bands_db,
             playback_memory: self.config.playback_memory,
@@ -5985,6 +5989,28 @@ impl App {
 
         if self.config.page_lyrics != sync.page_lyrics {
             self.config.page_lyrics = sync.page_lyrics;
+            changed = true;
+        }
+
+        if self.config.page_lyrics_drag != sync.page_lyrics_drag {
+            self.config.page_lyrics_drag = sync.page_lyrics_drag;
+            changed = true;
+        }
+
+        if self.config.page_lyrics_snap != sync.page_lyrics_snap {
+            self.config.page_lyrics_snap = sync.page_lyrics_snap;
+            changed = true;
+        }
+
+        // 全屏页也可能改到浮窗位置（拖拽时由宿主写、这里只做兜底同步）。
+        let pos_x = sync.page_lyrics_pos_x.clamp(0.0, 1.0);
+        if (self.config.page_lyrics_pos_x - pos_x).abs() > f32::EPSILON {
+            self.config.page_lyrics_pos_x = pos_x;
+            changed = true;
+        }
+        let pos_y = sync.page_lyrics_pos_y.clamp(0.0, 1.0);
+        if (self.config.page_lyrics_pos_y - pos_y).abs() > f32::EPSILON {
+            self.config.page_lyrics_pos_y = pos_y;
             changed = true;
         }
 

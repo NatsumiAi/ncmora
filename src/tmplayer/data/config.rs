@@ -36,6 +36,20 @@ pub struct Config {
     #[serde(default)]
     pub page_lyrics: bool,
 
+    /// 歌词浮窗的从属项（与主应用同步）：是否允许鼠标拖动。
+    #[serde(default = "default_page_lyrics_drag")]
+    pub page_lyrics_drag: bool,
+
+    /// 拖动结束后是否吸附到最近的角（仅拖动开启时可改）。
+    #[serde(default = "default_page_lyrics_snap")]
+    pub page_lyrics_snap: bool,
+
+    /// 歌词浮窗左上角的归一化位置（0..=1）。
+    #[serde(default = "default_page_lyrics_pos")]
+    pub page_lyrics_pos_x: f32,
+    #[serde(default = "default_page_lyrics_pos")]
+    pub page_lyrics_pos_y: f32,
+
     #[serde(default = "default_kitty_cover_scale_percent")]
     pub kitty_cover_scale_percent: u8,
 
@@ -244,6 +258,18 @@ fn default_album_border() -> bool {
     true
 }
 
+fn default_page_lyrics_drag() -> bool {
+    true
+}
+
+fn default_page_lyrics_snap() -> bool {
+    true
+}
+
+fn default_page_lyrics_pos() -> f32 {
+    1.0
+}
+
 fn default_eq_bands_db() -> [f32; crate::tmplayer::app::state::EQ_BANDS] {
     DEFAULT_EQ_BANDS_DB
 }
@@ -367,6 +393,10 @@ impl Default for Config {
             album_border: default_album_border(),
             graphics_protocol: GraphicsProtocol::default(),
             page_lyrics: false,
+            page_lyrics_drag: default_page_lyrics_drag(),
+            page_lyrics_snap: default_page_lyrics_snap(),
+            page_lyrics_pos_x: default_page_lyrics_pos(),
+            page_lyrics_pos_y: default_page_lyrics_pos(),
             kitty_cover_scale_percent: default_kitty_cover_scale_percent(),
             super_smooth_bar: false,
             bars_gap: false,
@@ -448,6 +478,10 @@ impl Config {
             || !raw.contains("audio_quality")
             || !raw.contains("playback_memory")
             || !raw.contains("page_lyrics")
+            || !raw.contains("page_lyrics_drag")
+            || !raw.contains("page_lyrics_snap")
+            || !raw.contains("page_lyrics_pos_x")
+            || !raw.contains("page_lyrics_pos_y")
             || !raw.contains("show_hints")
             || !raw.contains("home_more_recommend")
             || !raw.contains("keybind_search_box")

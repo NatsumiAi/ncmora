@@ -279,6 +279,9 @@ impl Tui {
                 Overlay::LocalAudioSettingsModal => {
                     render_local_audio_settings_modal(f, size, app, &mut layout_out.modal_rows)
                 }
+                Overlay::LyricsSettingsModal => {
+                    render_lyrics_settings_modal(f, size, app, &mut layout_out.modal_rows)
+                }
                 Overlay::AboutModal => render_about_modal(f, size, app),
                 Overlay::AcoustIdModal => render_acoustid_modal(f, size, app),
                 Overlay::HelpModal => render_help_modal(f, size, app),
@@ -505,6 +508,7 @@ fn render_settings_modal(
         ),
         format!("{}...", lang_text(app, "播放设置", "Playback Settings")),
         format!("{}...", lang_text(app, "按键绑定", "Keybinds")),
+        format!("{}...", lang_text(app, "歌词浮窗", "Lyrics Overlay")),
         format!(
             "{}: {}",
             lang_text(app, "显示提示", "Show Hints"),
@@ -711,11 +715,6 @@ fn render_bar_settings_modal(
         ),
         format!(
             "{}: {}",
-            lang_text(app, "页面歌词", "Page Lyrics"),
-            lang_on_off(app, app.config.page_lyrics)
-        ),
-        format!(
-            "{}: {}",
             lang_text(app, "音质", "Audio Quality"),
             match app.config.audio_quality {
                 crate::tmplayer::data::config::AudioQuality::Standard =>
@@ -756,6 +755,94 @@ fn render_bar_settings_modal(
             Style::default()
                 .fg(app.theme.color_accent2())
                 .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.color_text())
+        };
+        let rect = Rect {
+            x: rows[1].x,
+            y: rows[1].y + idx as u16,
+            width: rows[1].width,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Line::styled(format!("  {}", text), style)),
+            rect,
+        );
+        modal_rows.push(rect);
+    }
+
+    f.render_widget(Paragraph::new(""), rows[2]);
+}
+
+fn render_lyrics_settings_modal(
+    f: &mut ratatui::Frame,
+    size: Rect,
+    app: &mut AppState,
+    modal_rows: &mut ModalRows,
+) {
+    let area = centered_rect(size, 70, 20);
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_set(crate::tmplayer::ui::borders::SOLID_BORDER)
+        .title(lang_text(app, " 歌词浮窗 ", " Lyrics Overlay "))
+        .style(
+            Style::default()
+                .fg(app.theme.color_subtext())
+                .bg(app.theme.color_surface()),
+        );
+    f.render_widget(block, area);
+
+    let inner = area.inner(ratatui::layout::Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    f.render_widget(Paragraph::new(""), rows[0]);
+
+    // 与主应用设置同构：吸附行只在拖动开启时可改，关闭时灰置。
+    let drag_enabled = app.config.page_lyrics_drag;
+    let items = [
+        format!(
+            "{}: {}",
+            lang_text(app, "歌词浮窗", "Lyrics Overlay"),
+            lang_on_off(app, app.config.page_lyrics)
+        ),
+        format!(
+            "{}: {}",
+            lang_text(app, "歌词浮窗拖动", "Lyrics Overlay Drag"),
+            lang_on_off(app, drag_enabled)
+        ),
+        format!(
+            "{}: {}",
+            lang_text(app, "歌词浮窗边缘吸附", "Lyrics Overlay Edge Snap"),
+            lang_on_off(app, app.config.page_lyrics_snap)
+        ),
+    ];
+
+    for (idx, text) in items.iter().enumerate() {
+        if idx as u16 >= rows[1].height {
+            break;
+        }
+        let disabled = idx == 2 && !drag_enabled;
+        let style = if idx == app.lyrics_settings_selected {
+            if disabled {
+                Style::default().fg(app.theme.color_subtext())
+            } else {
+                Style::default()
+                    .fg(app.theme.color_accent2())
+                    .add_modifier(Modifier::BOLD)
+            }
+        } else if disabled {
+            Style::default().fg(app.theme.color_subtext())
         } else {
             Style::default().fg(app.theme.color_text())
         };
