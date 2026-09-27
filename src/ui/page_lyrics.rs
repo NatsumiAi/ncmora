@@ -81,23 +81,32 @@ pub fn pos_after_drag(
     )
 }
 
-/// 边缘吸附：浮窗中心落在哪个半区，就吸到对应的角。
-pub fn snap_pos(content_area: Rect, panel: Rect) -> (f32, f32) {
-    let panel_center_x = panel.x + panel.width / 2;
-    let panel_center_y = panel.y + panel.height / 2;
-    let area_center_x = content_area.x + content_area.width / 2;
-    let area_center_y = content_area.y + content_area.height / 2;
+/// 边缘吸附：把浮窗吸到最近的那条边（左/右/上/下），**另一轴保持自由**。
+///
+/// 不吸到角：贴着上边横向居中拖动时只吸 y，x 留在原位。到两条边等距
+/// （例如本来就在角上）时两轴都吸。
+pub fn snap_pos(content_area: Rect, panel: Rect, pos: (f32, f32)) -> (f32, f32) {
+    let (pos_x, pos_y) = clamp_pos(pos);
+    let d_left = panel.x.saturating_sub(content_area.x);
+    let d_right = content_area.right().saturating_sub(panel.right());
+    let d_top = panel.y.saturating_sub(content_area.y);
+    let d_bottom = content_area.bottom().saturating_sub(panel.bottom());
+    let nearest = d_left.min(d_right).min(d_top).min(d_bottom);
 
     (
-        if panel_center_x < area_center_x {
+        if nearest == d_left {
             0.0
-        } else {
+        } else if nearest == d_right {
             1.0
+        } else {
+            pos_x
         },
-        if panel_center_y < area_center_y {
+        if nearest == d_top {
             0.0
-        } else {
+        } else if nearest == d_bottom {
             1.0
+        } else {
+            pos_y
         },
     )
 }
@@ -245,24 +254,30 @@ mod tests {
         assert_eq!(pos, (1.0, 1.0));
     }
 
-    /// 吸附到最近的角。
+    /// 吸附到最近的**边**（另一轴保持自由），不是吸到角。
     #[test]
-    fn snap_picks_the_nearest_corner() {
+    fn snap_pulls_to_the_nearest_edge() {
         let content = area(0, 0, 100, 20);
         let size = panel_size(content).expect("放得下");
 
-        let top_left = panel_rect_at(content, size, (0.0, 0.0));
-        assert_eq!(snap_pos(content, top_left), (0.0, 0.0));
-
-        let bottom_right = panel_rect_at(content, size, (1.0, 1.0));
-        assert_eq!(snap_pos(content, bottom_right), (1.0, 1.0));
-
-        // 稍稍越过后仍能吸回原来的角（半个浮窗的容差）
-        let near_top_left = Rect {
-            x: 1,
-            y: 1,
-            ..top_left
+        // 贴左边、纵向在中间：只吸 x，y 保持
+        let left = Rect {
+            x: content.x + 1,
+            y: content.y + 6,
+            ..panel_rect_at(content, size, (0.0, 0.5))
         };
-        assert_eq!(snap_pos(content, near_top_left), (0.0, 0.0));
+        assert_eq!(snap_pos(content, left, (0.3, 0.5)), (0.0, 0.5));
+
+        // 贴下边、横向居中：只吸 y，x 保持
+        let bottom = Rect {
+            x: content.x + 40,
+            y: content.y + 20 - size.1,
+            ..panel_rect_at(content, size, (0.5, 1.0))
+        };
+        assert_eq!(snap_pos(content, bottom, (0.5, 0.3)), (0.5, 1.0));
+
+        // 本来就在右下角：两轴都吸
+        let corner = panel_rect_at(content, size, (1.0, 1.0));
+        assert_eq!(snap_pos(content, corner, (0.4, 0.4)), (1.0, 1.0));
     }
 }

@@ -22,6 +22,21 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
 
+/// 子页的上一级：挂在设置弹窗下面的这些弹窗，Esc 应该回到设置弹窗，
+/// 而不是直接关掉整个弹窗（更不是退出全屏页）。`None` 表示没有上一级。
+fn settings_parent(overlay: Overlay) -> Option<Overlay> {
+    matches!(
+        overlay,
+        Overlay::AcoustIdModal
+            | Overlay::BarSettingsModal
+            | Overlay::LocalAudioSettingsModal
+            | Overlay::LyricsSettingsModal
+            | Overlay::HelpModal
+            | Overlay::AboutModal
+    )
+    .then_some(Overlay::SettingsModal)
+}
+
 fn sync_playlists_when_viewing_playback(app: &mut AppState) {
     if app.local_view_album_folder.is_some() && app.local_folder.is_some() {
         if app.local_view_album_folder.as_ref() == app.local_folder.as_ref() {
@@ -762,13 +777,9 @@ async fn handle_action(
                 // 面板状态立即关闭，滑出动画由 tick 推进到位。
                 app.start_playlist_slide(-(layout.left_width as i16));
                 app.overlay = Overlay::None;
-            } else if app.overlay == Overlay::AcoustIdModal
-                || app.overlay == Overlay::BarSettingsModal
-                || app.overlay == Overlay::LocalAudioSettingsModal
-                || app.overlay == Overlay::LyricsSettingsModal
-                || app.overlay == Overlay::AboutModal
-            {
-                app.overlay = Overlay::SettingsModal;
+            } else if let Some(parent) = settings_parent(app.overlay) {
+                // 设置类子页：回上一级，而不是直接退出全屏页。
+                app.overlay = parent;
             } else {
                 app.close_overlay();
             }
@@ -1331,7 +1342,12 @@ async fn handle_action(
                 Overlay::SettingsModal => app.settings_selected = idx,
                 Overlay::BarSettingsModal => app.bar_settings_selected = idx,
                 Overlay::LocalAudioSettingsModal => app.local_audio_settings_selected = idx,
-                Overlay::LyricsSettingsModal => app.lyrics_settings_selected = idx,
+                Overlay::LyricsSettingsModal => {
+                    // 开关行：左键直接改值（与宿主一致），不走双击。
+                    app.lyrics_settings_selected = idx.min(2);
+                    apply_lyrics_settings_delta(app, host_bridge, 1).await;
+                    return Ok(());
+                }
                 Overlay::HelpModal => app.help_keybind_selected = idx,
                 _ => return Ok(()),
             }
@@ -1673,3 +1689,34 @@ fn pick_shuffle_index(pl: &crate::tmplayer::data::playlist::Playlist) -> Option<
 }
 
 // fallback bars removed (leave spectrum empty when unavailable)
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 挂在设置弹窗下面的子页必须全部登记进 `settings_parent`：
+    /// 漏一个，那个页面按 Esc 就会直接退出全屏页（按键提示弹窗就这么漏过）。
+    #[test]
+    fn every_settings_child_returns_to_the_settings_modal() {
+        for child in [
+            Overlay::BarSettingsModal,
+            Overlay::LocalAudioSettingsModal,
+            Overlay::LyricsSettingsModal,
+            Overlay::HelpModal,
+            Overlay::AboutModal,
+            Overlay::AcoustIdModal,
+        ] {
+            assert_eq!(
+                settings_parent(child),
+                Some(Overlay::SettingsModal),
+                "{child:?} 应该回设置弹窗"
+            );
+        }
+
+        // 设置弹窗本身与 EQ/播放列表没有上一级。
+        assert_eq!(settings_parent(Overlay::SettingsModal), None);
+        assert_eq!(settings_parent(Overlay::EqModal), None);
+        assert_eq!(settings_parent(Overlay::Playlist), None);
+        assert_eq!(settings_parent(Overlay::None), None);
+    }
+}

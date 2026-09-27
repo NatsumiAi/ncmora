@@ -123,6 +123,18 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay, config: &Config) -> Action {
         };
     }
 
+    if overlay == Overlay::LyricsSettingsModal {
+        return match ev.code {
+            KeyCode::Esc => Action::CloseOverlay,
+            KeyCode::Enter => Action::Confirm,
+            KeyCode::Up => Action::ModalUp,
+            KeyCode::Down => Action::ModalDown,
+            KeyCode::Left => Action::ModalLeft,
+            KeyCode::Right => Action::ModalRight,
+            _ => Action::None,
+        };
+    }
+
     if overlay == Overlay::EqModal {
         if keybind_matches(&config.keybind_fullscreen_eq_reset, ev) {
             return Action::EqResetDefault;
@@ -510,5 +522,37 @@ mod tests {
             Action::MouseClick { col: 1, row: 2 }
         );
         assert_eq!(map_mouse(mouse(MouseEventKind::Moved, 1, 2)), Action::None);
+    }
+
+    fn esc() -> KeyEvent {
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    }
+
+    /// 设置类弹窗里的 Esc 必须走"关闭弹窗"而不是退出全屏页。
+    ///
+    /// 曾经漏了 LyricsSettingsModal 的分支，Esc 于是落到默认的 Action::Quit，
+    /// 在歌词浮窗子页按 Esc 会直接把全屏页关掉。
+    #[test]
+    fn esc_in_settings_submodals_closes_the_modal() {
+        let config = crate::tmplayer::data::config::Config::default();
+
+        for overlay in [
+            Overlay::SettingsModal,
+            Overlay::BarSettingsModal,
+            Overlay::LocalAudioSettingsModal,
+            Overlay::LyricsSettingsModal,
+            Overlay::HelpModal,
+            Overlay::AboutModal,
+            Overlay::EqModal,
+        ] {
+            assert_eq!(
+                map_key(esc(), overlay, &config),
+                Action::CloseOverlay,
+                "{overlay:?} 里 Esc 应该是返回上一级"
+            );
+        }
+
+        // 没有弹窗时 Esc 才是退出全屏页。
+        assert_eq!(map_key(esc(), Overlay::None, &config), Action::Quit);
     }
 }

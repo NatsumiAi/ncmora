@@ -40,7 +40,7 @@ pub struct Config {
     #[serde(default = "default_page_lyrics_drag")]
     pub page_lyrics_drag: bool,
 
-    /// 拖动结束后是否吸附到最近的角（仅拖动开启时可改）。
+    /// 拖动结束后是否吸附到最近的边（左/右/上/下，另一轴保持自由；仅拖动开启时可改）。
     #[serde(default = "default_page_lyrics_snap")]
     pub page_lyrics_snap: bool,
 

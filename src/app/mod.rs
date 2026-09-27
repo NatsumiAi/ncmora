@@ -2712,8 +2712,11 @@ impl App {
 
         if self.config.page_lyrics_snap {
             if let Some(layout) = self.page_lyrics_layout {
-                let (pos_x, pos_y) =
-                    page_lyrics::snap_pos(layout.content_rect(), layout.panel_rect());
+                let (pos_x, pos_y) = page_lyrics::snap_pos(
+                    layout.content_rect(),
+                    layout.panel_rect(),
+                    self.page_lyrics_pos(),
+                );
                 self.config.page_lyrics_pos_x = pos_x;
                 self.config.page_lyrics_pos_y = pos_y;
             }
@@ -5006,10 +5009,9 @@ impl App {
                 }
             }
             Overlay::SettingsLyrics => {
+                // 这三行都是开关：左键直接改值（不用双击）。
                 self.settings_lyrics_selected = index;
-                if self.is_double_settings_click(overlay, index) {
-                    self.apply_settings_lyrics_delta(1);
-                }
+                self.apply_settings_lyrics_delta(1);
             }
             Overlay::SettingsKeybinds => {
                 self.settings_keybind_selected = index;

@@ -202,7 +202,7 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 | `show_hints` | `true` | Hint line on the content pages and in the fullscreen page's panel border |
 | `page_lyrics` | `false` | Two-line lyrics overlay on the content pages |
 | `page_lyrics_drag` | `true` | Lyrics overlay can be dragged with the mouse |
-| `page_lyrics_snap` | `true` | Snap to the nearest corner after dragging (only editable while dragging is on) |
+| `page_lyrics_snap` | `true` | Snap to the nearest edge (left/right/top/bottom, the other axis stays free; only editable while dragging is on) |
 | `page_lyrics_pos_x` | `1.0` | Normalized horizontal position of the overlay's top-left (0=left, 1=right) |
 | `page_lyrics_pos_y` | `1.0` | Normalized vertical position of the overlay's top-left (0=top, 1=bottom) |
 | `small_window_display` | `true` | Compact layouts for small terminals |
