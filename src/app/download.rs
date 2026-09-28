@@ -117,17 +117,37 @@ fn is_writable_dir(dir: &Path) -> bool {
     }
 }
 
-/// 文件名片段清理：去掉路径分隔符、控制字符与首尾空白/点，空串回落 `fallback`。
+/// 文件名片段清理：路径分隔符换成 `-`（`AC/DC` → `AC-DC`）、其余非法字符丢掉、
+/// 连续空白压成一个空格，空串回落 `fallback`。
 fn sanitize_component(raw: &str, fallback: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for ch in raw.chars() {
-        if ch.is_control() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+        if ch.is_control() {
+            continue;
+        }
+        if matches!(ch, '/' | '\\' | ':') {
+            out.push('-');
+            continue;
+        }
+        if matches!(ch, '*' | '?' | '"' | '<' | '>' | '|') {
             continue;
         }
         out.push(ch);
     }
 
-    let trimmed = out.trim().trim_matches('.').trim();
+    // 空白压缩：分隔符替换后容易留下连续空格（"A / B" → "A - B" 之外的情况）。
+    let mut collapsed = String::with_capacity(out.len());
+    let mut last_space = false;
+    for ch in out.chars() {
+        let is_space = ch.is_whitespace();
+        if is_space && last_space {
+            continue;
+        }
+        collapsed.push(if is_space { ' ' } else { ch });
+        last_space = is_space;
+    }
+
+    let trimmed = collapsed.trim().trim_matches('.').trim();
     let mut text = if trimmed.is_empty() {
         fallback.to_string()
     } else {
@@ -900,8 +920,17 @@ mod tests {
 
     #[test]
     fn stem_strips_path_separators_and_controls() {
-        let stem = download_file_stem("a/b:c*d", "e?f", "g\nh");
-        assert_eq!(stem, "abcd - ef - gh");
+        // 路径分隔符换 `-`（比直接吞掉可读），非法字符丢掉，控制字符丢掉。
+        let stem = download_file_stem("a/b:c*d", "AC/DC", "g\nh");
+        assert_eq!(stem, "a-b-cd - AC-DC - gh");
+    }
+
+    #[test]
+    fn stem_collapses_repeated_spaces() {
+        assert_eq!(
+            download_file_stem("Title", "Woodkid   /   Connelly", "Album"),
+            "Title - Woodkid - Connelly - Album"
+        );
     }
 
     #[test]
