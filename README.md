@@ -81,10 +81,12 @@ Artists and playlists are capped at the 5 most relevant hits and never paginate;
 
 ### Visualization
 
+- `hidden` (shown as "Off" in settings) — the whole right-hand side of the fullscreen page is collapsed: neither a visualizer nor the lyrics are drawn, and the song info area takes the full terminal width.
+- `lyrics` (shown as "Lyrics") — the right-hand side only shows the lyrics; no visualizer is drawn. The old `off` value still selects this mode.
 - `bars` — cava spectrum bars. Requires the external `cava` binary.
 - `oscilloscope` — a real PCM waveform tapped from the playback chain: rising-edge trigger, min/max peak extraction per sub-column and absolute amplitude mapping, so quiet passages hug the centre line and loud ones fill the panel. It does **not** need cava.
 - If cava is missing, the default becomes `oscilloscope` and cycling the setting skips `bars` instead of failing.
-- The collapsed player bar always draws a 10-cell braille mini spectrum; the narrow small window draws a stereo VU meter driven by a 400 ms momentary LUFS meter (display range −60…0 LUFS).
+- The collapsed player bar draws a 10-cell braille mini spectrum from cava; that spot stays blank in `lyrics` and `hidden` because cava is not started there. The narrow small window draws a stereo VU meter driven by a 400 ms momentary LUFS meter (display range −60…0 LUFS).
 
 ### Small window mode
 
@@ -200,7 +202,7 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 | --- | --- | --- |
 | `theme` | `frappe` | `system`, `latte`, `frappe`, `macchiato`, `mocha` |
 | `language` | `zh` | `zh`, `en` |
-| `visualize` | cava present → `bars`, otherwise `oscilloscope` | `off`, `bars`, `oscilloscope`; only `bars` needs cava |
+| `visualize` | cava present → `bars`, otherwise `oscilloscope` | `hidden` (shown as "Off" in settings), `lyrics` ("Lyrics"; the old `off` means the same), `bars`, `oscilloscope`; only `bars` needs cava |
 | `graphics_protocol` | `halfblocks` | `off`, `halfblocks`; `off` draws covers as ASCII art |
 | `transparent_background` | `true` | Use the terminal background |
 | `album_border` | `true` | Border around the fullscreen cover |

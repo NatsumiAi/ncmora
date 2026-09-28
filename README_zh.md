@@ -81,10 +81,12 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 
 ### 可视化
 
+- `hidden`（设置弹窗里显示「关闭」）——全屏页右侧整块收起：可视化与歌词都不画，歌曲信息区独占整个终端宽度
+- `lyrics`（显示「仅歌词」）——右侧只显示歌词，不画可视化；旧配置里的 `off` 仍按这一档读取
 - `bars`——cava 频谱条，需要外部 `cava` 可执行文件
 - `oscilloscope`——从播放链路抽头得到的真 PCM 波形：上升沿触发、逐子列 min/max 峰值抽取、绝对幅度映射，安静段贴中线、高潮段撑满。**不需要** cava
 - 没有 cava 时默认改为 `oscilloscope`，切换设置时会跳过 `bars`，而不是让整项无法调整
-- 折叠播放栏始终绘制 10 格盲文迷你频谱；窄窗则用 400 ms Momentary LUFS 计量驱动双声道音量条（显示范围 −60…0 LUFS）
+- 折叠播放栏绘制 10 格盲文迷你频谱，数据来自 cava；`lyrics` 与 `hidden` 两档不启动 cava，那里因此是空白。窄窗则用 400 ms Momentary LUFS 计量驱动双声道音量条（显示范围 −60…0 LUFS）
 
 ### 小窗口模式
 
@@ -200,7 +202,7 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 | --- | --- | --- |
 | `theme` | `frappe` | `system`、`latte`、`frappe`、`macchiato`、`mocha` |
 | `language` | `zh` | `zh`、`en` |
-| `visualize` | 有 cava 时为 `bars`，否则 `oscilloscope` | `off`、`bars`、`oscilloscope`；只有 `bars` 依赖 cava |
+| `visualize` | 有 cava 时为 `bars`，否则 `oscilloscope` | `hidden`（设置里显示「关闭」）、`lyrics`（「仅歌词」，旧的 `off` 同义）、`bars`、`oscilloscope`；只有 `bars` 依赖 cava |
 | `graphics_protocol` | `halfblocks` | `off`、`halfblocks`；`off` 时封面用 ASCII 字符绘制 |
 | `transparent_background` | `true` | 使用终端背景 |
 | `album_border` | `true` | 全屏封面边框 |
