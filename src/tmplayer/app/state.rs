@@ -730,7 +730,8 @@ impl AppState {
         let base = self.config.ui_fps.clamp(10, 60);
         // 频谱靠 cava 的拖尾衰减，示波器靠自己的收尾动画：暂停后两者都还在动。
         let visual_active = match self.config.visualize {
-            VisualizeMode::Off => false,
+            // 两个无可视化档位都不画东西：歌词只在整行切换时变，跟得上基础帧率。
+            VisualizeMode::Hidden | VisualizeMode::Lyrics => false,
             VisualizeMode::Bars => {
                 self.player.playback == PlaybackState::Playing
                     || (self.player.playback == PlaybackState::Paused

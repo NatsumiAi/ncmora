@@ -29,7 +29,7 @@ pub fn render(f: &mut Frame, lyric_area: Rect, spectrum_area: Rect, app: &mut Ap
         return;
     }
 
-    if app.config.visualize == VisualizeMode::Off {
+    if app.config.visualize == VisualizeMode::Lyrics {
         render_full_lyrics(f, inner, app);
         return;
     }
@@ -81,7 +81,10 @@ pub fn render(f: &mut Frame, lyric_area: Rect, spectrum_area: Rect, app: &mut Ap
     }
 
     match app.config.visualize {
-        VisualizeMode::Off => {}
+        // 「关闭」档位在布局层就没有右栏这块区域（`tui::draw` 不再调用本函数）。
+        VisualizeMode::Hidden => {}
+        // 已在上面提前返回。
+        VisualizeMode::Lyrics => {}
         VisualizeMode::Bars => spectrum_renderer::render(f, spectrum_inner, app),
         VisualizeMode::Oscilloscope => oscilloscope_renderer::render(f, spectrum_inner, app),
     }

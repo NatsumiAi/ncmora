@@ -3346,7 +3346,11 @@ impl App {
 
     fn sync_cava(&mut self) {
         let available = crate::tmplayer::audio::cava::is_available();
-        let enable = self.config.visualize != VisualizeMode::Off;
+        // 两个无可视化档位都把 cava 停掉：折叠视图那 10 格迷你频谱也就没数据可画。
+        let enable = !matches!(
+            self.config.visualize,
+            VisualizeMode::Lyrics | VisualizeMode::Hidden
+        );
         if !available || !enable {
             self.cava = None;
             return;

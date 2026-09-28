@@ -253,7 +253,11 @@ impl Default for CacheConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VisualizeMode {
-    Off,
+    /// 只显示歌词，不画可视化。旧配置里写的就是 `off`，故保留该别名。
+    #[serde(alias = "off")]
+    Lyrics,
+    /// 右侧（可视化 + 歌词）整块收起，全屏页只留歌曲信息区，并摊满整宽。
+    Hidden,
     Bars,
     Oscilloscope,
 }
@@ -270,9 +274,13 @@ impl VisualizeMode {
     }
 
     /// 切到下一个**可用**模式：数据源缺失的模式被跳过，而不是让整项无法调整。
+    ///
+    /// 数组按「显示内容由少到多」排列；`unwrap_or(1)` 兜到 `Lyrics`，
+    /// 免得理论上找不到自身时把右侧区整个收掉。
     pub fn cycle(self, delta: i32) -> Self {
-        const MODES: [VisualizeMode; 3] = [
-            VisualizeMode::Off,
+        const MODES: [VisualizeMode; 4] = [
+            VisualizeMode::Hidden,
+            VisualizeMode::Lyrics,
             VisualizeMode::Bars,
             VisualizeMode::Oscilloscope,
         ];
@@ -741,7 +749,7 @@ fn graphics_protocol_needs_save(raw: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::GraphicsProtocol;
+    use super::{GraphicsProtocol, VisualizeMode};
     use serde::Deserialize;
 
     #[derive(Debug, Deserialize)]
@@ -764,6 +772,29 @@ mod tests {
             let parsed: GraphicsProtocolWrapper =
                 toml::from_str(&format!("protocol = \"{}\"", raw)).unwrap();
             assert_eq!(parsed.protocol, expected);
+        }
+    }
+
+    /// 「仅歌词」曾经写作 `off`；手改或沿用旧配置的用户不能因为改名而丢档位。
+    #[test]
+    fn visualize_keeps_legacy_off_value_loadable() {
+        #[derive(Debug, Deserialize)]
+        struct VisualizeWrapper {
+            visualize: VisualizeMode,
+        }
+
+        let cases = [
+            ("lyrics", VisualizeMode::Lyrics),
+            ("off", VisualizeMode::Lyrics),
+            ("hidden", VisualizeMode::Hidden),
+            ("bars", VisualizeMode::Bars),
+            ("oscilloscope", VisualizeMode::Oscilloscope),
+        ];
+
+        for (raw, expected) in cases {
+            let parsed: VisualizeWrapper =
+                toml::from_str(&format!("visualize = \"{}\"", raw)).unwrap();
+            assert_eq!(parsed.visualize, expected);
         }
     }
 }

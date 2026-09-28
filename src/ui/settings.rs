@@ -207,7 +207,8 @@ fn draw_playback_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
             "{}: {}",
             l(app, "可视化", "Visualization"),
             match app.config.visualize {
-                VisualizeMode::Off => l(app, "关闭", "Off"),
+                VisualizeMode::Lyrics => l(app, "仅歌词", "Lyrics"),
+                VisualizeMode::Hidden => l(app, "关闭", "Off"),
                 VisualizeMode::Bars => l(app, "频谱", "Bars"),
                 VisualizeMode::Oscilloscope => l(app, "示波器", "Oscilloscope"),
             }

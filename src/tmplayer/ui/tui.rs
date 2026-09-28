@@ -139,42 +139,57 @@ impl Tui {
                 Rect::default()
             };
 
-            let cols = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(33), Constraint::Percentage(67)])
-                .split(content_area);
-            layout_out.left = cols[0];
-            layout_out.right = cols[1];
-            layout_out.left_width = cols[0].width;
-
-            // right: lyrics (10%) + spectrum (rest)
-            let lyric_h = ((cols[1].height as f32) * 0.10).round() as u16;
-            let lyric_h = lyric_h.clamp(3, cols[1].height.saturating_sub(6));
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(lyric_h), Constraint::Min(1)])
-                .split(cols[1]);
-
-            // Mirror visual panel inner layout for auto bar count.
-            let outer = Rect {
-                x: rows[0].x,
-                y: rows[0].y,
-                width: rows[0].width,
-                height: rows[0].height.saturating_add(rows[1].height),
+            // 「关闭」档位把右侧区（可视化 + 歌词）整块收起，歌曲信息区独占整宽。
+            let show_right =
+                app.config.visualize != crate::tmplayer::data::config::VisualizeMode::Hidden;
+            let (left, right) = if show_right {
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(33), Constraint::Percentage(67)])
+                    .split(content_area);
+                (cols[0], cols[1])
+            } else {
+                (content_area, Rect::default())
             };
-            let inner = outer.inner(ratatui::layout::Margin {
-                horizontal: 1,
-                vertical: 1,
-            });
-            let lyric_h_inner = rows[0].height.saturating_sub(2).min(inner.height);
-            layout_out.spectrum_rect = Rect {
-                x: inner.x,
-                y: inner.y + lyric_h_inner,
-                width: inner.width,
-                height: inner.height.saturating_sub(lyric_h_inner),
-            };
+            layout_out.left = left;
+            layout_out.right = right;
+            layout_out.left_width = left.width;
 
-            let info_l = info_panel::layout(cols[0]);
+            // 右栏的两行（歌词 / 可视化）；收起时保持零矩形。
+            let mut lyric_row = Rect::default();
+            let mut spectrum_row = Rect::default();
+            if show_right {
+                // right: lyrics (10%) + spectrum (rest)
+                let lyric_h = ((right.height as f32) * 0.10).round() as u16;
+                let lyric_h = lyric_h.clamp(3, right.height.saturating_sub(6));
+                let rows = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(lyric_h), Constraint::Min(1)])
+                    .split(right);
+                lyric_row = rows[0];
+                spectrum_row = rows[1];
+
+                // Mirror visual panel inner layout for auto bar count.
+                let outer = Rect {
+                    x: rows[0].x,
+                    y: rows[0].y,
+                    width: rows[0].width,
+                    height: rows[0].height.saturating_add(rows[1].height),
+                };
+                let inner = outer.inner(ratatui::layout::Margin {
+                    horizontal: 1,
+                    vertical: 1,
+                });
+                let lyric_h_inner = rows[0].height.saturating_sub(2).min(inner.height);
+                layout_out.spectrum_rect = Rect {
+                    x: inner.x,
+                    y: inner.y + lyric_h_inner,
+                    width: inner.width,
+                    height: inner.height.saturating_sub(lyric_h_inner),
+                };
+            }
+
+            let info_l = info_panel::layout(left);
             layout_out.info_progress = info_l.progress;
             layout_out.info_volume = info_l.volume;
             layout_out.info_controls = info_l.controls;
@@ -199,8 +214,10 @@ impl Tui {
             }
             f.render_widget(ratatui::widgets::Block::default().style(base_style), size);
 
-            info_panel::render(f, cols[0], app);
-            visual_panel::render(f, rows[0], rows[1], app);
+            info_panel::render(f, left, app);
+            if show_right {
+                visual_panel::render(f, lyric_row, spectrum_row, app);
+            }
 
             // playlist overlay slides in/out over left
             if app.overlay == Overlay::Playlist
@@ -211,14 +228,14 @@ impl Tui {
 
                 // 动画推进在 AppState::tick 里完成，渲染只读取当前进度。
                 // Slide effect via visible width growth/shrink (x stays at left edge)
-                let full_w = cols[0].width as i16;
+                let full_w = left.width as i16;
                 let visible_w = (full_w + app.playlist_slide_x).clamp(0, full_w) as u16;
                 if visible_w > 0 {
                     let r = Rect {
-                        x: cols[0].x,
-                        y: cols[0].y,
+                        x: left.x,
+                        y: left.y,
                         width: visible_w,
-                        height: cols[0].height,
+                        height: left.height,
                     };
                     layout_out.playlist_rect = r;
 
@@ -691,7 +708,10 @@ fn render_bar_settings_modal(
             "{}: {}",
             lang_text(app, "可视化", "Visualization"),
             match app.config.visualize {
-                crate::tmplayer::data::config::VisualizeMode::Off => lang_text(app, "关闭", "Off"),
+                crate::tmplayer::data::config::VisualizeMode::Lyrics =>
+                    lang_text(app, "仅歌词", "Lyrics"),
+                crate::tmplayer::data::config::VisualizeMode::Hidden =>
+                    lang_text(app, "关闭", "Off"),
                 crate::tmplayer::data::config::VisualizeMode::Bars =>
                     lang_text(app, "频谱", "Bars"),
                 crate::tmplayer::data::config::VisualizeMode::Oscilloscope => {
