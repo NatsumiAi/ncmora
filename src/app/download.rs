@@ -278,6 +278,89 @@ struct JobHandle {
     shared: Arc<JobShared>,
 }
 
+/// 行内图标的预计算行：文件名与磁盘缓存 key 随列表一起生成一次，
+/// 之后每帧只做一次 HashMap 查，不再重建 key。
+#[derive(Debug, Clone)]
+pub struct DownloadRow {
+    pub song_id: String,
+    pub target: DownloadTarget,
+    key: String,
+}
+
+impl DownloadRow {
+    pub fn new(song_id: String, target: DownloadTarget) -> Self {
+        let key = target.dir.join(&target.base).display().to_string();
+        Self {
+            song_id,
+            target,
+            key,
+        }
+    }
+
+    /// 磁盘缓存 key（与 `DownloadManager::state_of` 内部一致）。
+    #[cfg(test)]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+}
+
+/// 行内图标状态的 memo。
+///
+/// - `epoch`（列表代 × 下载根目录代）变化 → 重建行数据（做一次 `sanitize`/`join`）；
+/// - `DownloadManager::version`（任务开始 / 结束 / 取消 / 磁盘缓存作废）变化 → 重算状态。
+///
+/// 两个都不变时每帧只做一次 u64 比较，行内取值是一次切片索引。
+#[derive(Default)]
+pub struct DownloadRowCache {
+    epoch: u64,
+    initialized: bool,
+    rows: Vec<Option<DownloadRow>>,
+    states: Vec<Option<DownloadState>>,
+    states_version: u64,
+}
+
+impl DownloadRowCache {
+    pub fn refresh(
+        &mut self,
+        epoch: u64,
+        manager: &mut DownloadManager,
+        build: impl FnOnce() -> Vec<Option<DownloadRow>>,
+    ) {
+        let version = manager.version();
+        self.refresh_inner(epoch, version, build, |row| manager.state_of_row(row));
+    }
+
+    fn refresh_inner(
+        &mut self,
+        epoch: u64,
+        version: u64,
+        build: impl FnOnce() -> Vec<Option<DownloadRow>>,
+        mut resolve: impl FnMut(&DownloadRow) -> DownloadState,
+    ) {
+        if !self.initialized || self.epoch != epoch {
+            self.rows = build();
+            self.states = vec![None; self.rows.len()];
+            self.epoch = epoch;
+            self.initialized = true;
+            // 版本对不上就重算一次：换列表后必须重新查一遍任务表。
+            self.states_version = u64::MAX;
+        }
+
+        if self.states_version != version {
+            self.states = self
+                .rows
+                .iter()
+                .map(|row| row.as_ref().map(&mut resolve))
+                .collect();
+            self.states_version = version;
+        }
+    }
+
+    pub fn state_at(&self, index: usize) -> Option<DownloadState> {
+        self.states.get(index).copied().flatten()
+    }
+}
+
 /// 队列消息：一次下载请求 + 它的结果槽。
 #[derive(Clone)]
 struct DownloadMessage {
@@ -299,6 +382,8 @@ pub struct DownloadManager {
     jobs: HashMap<String, JobHandle>,
     /// `目标前缀 -> 是否已落盘`：避免每帧对每一行都 stat 磁盘。
     disk_cache: HashMap<String, bool>,
+    /// 任务表 / 磁盘缓存的变化计数：行内 memo 据此决定是否重算状态。
+    version: u64,
 }
 
 impl DownloadManager {
@@ -308,7 +393,17 @@ impl DownloadManager {
             api,
             jobs: HashMap::new(),
             disk_cache: HashMap::new(),
+            version: 0,
         }
+    }
+
+    /// 任务表 / 磁盘缓存的变化计数（事件驱动 memo 的版本号）。
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    fn bump_version(&mut self) {
+        self.version = self.version.wrapping_add(1);
     }
 
     /// 发起下载（进队列）；同一首歌已在队列 / 下载中时返回错误文案。
@@ -341,6 +436,7 @@ impl DownloadManager {
                 .display()
                 .to_string(),
         );
+        self.bump_version();
 
         self.dispatch(DownloadMessage { request, shared })
     }
@@ -387,6 +483,8 @@ impl DownloadManager {
         };
         job.cancelling = true;
         job.shared.cancelled.store(true, Ordering::SeqCst);
+        // 图标由"下载中"变回"未下载"，memo 需要重算。
+        self.bump_version();
         true
     }
 
@@ -434,6 +532,8 @@ impl DownloadManager {
             let Some(result) = job.shared.outcome.lock().take() else {
                 continue;
             };
+            // 任务离场（完成 / 失败 / 取消）都会让图标换态，memo 需要重算。
+            self.bump_version();
 
             match result {
                 Ok(outcome) => {
@@ -469,6 +569,16 @@ impl DownloadManager {
 
     /// 图标三态：任务在途 → 下载中；否则查磁盘（带缓存）。
     pub fn state_of(&mut self, song_id: &str, target: &DownloadTarget) -> DownloadState {
+        let key = target.dir.join(&target.base).display().to_string();
+        self.state_of_key(song_id, &key, target)
+    }
+
+    /// 用预计算行查状态：key 不重建，命中缓存时零分配。
+    pub fn state_of_row(&mut self, row: &DownloadRow) -> DownloadState {
+        self.state_of_key(&row.song_id, &row.key, &row.target)
+    }
+
+    fn state_of_key(&mut self, song_id: &str, key: &str, target: &DownloadTarget) -> DownloadState {
         if let Some(job) = self.jobs.get(song_id) {
             return if job.cancelling {
                 DownloadState::NotDownloaded
@@ -477,8 +587,7 @@ impl DownloadManager {
             };
         }
 
-        let key = target.dir.join(&target.base).display().to_string();
-        if let Some(done) = self.disk_cache.get(&key) {
+        if let Some(done) = self.disk_cache.get(key) {
             return if *done {
                 DownloadState::Done
             } else {
@@ -491,7 +600,7 @@ impl DownloadManager {
         if self.disk_cache.len() > 4096 {
             self.disk_cache.clear();
         }
-        self.disk_cache.insert(key, done);
+        self.disk_cache.insert(key.to_string(), done);
         if done {
             DownloadState::Done
         } else {
@@ -502,6 +611,7 @@ impl DownloadManager {
     /// 下载根目录变化（设置里改了路径）后作废磁盘缓存。
     pub fn clear_disk_cache(&mut self) {
         self.disk_cache.clear();
+        self.bump_version();
     }
 }
 
@@ -1003,6 +1113,75 @@ mod tests {
         }
         let unique: std::collections::HashSet<char> = SPINNER_FRAMES.iter().copied().collect();
         assert_eq!(unique.len(), SPINNER_FRAMES.len());
+    }
+
+    /// 预计算行的 key 必须与 `state_of` 内部构造的一致（否则磁盘缓存查不到）。
+    #[test]
+    fn row_key_matches_the_manager_key() {
+        let target = DownloadTarget {
+            dir: PathBuf::from("/tmp/cnm"),
+            base: "A - B".to_string(),
+        };
+        let row = DownloadRow::new("42".to_string(), target.clone());
+        assert_eq!(
+            row.key(),
+            target.dir.join(&target.base).display().to_string()
+        );
+    }
+
+    /// memo 只在"列表代变化"时重建行数据、只在"任务版本变化"时重算状态。
+    #[test]
+    fn row_cache_rebuilds_only_on_epoch_and_version_changes() {
+        use std::cell::Cell;
+
+        fn refresh(
+            cache: &mut DownloadRowCache,
+            epoch: u64,
+            version: u64,
+            builds: &Cell<u32>,
+            resolves: &Cell<u32>,
+        ) {
+            cache.refresh_inner(
+                epoch,
+                version,
+                || {
+                    builds.set(builds.get() + 1);
+                    vec![Some(DownloadRow::new(
+                        "1".to_string(),
+                        DownloadTarget {
+                            dir: PathBuf::from("/tmp/cnm"),
+                            base: "A".to_string(),
+                        },
+                    ))]
+                },
+                |_row| {
+                    resolves.set(resolves.get() + 1);
+                    DownloadState::NotDownloaded
+                },
+            );
+        }
+
+        let mut cache = DownloadRowCache::default();
+        let builds = Cell::new(0);
+        let resolves = Cell::new(0);
+
+        refresh(&mut cache, 1, 7, &builds, &resolves);
+        assert_eq!((builds.get(), resolves.get()), (1, 1));
+        assert_eq!(cache.state_at(0), Some(DownloadState::NotDownloaded));
+
+        // 同代同版本：什么都不做。
+        refresh(&mut cache, 1, 7, &builds, &resolves);
+        assert_eq!((builds.get(), resolves.get()), (1, 1), "不该重建/重算");
+
+        // 任务事件（版本 +1）：只重算状态。
+        refresh(&mut cache, 1, 8, &builds, &resolves);
+        assert_eq!((builds.get(), resolves.get()), (1, 2), "只重算状态");
+
+        // 换列表（代 +1）：重建行数据并重算状态。
+        refresh(&mut cache, 2, 8, &builds, &resolves);
+        assert_eq!((builds.get(), resolves.get()), (2, 3), "换列表要重建行数据");
+
+        assert_eq!(cache.state_at(9), None, "越界行没有图标");
     }
 
     #[test]

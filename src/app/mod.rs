@@ -46,15 +46,19 @@ use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthChar;
 
 use api::ApiState;
-use download::{DownloadEvent, DownloadManager, DownloadRequest, DownloadState, DownloadTarget};
+use download::{
+    DownloadEvent, DownloadManager, DownloadRequest, DownloadRow, DownloadRowCache, DownloadState,
+    DownloadTarget,
+};
 use mpris_bridge::{MprisBridge, MprisControlEvent, MprisSyncPayload};
 use player::{AudioPlayer, AudioPlayerState, cleanup_cache_dir, resolve_cache_root};
 use startup::StartupInit;
@@ -63,6 +67,14 @@ use streaming::StreamingReader;
 const MAX_INPUT_LEN: usize = 64;
 /// 下载路径输入框的长度上限（字符）。
 const DOWNLOAD_PATH_MAX_CHARS: usize = 4096;
+
+/// 列表代的全局计数器：任何一次列表内容替换都换一个新号（不复用），
+/// 行内图标的行数据缓存据此失效——比逐帧比对内容便宜且不会漏。
+static LIST_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn next_list_generation() -> u64 {
+    LIST_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
 const SEARCH_RESULT_PAGE_SIZE: usize = 50;
 /// 无后缀（混合）搜索里作者 / 歌单分区只取最相关的少量条目，不参与分页。
 const MIXED_AUX_RESULT_LIMIT: usize = 5;
@@ -543,6 +555,68 @@ type PlaylistFetchTask = Pin<Box<dyn Future<Output = Option<Result<PlaylistFetch
 struct PlaylistFetchSlot {
     kind: PlaylistPageKind,
     future: PlaylistFetchFuture,
+}
+
+/// 一次性生成歌单页 / 专辑页的整页行数据：文件名与磁盘缓存 key 都在这里做完，
+/// 之后每帧只查状态表（列表代或下载根目录变化时才重建）。
+fn playlist_download_rows(
+    tracks: &[PlaylistTrack],
+    root: Option<&Path>,
+    album_folder: Option<&str>,
+) -> Vec<Option<DownloadRow>> {
+    let Some(root) = root else {
+        return vec![None; tracks.len()];
+    };
+    let dir = match album_folder {
+        Some(album) => root.join(crate::app::download::album_folder_name(album)),
+        None => root.to_path_buf(),
+    };
+
+    tracks
+        .iter()
+        .map(|track| {
+            if track.kind != PlaylistTrackKind::Song {
+                return None;
+            }
+            let song_id = track.id.clone()?;
+            let target = DownloadTarget {
+                dir: dir.clone(),
+                base: crate::app::download::download_file_stem(
+                    &track.title,
+                    &track.artist,
+                    &track.album,
+                ),
+            };
+            Some(DownloadRow::new(song_id, target))
+        })
+        .collect()
+}
+
+/// 搜索页同理：只有单曲行有图标，且不落专辑子文件夹。
+fn search_download_rows(results: &[SearchItem], root: Option<&Path>) -> Vec<Option<DownloadRow>> {
+    let Some(root) = root else {
+        return vec![None; results.len()];
+    };
+    let dir = root.to_path_buf();
+
+    results
+        .iter()
+        .map(|item| {
+            if item.kind != SearchItemKind::Song {
+                return None;
+            }
+            let song_id = item.song_id.clone()?;
+            let target = DownloadTarget {
+                dir: dir.clone(),
+                base: crate::app::download::download_file_stem(
+                    item.title.as_deref().unwrap_or(&item.left_label),
+                    item.artist.as_deref().unwrap_or_default(),
+                    item.album.as_deref().unwrap_or_default(),
+                ),
+            };
+            Some(DownloadRow::new(song_id, target))
+        })
+        .collect()
 }
 
 /// 打开的是歌单还是专辑：端点与文案不同，落状态是同一套。
@@ -1886,6 +1960,8 @@ pub struct SearchState {
     view_rows: usize,
     /// 作者条目是否按卡片渲染（面板够宽够高），渲染侧每帧写入。
     card_mode: bool,
+    /// 列表代：结果被替换 / 追加时换号（行内图标缓存据此失效）。
+    generation: u64,
 }
 
 impl Default for SearchState {
@@ -1901,6 +1977,7 @@ impl Default for SearchState {
             scroll_rows: 0,
             view_rows: 1,
             card_mode: false,
+            generation: next_list_generation(),
         }
     }
 }
@@ -2029,13 +2106,20 @@ impl SearchState {
         self.next_offset = next_offset;
         self.has_more = has_more;
         self.scroll_rows = 0;
+        self.generation = next_list_generation();
         self.ensure_focus_visible();
+    }
+
+    /// 列表代（行内图标的行数据缓存据此失效）。
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// 追加分区分页结果。游标与 `has_more` 由调用方按分区语义推进。
     pub fn append_results(&mut self, mut results: Vec<SearchItem>) -> usize {
         let added = results.len();
         self.results.append(&mut results);
+        self.generation = next_list_generation();
         self.clamp_scroll();
         added
     }
@@ -2052,6 +2136,8 @@ pub struct PlaylistState {
     pub scroll_offset: usize,
     pub visible_rows: usize,
     pub tracks: Vec<PlaylistTrack>,
+    /// 列表代：内容被整体替换时换号（行内图标缓存据此决定是否重建行数据）。
+    generation: u64,
 }
 
 impl Default for PlaylistState {
@@ -2066,6 +2152,7 @@ impl Default for PlaylistState {
             scroll_offset: 0,
             visible_rows: 1,
             tracks: Vec::new(),
+            generation: next_list_generation(),
         }
     }
 }
@@ -2128,7 +2215,13 @@ impl PlaylistState {
         self.tracks = tracks;
         self.focused_idx = 0;
         self.scroll_offset = 0;
+        self.generation = next_list_generation();
         self.ensure_focus_visible();
+    }
+
+    /// 列表代（行内图标的行数据缓存据此失效）。
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// 搜索页点歌单/专辑后先落地的占位状态：标题用结果行的名字，数据由
@@ -2874,6 +2967,12 @@ pub struct App {
     audio_player: AudioPlayer,
     /// 下载任务表（异步后台任务；状态行与图标都从这里读）。
     pub download_manager: DownloadManager,
+    /// 行内图标的 memo（歌单页 / 专辑页）：行数据随列表代重建，状态随任务版本重算。
+    playlist_download_cache: DownloadRowCache,
+    /// 行内图标的 memo（搜索页）。
+    search_download_cache: DownloadRowCache,
+    /// 下载根目录代：路径变化时 +1，行数据缓存据此失效。
+    download_rows_epoch: u64,
     /// 下载图标的动画相位基准（time-based 旋转帧的起点）。
     download_spinner_start: Instant,
     /// 当前播放歌曲的下载图标状态缓存（全屏页每帧读，写入在 tick 里）。
@@ -3029,6 +3128,9 @@ impl App {
             api,
             audio_player,
             download_manager,
+            playlist_download_cache: DownloadRowCache::default(),
+            search_download_cache: DownloadRowCache::default(),
+            download_rows_epoch: 0,
             download_spinner_start: Instant::now(),
             now_playing_download_state: DownloadState::NotDownloaded,
             download_root,
@@ -4812,6 +4914,8 @@ impl App {
         if next != self.download_root {
             self.download_root = next;
             self.download_manager.clear_disk_cache();
+            // 行数据的目录部分变了：整页行数据重建。
+            self.download_rows_epoch = self.download_rows_epoch.wrapping_add(1);
         }
     }
 
@@ -4867,16 +4971,38 @@ impl App {
         self.download_spinner_start.elapsed()
     }
 
-    /// 歌单页 / 专辑页某行的下载图标状态；`None` = 不显示图标（不可下载或整体禁用）。
-    pub(crate) fn playlist_download_state(&mut self, index: usize) -> Option<DownloadState> {
-        let candidate = self.playlist_download_candidate(index)?;
-        self.download_state_for_candidate(&candidate)
+    /// 歌单页 / 专辑页的行内图标：每帧调一次；列表代与任务版本都不变时几乎零成本。
+    pub(crate) fn refresh_playlist_downloads(&mut self) {
+        let epoch = self.playlist.generation() ^ self.download_rows_epoch;
+        let album_folder = (self.playlist_page_kind == PlaylistPageKind::Album)
+            .then(|| self.playlist.title.clone());
+        let root = self.download_root.clone();
+        let tracks = &self.playlist.tracks;
+        self.playlist_download_cache
+            .refresh(epoch, &mut self.download_manager, || {
+                playlist_download_rows(tracks, root.as_deref(), album_folder.as_deref())
+            });
     }
 
-    /// 搜索页某行的下载图标状态。
-    pub(crate) fn search_download_state(&mut self, index: usize) -> Option<DownloadState> {
-        let candidate = self.search_download_candidate(index)?;
-        self.download_state_for_candidate(&candidate)
+    /// 歌单页 / 专辑页某行的图标状态（先调 `refresh_playlist_downloads`）。
+    pub(crate) fn playlist_download_state_at(&self, index: usize) -> Option<DownloadState> {
+        self.playlist_download_cache.state_at(index)
+    }
+
+    /// 搜索页的行内图标：每帧调一次。
+    pub(crate) fn refresh_search_downloads(&mut self) {
+        let epoch = self.search.generation() ^ self.download_rows_epoch;
+        let root = self.download_root.clone();
+        let results = &self.search.results;
+        self.search_download_cache
+            .refresh(epoch, &mut self.download_manager, || {
+                search_download_rows(results, root.as_deref())
+            });
+    }
+
+    /// 搜索页某行的图标状态（先调 `refresh_search_downloads`）。
+    pub(crate) fn search_download_state_at(&self, index: usize) -> Option<DownloadState> {
+        self.search_download_cache.state_at(index)
     }
 
     fn download_state_for_candidate(

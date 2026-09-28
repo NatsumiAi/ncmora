@@ -225,13 +225,14 @@ fn draw_playlist_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
     app.playlist.set_visible_rows(visible);
     let offset = app.playlist.effective_scroll_offset();
 
-    // 下载图标先按可见行算好（需要 &mut 查任务表与磁盘缓存），再逐行渲染，
-    // 免得与 `app.playlist.tracks` 的不可变借用撞车。
+    // 下载图标先按可见行算好（memo：列表代/任务版本不变时只做切片索引），
+    // 再逐行渲染，免得与 `app.playlist.tracks` 的不可变借用撞车。
     let download_phase = app.download_spinner_phase();
+    app.refresh_playlist_downloads();
     let download_states: Vec<Option<crate::app::download::DownloadState>> = (offset
         ..app.playlist.tracks.len())
         .take(visible)
-        .map(|track_idx| app.playlist_download_state(track_idx))
+        .map(|track_idx| app.playlist_download_state_at(track_idx))
         .collect();
 
     for (line_idx, track_idx) in (offset..app.playlist.tracks.len())

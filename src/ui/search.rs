@@ -93,6 +93,9 @@ fn draw_result_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         && usize::from(list_area.height) >= ARTIST_CARD_ROWS;
     app.search.set_viewport(usize::from(list_area.height), card);
 
+    // 行内图标：每帧刷新一次 memo（列表代/任务版本不变时只做一次 u64 比较）。
+    app.refresh_search_downloads();
+
     // 视口按行定位：条目高度不一，行滚动才能让顶部与底部同步移动。
     let top_row = app.search.effective_scroll_rows();
     let bottom_row = top_row.saturating_add(usize::from(list_area.height));
@@ -161,8 +164,8 @@ fn draw_result_panel(frame: &mut Frame, app: &mut App, area: Rect) {
             );
         } else {
             let ordinal = search_item_ordinal(&app.search, item_idx);
-            // 单曲行才有图标；状态查询带缓存，非单曲行直接跳过。
-            let download_state = app.search_download_state(item_idx);
+            // 单曲行才有图标；状态从 memo 表里取（每帧只刷新一次）。
+            let download_state = app.search_download_state_at(item_idx);
             render_search_row(
                 frame,
                 app,
