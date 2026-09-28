@@ -57,7 +57,8 @@ pub fn draw_search_box_overlay(frame: &mut Frame, app: &App) {
     let content = if input.trim().is_empty() {
         match app.config.language {
             Language::Zh => {
-                "输入关键词搜索（作者/歌单/单曲）；后缀 @single/@album/@author/@list 限定类型".to_string()
+                "输入关键词搜索（作者/歌单/单曲）；后缀 @single/@album/@author/@list 限定类型"
+                    .to_string()
             }
             Language::En => {
                 "Search artists/playlists/songs; @single/@album/@author/@list to narrow".to_string()
