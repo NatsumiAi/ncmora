@@ -98,6 +98,18 @@ fn host_config_sync_from_app(app: &AppState) -> HostConfigSync {
             AudioQuality::Jymaster => crate::data::config::AudioQuality::Jymaster,
         },
         eq_bands_db: app.config.eq_bands_db,
+        download_audio_quality: match app.config.download_audio_quality {
+            AudioQuality::Standard => crate::data::config::AudioQuality::Standard,
+            AudioQuality::Higher => crate::data::config::AudioQuality::Higher,
+            AudioQuality::Exhigh => crate::data::config::AudioQuality::Exhigh,
+            AudioQuality::Lossless => crate::data::config::AudioQuality::Lossless,
+            AudioQuality::Hires => crate::data::config::AudioQuality::Hires,
+            AudioQuality::Jyeffect => crate::data::config::AudioQuality::Jyeffect,
+            AudioQuality::Sky => crate::data::config::AudioQuality::Sky,
+            AudioQuality::Dolby => crate::data::config::AudioQuality::Dolby,
+            AudioQuality::Jymaster => crate::data::config::AudioQuality::Jymaster,
+        },
+        download_path: app.config.download_path.clone(),
         playback_memory: app.config.playback_memory,
         vip_audio_unlocked: app.vip_audio_unlocked,
         show_hints: app.config.show_hints,
@@ -152,6 +164,27 @@ fn apply_host_config_sync(app: &mut AppState, config: HostConfigSync) {
         crate::data::config::AudioQuality::Jymaster => AudioQuality::Jymaster,
     }
     .clamp_for_vip(app.vip_audio_unlocked);
+    app.config.download_audio_quality = match config.download_audio_quality {
+        crate::data::config::AudioQuality::Standard => AudioQuality::Standard,
+        crate::data::config::AudioQuality::Higher => AudioQuality::Higher,
+        crate::data::config::AudioQuality::Exhigh => AudioQuality::Exhigh,
+        crate::data::config::AudioQuality::Lossless => AudioQuality::Lossless,
+        crate::data::config::AudioQuality::Hires => AudioQuality::Hires,
+        crate::data::config::AudioQuality::Jyeffect => AudioQuality::Jyeffect,
+        crate::data::config::AudioQuality::Sky => AudioQuality::Sky,
+        crate::data::config::AudioQuality::Dolby => AudioQuality::Dolby,
+        crate::data::config::AudioQuality::Jymaster => AudioQuality::Jymaster,
+    }
+    .clamp_for_vip(app.vip_audio_unlocked);
+    // 路径非法时保留本地的修改前值（宿主侧也会再校验一遍）。
+    if config.download_path != app.config.download_path
+        && config
+            .download_path
+            .as_deref()
+            .is_none_or(|raw| crate::app::download::validate_download_path(raw).is_ok())
+    {
+        app.config.download_path = config.download_path.clone();
+    }
     app.config.eq_bands_db = config.eq_bands_db;
     app.eq.bands_db = config.eq_bands_db;
     app.config.playback_memory = config.playback_memory;

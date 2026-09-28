@@ -1,0 +1,842 @@
+//! 下载：目标目录解析、任务管理（取流 → 落盘 → 写标签/封面/歌词）、取消与状态查询。
+//!
+//! 单线程 compio runtime：所有阻塞 IO 都经 `spawn_blocking`，网络与文件写全程 await。
+
+use crate::app::api::ApiState;
+use crate::data::config::AudioQuality;
+use crate::launch;
+use anyhow::{Context, Result, bail};
+use compio::io::{AsyncWrite, AsyncWriteExt};
+use directories::{BaseDirs, UserDirs};
+use futures::StreamExt;
+use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+
+/// 默认下载目录名：`{系统音乐目录}/cnmplayer/`。
+pub const DOWNLOAD_DIR_NAME: &str = "cnmplayer";
+
+/// 系统既没有音乐目录也没有家目录时的显示值（设置弹窗里照原样显示这个字面量）。
+pub const DOWNLOAD_PATH_NULL: &str = "Null";
+
+/// 认识这两种载荷（`type` 字段只会有这两个值；网易云的九个档位都落在这两容器里）。
+pub const AUDIO_EXTENSIONS: [&str; 2] = ["mp3", "flac"];
+
+/// 未下载（Nerd Font `f03f`）。
+pub const ICON_DOWNLOAD: char = '\u{f03f}';
+/// 已下载（Nerd Font `f00c`）。
+pub const ICON_DONE: char = '\u{f00c}';
+/// 下载中的旋转帧（Nerd Font 的旋转系字符；终端不能真的旋转单个字形，用四帧循环表达）。
+const SPINNER_FRAMES: [char; 4] = ['\u{f1ce}', '\u{f110}', '\u{f021}', '\u{f01e}'];
+const SPINNER_FRAME_MS: u128 = 160;
+
+/// 下载按钮/图标三态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadState {
+    NotDownloaded,
+    Downloading,
+    Done,
+}
+
+/// 三态对应的字形；`Downloading` 按时间取旋转帧（time-based，空闲节流下也自洽）。
+pub fn state_glyph(state: DownloadState, now: Instant) -> char {
+    match state {
+        DownloadState::NotDownloaded => ICON_DOWNLOAD,
+        DownloadState::Done => ICON_DONE,
+        DownloadState::Downloading => {
+            let frame = (now.elapsed().as_millis() / SPINNER_FRAME_MS) as usize;
+            SPINNER_FRAMES[frame % SPINNER_FRAMES.len()]
+        }
+    }
+}
+
+/// 下载目录不可用的原因（文案由两端各自的 `lang_text` 生成）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadPathError {
+    /// 空串。
+    Empty,
+    /// 不是绝对路径。
+    NotAbsolute,
+    /// 建不出来或不可写。
+    NotWritable,
+}
+
+/// 解析实际使用的下载目录。
+///
+/// 优先级：用户自定义（写入前已校验）→ 系统音乐目录下的 `cnmplayer/`
+/// → `~/Music/cnmplayer/` → `None`（下载整体禁用，UI 不显示下载入口）。
+pub fn resolve_download_root(custom: Option<&str>) -> Option<PathBuf> {
+    if let Some(raw) = custom.map(str::trim).filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(raw));
+    }
+
+    if let Some(audio) = UserDirs::new().and_then(|dirs| dirs.audio_dir().map(Path::to_path_buf)) {
+        return Some(audio.join(DOWNLOAD_DIR_NAME));
+    }
+
+    BaseDirs::new().map(|dirs| dirs.home_dir().join("Music").join(DOWNLOAD_DIR_NAME))
+}
+
+/// 校验用户填写的下载目录：非空、绝对路径、能建出来且可写。
+pub fn validate_download_path(raw: &str) -> Result<PathBuf, DownloadPathError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(DownloadPathError::Empty);
+    }
+
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err(DownloadPathError::NotAbsolute);
+    }
+
+    if !is_writable_dir(&path) {
+        return Err(DownloadPathError::NotWritable);
+    }
+
+    Ok(path)
+}
+
+/// 目录可写性用一次真实的建/删探针判定：`create_dir_all` 在"目录已存在但只读"时也会成功。
+fn is_writable_dir(dir: &Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+
+    let probe = dir.join(format!(".cnmplayer-write-test-{}", std::process::id()));
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// 文件名片段清理：去掉路径分隔符、控制字符与首尾空白/点，空串回落 `fallback`。
+fn sanitize_component(raw: &str, fallback: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_control() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+            continue;
+        }
+        out.push(ch);
+    }
+
+    let trimmed = out.trim().trim_matches('.').trim();
+    let mut text = if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    };
+
+    // 单个组件别超过 150 字符，避免 CJK 长标题撞上文件系统的 255 字节上限。
+    if text.chars().count() > 150 {
+        text = text.chars().take(150).collect();
+    }
+    text
+}
+
+/// 文件名主干：`标题 - 作者 - 专辑`（缺失的段直接省略，专辑名里已含标题时也保留）。
+pub fn download_file_stem(title: &str, artist: &str, album: &str) -> String {
+    let mut parts = vec![sanitize_component(title, "未知歌曲")];
+    for raw in [artist, album] {
+        let part = sanitize_component(raw, "");
+        if !part.is_empty() {
+            parts.push(part);
+        }
+    }
+    parts.join(" - ")
+}
+
+/// 专辑子文件夹名（与文件名用同一套清理规则）。
+pub fn album_folder_name(album: &str) -> String {
+    sanitize_component(album, "未知专辑")
+}
+
+/// 一次下载的目标位置：`dir`（已在专辑页场景下带上子文件夹）+ 文件名主干。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadTarget {
+    pub dir: PathBuf,
+    pub base: String,
+}
+
+impl DownloadTarget {
+    pub fn file_path(&self, ext: &str) -> PathBuf {
+        self.dir.join(format!("{}.{ext}", self.base))
+    }
+
+    pub fn part_path(&self, ext: &str) -> PathBuf {
+        self.dir.join(format!("{}.{ext}.part", self.base))
+    }
+
+    /// 已经落盘的音频（两个扩展名都认），用于"已下载"图标。
+    pub fn existing_file(&self) -> Option<PathBuf> {
+        AUDIO_EXTENSIONS
+            .iter()
+            .map(|ext| self.file_path(ext))
+            .find(|path| path.is_file())
+    }
+}
+
+/// 下载请求：UI 侧决定落点，任务侧只负责取流与写标签。
+#[derive(Debug, Clone)]
+pub struct DownloadRequest {
+    pub song_id: String,
+    pub level: AudioQuality,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub target: DownloadTarget,
+    /// 专辑页下载：额外把专辑封面写成同目录的 `cover.<ext>`。
+    pub album_cover_url: Option<String>,
+}
+
+/// 任务结束的通知（由 `DownloadManager::poll` 交给 UI 写状态行）。
+#[derive(Debug, Clone)]
+pub enum DownloadEvent {
+    Finished {
+        title: String,
+        path: PathBuf,
+        level: String,
+        file_type: String,
+        tag_error: Option<String>,
+    },
+    Failed {
+        title: String,
+        error: String,
+    },
+    Cancelled {
+        title: String,
+    },
+}
+
+/// 任务结果。
+#[derive(Debug, Clone)]
+pub struct DownloadOutcome {
+    pub path: PathBuf,
+    pub level: String,
+    pub file_type: String,
+    /// 标签/封面写入失败不影响音频落盘，单独报告。
+    pub tag_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum TaskError {
+    Cancelled,
+    Failed(String),
+}
+
+struct JobShared {
+    cancelled: AtomicBool,
+    outcome: Mutex<Option<Result<DownloadOutcome, TaskError>>>,
+}
+
+struct JobHandle {
+    title: String,
+    cancelling: bool,
+    shared: Arc<JobShared>,
+}
+
+/// 下载任务表 + 落盘状态缓存。
+#[derive(Default)]
+pub struct DownloadManager {
+    jobs: HashMap<String, JobHandle>,
+    /// `目标前缀 -> 是否已落盘`：避免每帧对每一行都 stat 磁盘。
+    disk_cache: HashMap<String, bool>,
+}
+
+impl DownloadManager {
+    /// 发起下载；同一首歌已有任务时返回错误文案（由 UI 提示）。
+    pub fn enqueue(&mut self, api: &ApiState, request: DownloadRequest) -> Result<(), String> {
+        if let Some(job) = self.jobs.get(&request.song_id) {
+            return Err(if job.cancelling {
+                "正在取消上一任务，请稍候".to_string()
+            } else {
+                "该歌曲已在下载中".to_string()
+            });
+        }
+
+        let shared = Arc::new(JobShared {
+            cancelled: AtomicBool::new(false),
+            outcome: Mutex::new(None),
+        });
+        self.jobs.insert(
+            request.song_id.clone(),
+            JobHandle {
+                title: request.title.clone(),
+                cancelling: false,
+                shared: shared.clone(),
+            },
+        );
+        self.disk_cache.remove(&request.target.dir.join(&request.target.base).display().to_string());
+
+        let api = api.clone();
+        launch(async move {
+            let result = download_task(api, request, shared.clone()).await;
+            *shared.outcome.lock() = Some(result);
+        });
+
+        Ok(())
+    }
+
+    /// 请求取消：立刻把图标恢复成"未下载"，任务退出前不允许对同一首歌再发起下载。
+    pub fn cancel(&mut self, song_id: &str) -> bool {
+        let Some(job) = self.jobs.get_mut(song_id) else {
+            return false;
+        };
+        job.cancelling = true;
+        job.shared.cancelled.store(true, Ordering::SeqCst);
+        true
+    }
+
+    /// 是否有任务在途（含正在取消的），用于高频重绘判定。
+    pub fn is_active(&self) -> bool {
+        self.jobs.values().any(|job| !job.cancelling)
+    }
+
+    /// 该歌曲是否有在途任务（含正在取消的）。
+    pub fn is_busy(&self, song_id: &str) -> bool {
+        self.jobs.contains_key(song_id)
+    }
+
+    /// 该歌曲是否处于可取消的下载中。
+    pub fn is_downloading(&self, song_id: &str) -> bool {
+        self.jobs
+            .get(song_id)
+            .is_some_and(|job| !job.cancelling)
+    }
+
+    /// 每帧搬运完成的任务。
+    pub fn poll(&mut self) -> Vec<DownloadEvent> {
+        let mut events = Vec::new();
+        let finished: Vec<String> = self
+            .jobs
+            .iter()
+            .filter(|(_, job)| job.shared.outcome.lock().is_some())
+            .map(|(song_id, _)| song_id.clone())
+            .collect();
+
+        for song_id in finished {
+            let Some(job) = self.jobs.remove(&song_id) else {
+                continue;
+            };
+            let Some(result) = job.shared.outcome.lock().take() else {
+                continue;
+            };
+
+            match result {
+                Ok(outcome) => {
+                    if let Some(parent) = outcome.path.parent() {
+                        let stem = outcome
+                            .path
+                            .file_stem()
+                            .map(|value| value.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        self.disk_cache.insert(
+                            parent.join(&stem).display().to_string(),
+                            true,
+                        );
+                    }
+                    events.push(DownloadEvent::Finished {
+                        title: job.title,
+                        path: outcome.path,
+                        level: outcome.level,
+                        file_type: outcome.file_type,
+                        tag_error: outcome.tag_error,
+                    });
+                }
+                Err(TaskError::Cancelled) => events.push(DownloadEvent::Cancelled {
+                    title: job.title,
+                }),
+                Err(TaskError::Failed(error)) => events.push(DownloadEvent::Failed {
+                    title: job.title,
+                    error,
+                }),
+            }
+        }
+
+        events
+    }
+
+    /// 图标三态：任务在途 → 下载中；否则查磁盘（带缓存）。
+    pub fn state_of(&mut self, song_id: &str, target: &DownloadTarget) -> DownloadState {
+        if let Some(job) = self.jobs.get(song_id) {
+            return if job.cancelling {
+                DownloadState::NotDownloaded
+            } else {
+                DownloadState::Downloading
+            };
+        }
+
+        let key = target.dir.join(&target.base).display().to_string();
+        if let Some(done) = self.disk_cache.get(&key) {
+            return if *done {
+                DownloadState::Done
+            } else {
+                DownloadState::NotDownloaded
+            };
+        }
+
+        let done = target.existing_file().is_some();
+        // 缓存别无限涨：超过阈值就整体清空（下次按需重查）。
+        if self.disk_cache.len() > 4096 {
+            self.disk_cache.clear();
+        }
+        self.disk_cache.insert(key, done);
+        if done {
+            DownloadState::Done
+        } else {
+            DownloadState::NotDownloaded
+        }
+    }
+
+    /// 下载根目录变化（设置里改了路径）后作废磁盘缓存。
+    pub fn clear_disk_cache(&mut self) {
+        self.disk_cache.clear();
+    }
+}
+
+/// 任务主体：取链 → 边下边写 `.part` → 改名 → 标签/封面 → 专辑封面。
+async fn download_task(
+    mut api: ApiState,
+    request: DownloadRequest,
+    shared: Arc<JobShared>,
+) -> Result<DownloadOutcome, TaskError> {
+    let cancelled = || shared.cancelled.load(Ordering::SeqCst);
+
+    let source = match api
+        .audio_download_url(&request.song_id, request.level.as_api_level())
+        .await
+    {
+        Ok(source) => source,
+        Err(err) => return Err(TaskError::Failed(err.to_string())),
+    };
+
+    if cancelled() {
+        return Err(TaskError::Cancelled);
+    }
+
+    if let Err(err) = std::fs::create_dir_all(&request.target.dir) {
+        return Err(TaskError::Failed(format!("创建下载目录失败: {err}")));
+    }
+
+    let ext = normalize_extension(&source.file_type);
+    let final_path = request.target.file_path(ext);
+    let part_path = request.target.part_path(ext);
+
+    match stream_to_file(&api, &source.url, &part_path, &shared).await {
+        Ok(()) => {}
+        Err(TaskError::Cancelled) => {
+            let _ = std::fs::remove_file(&part_path);
+            return Err(TaskError::Cancelled);
+        }
+        Err(err) => {
+            let _ = std::fs::remove_file(&part_path);
+            return Err(err);
+        }
+    }
+
+    if cancelled() {
+        let _ = std::fs::remove_file(&part_path);
+        return Err(TaskError::Cancelled);
+    }
+
+    // 覆盖同名文件；顺带清掉同名但扩展名不同的旧文件，避免一份歌两份体积。
+    if let Err(err) = compio::fs::rename(&part_path, &final_path).await {
+        let _ = std::fs::remove_file(&part_path);
+        return Err(TaskError::Failed(format!("重命名失败: {err}")));
+    }
+    for other in AUDIO_EXTENSIONS {
+        if other == ext {
+            continue;
+        }
+        let stale = request.target.file_path(other);
+        if stale.is_file() {
+            let _ = std::fs::remove_file(&stale);
+        }
+    }
+
+    let tag_error = write_metadata(&api, &request, &final_path, cancelled())
+        .await
+        .err()
+        .map(|err| err.to_string());
+
+    if cancelled() {
+        return Err(TaskError::Cancelled);
+    }
+
+    if let Some(url) = request.album_cover_url.as_deref() {
+        if let Err(err) = write_album_cover(&api, url, &request.target.dir).await {
+            // 专辑封面失败只影响这一张图，不影响刚下好的音频。
+            log::warn!("album cover download failed: {err}");
+        }
+    }
+
+    Ok(DownloadOutcome {
+        path: final_path,
+        level: source.level,
+        file_type: ext.to_string(),
+        tag_error,
+    })
+}
+
+/// 把响应流写进 `.part` 文件；取消时立即退出并由调用方清理半成品。
+async fn stream_to_file(
+    api: &ApiState,
+    url: &str,
+    part_path: &Path,
+    shared: &Arc<JobShared>,
+) -> Result<(), TaskError> {
+    let mut request = match api.http_client().get(url) {
+        Ok(request) => request,
+        Err(err) => return Err(TaskError::Failed(err.to_string())),
+    };
+    if let Some(cookie) = api.session_cookie() {
+        request = match request.header("Cookie", cookie) {
+            Ok(request) => request,
+            Err(err) => return Err(TaskError::Failed(err.to_string())),
+        };
+    }
+
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(err) => return Err(TaskError::Failed(err.to_string())),
+    };
+    let response = match crate::app::api::error_for_status(response) {
+        Ok(response) => response,
+        Err(err) => return Err(TaskError::Failed(err.to_string())),
+    };
+
+    let file = match compio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(part_path)
+        .await
+    {
+        Ok(file) => file,
+        Err(err) => return Err(TaskError::Failed(format!("打开临时文件失败: {err}"))),
+    };
+    let mut cursor = Cursor::new(&file);
+    let mut stream = response.bytes_stream();
+
+    loop {
+        if shared.cancelled.load(Ordering::SeqCst) {
+            let _ = file.close().await;
+            return Err(TaskError::Cancelled);
+        }
+
+        let chunk = match stream.next().await {
+            Some(Ok(chunk)) if !chunk.is_empty() => chunk,
+            Some(Ok(_)) => continue,
+            Some(Err(err)) => {
+                let _ = file.close().await;
+                return Err(TaskError::Failed(err.to_string()));
+            }
+            None => break,
+        };
+
+        if let Err(err) = cursor.write_all(chunk).await.0 {
+            let _ = file.close().await;
+            return Err(TaskError::Failed(err.to_string()));
+        }
+        if let Err(err) = cursor.flush().await {
+            let _ = file.close().await;
+            return Err(TaskError::Failed(err.to_string()));
+        }
+    }
+
+    if let Err(err) = file.close().await {
+        return Err(TaskError::Failed(err.to_string()));
+    }
+    Ok(())
+}
+
+/// 详情 + 歌词 + 封面 → 写标签（同步 IO 放阻塞线程池）。
+async fn write_metadata(
+    api: &ApiState,
+    request: &DownloadRequest,
+    path: &Path,
+    cancelled: bool,
+) -> Result<()> {
+    if cancelled {
+        return Ok(());
+    }
+
+    let metadata = fetch_song_metadata(api, request).await;
+    let lyrics = fetch_lyrics(api, &request.song_id).await;
+    let cover = match metadata.album_cover_url.as_deref() {
+        Some(url) => api.fetch_cover_bytes(url).await.ok(),
+        None => None,
+    };
+
+    let path = path.to_path_buf();
+    let result = compio::runtime::spawn_blocking(move || {
+        write_tags_blocking(&path, &metadata, cover.as_deref(), lyrics.as_deref())
+    })
+    .await
+    .unwrap();
+    result
+}
+
+/// 歌曲详情里的元数据（拿不到就回落到请求里带的展示字段）。
+struct SongMetadata {
+    title: String,
+    artists: String,
+    album: String,
+    album_cover_url: Option<String>,
+    track_number: Option<u32>,
+    date: Option<String>,
+}
+
+async fn fetch_song_metadata(api: &ApiState, request: &DownloadRequest) -> SongMetadata {
+    let mut metadata = SongMetadata {
+        title: request.title.clone(),
+        artists: request.artist.clone(),
+        album: request.album.clone(),
+        album_cover_url: None,
+        track_number: None,
+        date: None,
+    };
+
+    let mut api = api.clone();
+    let Ok(response) = api.song_detail(&request.song_id).await else {
+        return metadata;
+    };
+    let Some(song) = response.body.pointer("/songs/0") else {
+        return metadata;
+    };
+
+    if let Some(name) = song.get("name").and_then(|value| value.as_str()) {
+        if !name.trim().is_empty() {
+            metadata.title = name.to_string();
+        }
+    }
+    let artists = song
+        .get("ar")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("name").and_then(|value| value.as_str()))
+                .filter(|name| !name.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join(" / ")
+        })
+        .unwrap_or_default();
+    if !artists.is_empty() {
+        metadata.artists = artists;
+    }
+    if let Some(album) = song.pointer("/al/name").and_then(|value| value.as_str()) {
+        if !album.trim().is_empty() {
+            metadata.album = album.to_string();
+        }
+    }
+    metadata.album_cover_url = song
+        .pointer("/al/picUrl")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    metadata.track_number = song
+        .get("no")
+        .and_then(|value| value.as_u64())
+        .filter(|value| *value > 0)
+        .map(|value| value as u32);
+    metadata.date = song
+        .get("publishTime")
+        .and_then(|value| value.as_i64())
+        .and_then(civil_date_from_unix_ms);
+
+    metadata
+}
+
+/// 歌词：拿不到（纯音乐）就返回 `None`，不写空标签。
+async fn fetch_lyrics(api: &ApiState, song_id: &str) -> Option<String> {
+    let mut api = api.clone();
+    let response = api.lyric(song_id).await.ok()?;
+    let lyric = response
+        .body
+        .pointer("/lrc/lyric")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if lyric.is_empty() { None } else { Some(lyric) }
+}
+
+/// 专辑封面（专辑页下载时额外落一张 `cover.*`）。
+async fn write_album_cover(api: &ApiState, url: &str, dir: &Path) -> Result<()> {
+    let bytes = api.fetch_cover_bytes(url).await?;
+    if bytes.is_empty() {
+        bail!("empty cover bytes");
+    }
+    let ext = image_extension(&bytes);
+    std::fs::create_dir_all(dir).with_context(|| format!("create dir failed: {}", dir.display()))?;
+    let path = dir.join(format!("cover.{ext}"));
+    std::fs::write(&path, &bytes).with_context(|| format!("write cover failed: {}", path.display()))?;
+    Ok(())
+}
+
+/// 封面字节的扩展名（JPEG/PNG 魔数，其余按 jpg 处理）。
+fn image_extension(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "png"
+    } else {
+        "jpg"
+    }
+}
+
+/// `type` 字段归一化：只认 mp3/flac，其余（含空）按 mp3。
+fn normalize_extension(file_type: &str) -> &'static str {
+    match file_type.trim().to_ascii_lowercase().as_str() {
+        "flac" => "flac",
+        _ => "mp3",
+    }
+}
+
+/// 写标签：标题/作者/专辑/曲目号/日期/歌词/内嵌封面（ID3v2 与 Vorbis Comment 都走这一套）。
+fn write_tags_blocking(
+    path: &Path,
+    metadata: &SongMetadata,
+    cover: Option<&[u8]>,
+    lyrics: Option<&str>,
+) -> Result<()> {
+    use lofty::config::WriteOptions;
+    use lofty::picture::{MimeType, Picture, PictureType};
+    use lofty::tag::{Accessor, ItemKey, Tag, TagExt, TagType};
+
+    // 扩展名即容器类型（文件是本次刚下下来的）：mp3 → ID3v2，flac → Vorbis Comment。
+    let tag_type = match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "flac" => TagType::VorbisComments,
+        _ => TagType::Id3v2,
+    };
+
+    let mut tag = Tag::new(tag_type);
+    tag.set_title(metadata.title.clone());
+    tag.set_artist(metadata.artists.clone());
+    tag.set_album(metadata.album.clone());
+    if let Some(track) = metadata.track_number {
+        tag.set_track(track);
+    }
+    if let Some(date) = metadata.date.as_deref() {
+        tag.insert_text(ItemKey::RecordingDate, date.to_string());
+    }
+    if let Some(lyrics) = lyrics {
+        tag.insert_text(ItemKey::UnsyncLyrics, lyrics.to_string());
+    }
+
+    if let Some(bytes) = cover {
+        let mime = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+            MimeType::Png
+        } else {
+            MimeType::Jpeg
+        };
+        tag.remove_picture_type(PictureType::CoverFront);
+        tag.push_picture(
+            Picture::unchecked(bytes.to_vec())
+                .pic_type(PictureType::CoverFront)
+                .mime_type(mime)
+                .build(),
+        );
+    }
+
+    tag.save_to_path(path, WriteOptions::default())
+        .with_context(|| format!("save tags failed: {}", path.display()))?;
+    Ok(())
+}
+
+/// `publishTime`（毫秒）→ `YYYY-MM-DD`；越界或非法值返回 `None`。
+fn civil_date_from_unix_ms(ms: i64) -> Option<String> {
+    if ms <= 0 {
+        return None;
+    }
+    let days = ms.div_euclid(86_400_000);
+    // Howard Hinnant 的 civil_from_days。
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    if !(1000..=9999).contains(&year) {
+        return None;
+    }
+    Some(format!("{year:04}-{month:02}-{day:02}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stem_skips_missing_parts() {
+        assert_eq!(download_file_stem("歌名", "作者", "专辑"), "歌名 - 作者 - 专辑");
+        assert_eq!(download_file_stem("歌名", "作者", ""), "歌名 - 作者");
+        assert_eq!(download_file_stem("歌名", "", ""), "歌名");
+        assert_eq!(download_file_stem("  ", "", ""), "未知歌曲");
+    }
+
+    #[test]
+    fn stem_strips_path_separators_and_controls() {
+        let stem = download_file_stem("a/b:c*d", "e?f", "g\nh");
+        assert_eq!(stem, "abcd - ef - gh");
+    }
+
+    #[test]
+    fn civil_date_matches_known_timestamps() {
+        assert_eq!(civil_date_from_unix_ms(0), None);
+        assert_eq!(
+            civil_date_from_unix_ms(1_600_000_000_000).as_deref(),
+            Some("2020-09-13")
+        );
+        assert_eq!(
+            civil_date_from_unix_ms(1_700_000_000_000).as_deref(),
+            Some("2023-11-14")
+        );
+    }
+
+    #[test]
+    fn target_paths_use_extension_and_part_suffix() {
+        let target = DownloadTarget {
+            dir: PathBuf::from("/tmp/cnm"),
+            base: "A - B".to_string(),
+        };
+        assert_eq!(target.file_path("flac"), PathBuf::from("/tmp/cnm/A - B.flac"));
+        assert_eq!(
+            target.part_path("mp3"),
+            PathBuf::from("/tmp/cnm/A - B.mp3.part")
+        );
+    }
+
+    #[test]
+    fn state_glyph_uses_expected_frames() {
+        assert_eq!(state_glyph(DownloadState::NotDownloaded, Instant::now()), ICON_DOWNLOAD);
+        assert_eq!(state_glyph(DownloadState::Done, Instant::now()), ICON_DONE);
+        assert!(SPINNER_FRAMES.contains(&state_glyph(
+            DownloadState::Downloading,
+            Instant::now()
+        )));
+    }
+
+    #[test]
+    fn validate_rejects_relative_and_empty() {
+        assert_eq!(validate_download_path("  "), Err(DownloadPathError::Empty));
+        assert_eq!(
+            validate_download_path("relative/dir"),
+            Err(DownloadPathError::NotAbsolute)
+        );
+    }
+}

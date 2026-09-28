@@ -180,6 +180,10 @@ impl tmplayer::HostPlaybackBridge for AppFullscreenBridge<'_> {
     async fn toggle_like_current(&mut self) {
         self.app.fullscreen_toggle_like().await;
     }
+
+    fn download_current(&mut self) {
+        self.app.download_current_song();
+    }
 }
 
 pub struct Storage {

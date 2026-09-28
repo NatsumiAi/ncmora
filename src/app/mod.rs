@@ -1,4 +1,5 @@
 mod api;
+pub(crate) mod download;
 mod mpris_bridge;
 pub(crate) mod player;
 mod startup;
@@ -45,7 +46,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -53,6 +54,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthChar;
 
 use api::ApiState;
+use download::{DownloadEvent, DownloadManager, DownloadRequest, DownloadTarget};
 use mpris_bridge::{MprisBridge, MprisControlEvent, MprisSyncPayload};
 use player::{AudioPlayer, AudioPlayerState, cleanup_cache_dir, resolve_cache_root};
 use startup::StartupInit;
@@ -68,10 +70,11 @@ const SEARCH_BOX_ANIM_DURATION: Duration = Duration::from_millis(180);
 /// 侧边栏滑出动画时长（time-based，与帧率解耦）。主页与全屏播放页共用。
 pub(crate) const SIDEBAR_ANIM_DURATION: Duration = Duration::from_millis(200);
 const HOME_SIDEBAR_PLAYLIST_LIMIT: usize = 100;
-const SETTINGS_ROOT_ITEMS: usize = 12;
+const SETTINGS_ROOT_ITEMS: usize = 13;
 const SETTINGS_PLAYBACK_ITEMS: usize = 8;
 const SETTINGS_LYRICS_ITEMS: usize = 3;
-pub(crate) const SETTINGS_KEYBIND_ITEMS: usize = 20;
+const SETTINGS_DOWNLOAD_ITEMS: usize = 3;
+pub(crate) const SETTINGS_KEYBIND_ITEMS: usize = 22;
 /// 主程序内容页小窗口模式的统一触发阈值，与主页既有判定一致。
 pub(crate) const SMALL_WINDOW_MIN_WIDTH: u16 = 32;
 pub(crate) const SMALL_WINDOW_MIN_HEIGHT: u16 = 12;
@@ -118,6 +121,8 @@ const DEFAULT_KEYBIND_FULLSCREEN_EQ_RESET: &str = "Alt+R";
 const DEFAULT_KEYBIND_TOGGLE_LIKE_FULLSCREEN: &str = "L";
 const DEFAULT_KEYBIND_TOGGLE_LIKE_COLLAPSED: &str = "Alt+L";
 const DEFAULT_KEYBIND_SMALL_WINDOW_TOGGLE: &str = "Alt+X";
+const DEFAULT_KEYBIND_DOWNLOAD: &str = "Ctrl+Alt+D";
+const DEFAULT_KEYBIND_DOWNLOAD_FULLSCREEN: &str = "Ctrl+D";
 
 #[derive(Debug, Clone, Copy)]
 enum KeybindAction {
@@ -141,6 +146,10 @@ enum KeybindAction {
     ToggleLikeFullscreen,
     ToggleLikeCollapsed,
     SmallWindowToggle,
+    /// 主应用：下载聚焦的单曲。
+    Download,
+    /// 全屏页：下载当前播放的单曲（宿主侧不处理）。
+    DownloadFullscreen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +168,7 @@ pub enum Overlay {
     SettingsPlayback,
     SettingsKeybinds,
     SettingsLyrics,
+    SettingsDownload,
     SettingsAbout,
     SearchBox,
 }
@@ -538,6 +548,25 @@ struct PlaylistFetchSlot {
 enum PlaylistPageKind {
     Playlist,
     Album,
+}
+
+/// 下载路径行的行内编辑状态（光标按字符计数，横向窗口按显示宽度算）。
+#[derive(Debug, Clone, Default)]
+pub struct DownloadPathEdit {
+    pub buffer: String,
+    pub cursor: usize,
+}
+
+/// 一次下载的候选歌曲：UI 侧决定落点（专辑页子文件夹 / 封面）所需的全部信息。
+struct DownloadCandidate {
+    song_id: String,
+    title: String,
+    artist: String,
+    album: String,
+    /// 专辑页下载：子文件夹名（专辑名）。
+    album_folder: Option<String>,
+    /// 专辑页下载：额外落一张 `cover.*` 的封面地址。
+    album_cover_url: Option<String>,
 }
 
 impl PlaylistPageKind {
@@ -2791,6 +2820,12 @@ pub struct App {
     pub settings_lyrics_selected: usize,
     pub settings_keybind_selected: usize,
     pub settings_keybind_rebinding: Option<usize>,
+    /// 「下载设置」页的选中行。
+    pub settings_download_selected: usize,
+    /// 下载路径行的编辑状态（Some = 正在编辑该行）。
+    pub download_path_edit: Option<DownloadPathEdit>,
+    /// 「恢复默认」的两段式确认：首次选择后进入待确认态（文字换成警戒色）。
+    pub download_reset_armed: bool,
     /// 设置弹窗当前页的行命中区（每帧由 `draw_settings_modal` 重注册）。
     pub settings_item_hits: Vec<(HitRect, usize)>,
     /// 设置弹窗内上一次点击（用于双击判定）。
@@ -2829,6 +2864,12 @@ pub struct App {
     mpris_last_playback: PlaybackRuntimeState,
     api: ApiState,
     audio_player: AudioPlayer,
+    /// 下载任务表（异步后台任务；状态行与图标都从这里读）。
+    pub download_manager: DownloadManager,
+    /// 解析后的下载根目录；`None` = 系统里既没有音乐目录也没有家目录 → 下载禁用。
+    pub download_root: Option<PathBuf>,
+    /// 当前歌单页实际是歌单还是专辑（专辑页下载要落子文件夹 + 写 `cover.*`）。
+    playlist_page_kind: PlaylistPageKind,
     pub graphics_picker: Picker,
 }
 
@@ -2855,6 +2896,7 @@ impl App {
         let http_client = Client::builder().default_headers(headers).build()?;
         let cache_root = resolve_cache_root(&config);
         let cover_cache_dir = cache_root.join(COVER_CACHE_SUBDIR);
+        let download_root = crate::app::download::resolve_download_root(config.download_path.as_deref());
         let mpris_bridge = MprisBridge::new(&cache_root, &config.cache);
         if config.cache.clean_on_startup {
             let _ = cleanup_cache_dir(&cover_cache_dir, &config.cache);
@@ -2932,6 +2974,9 @@ impl App {
             settings_lyrics_selected: 0,
             settings_keybind_selected: 0,
             settings_keybind_rebinding: None,
+            settings_download_selected: 0,
+            download_path_edit: None,
+            download_reset_armed: false,
             settings_item_hits: Vec::new(),
             last_settings_click: None,
             #[cfg(feature = "easter-egg")]
@@ -2966,6 +3011,9 @@ impl App {
             mpris_last_playback: PlaybackRuntimeState::Stopped,
             api,
             audio_player,
+            download_manager: DownloadManager::default(),
+            download_root,
+            playlist_page_kind: PlaylistPageKind::Playlist,
             graphics_picker: Picker::halfblocks(),
         };
 
@@ -3008,6 +3056,7 @@ impl App {
         self.tick_author_fetch();
         self.tick_playlist_fetch();
         self.tick_like_sync();
+        self.tick_download();
         self.tick_stderr_log_trim();
         self.tick_startup_init().await;
         self.tick_startup_loading();
@@ -3477,6 +3526,10 @@ impl App {
         }
         // 歌单页 / 专辑页同理。
         if self.playlist_fetch.is_some() {
+            return true;
+        }
+        // 下载中：图标要一直转（time-based 帧），别被 1s 空闲节流压成 1fps。
+        if self.download_manager.is_active() {
             return true;
         }
         // 加载页全程保持高帧率：进度条本身在缓动，收尾还要等最短可见时长，
@@ -4036,6 +4089,7 @@ impl App {
             Overlay::SettingsPlayback => self.handle_settings_playback_key(key),
             Overlay::SettingsKeybinds => self.handle_settings_keybinds_key(key),
             Overlay::SettingsLyrics => self.handle_settings_lyrics_key(key),
+            Overlay::SettingsDownload => self.handle_settings_download_key(key),
             Overlay::SettingsAbout => self.handle_settings_about_key(key),
             Overlay::SearchBox => self.handle_search_box_key(key).await,
         }
@@ -4109,6 +4163,9 @@ impl App {
             KeybindAction::ToggleLikeFullscreen => {}
             KeybindAction::ToggleLikeCollapsed => self.toggle_like_hotkey(),
             KeybindAction::SmallWindowToggle => {}
+            KeybindAction::Download => self.download_focused_song().await,
+            // 全屏页专用：宿主侧不处理（与其余 Fullscreen* 动作同理）。
+            KeybindAction::DownloadFullscreen => {}
         }
     }
 
@@ -4242,6 +4299,7 @@ impl App {
         };
         let kind = slot.kind;
         self.playlist_fetch = None;
+        self.playlist_page_kind = kind;
 
         match result {
             Ok(fetch) => {
@@ -4331,6 +4389,8 @@ impl App {
             KeybindAction::ToggleLikeFullscreen,
             KeybindAction::ToggleLikeCollapsed,
             KeybindAction::SmallWindowToggle,
+            KeybindAction::Download,
+            KeybindAction::DownloadFullscreen,
         ];
 
         actions
@@ -4362,6 +4422,8 @@ impl App {
             KeybindAction::ToggleLikeFullscreen => &self.config.keybind_toggle_like_fullscreen,
             KeybindAction::ToggleLikeCollapsed => &self.config.keybind_toggle_like_collapsed,
             KeybindAction::SmallWindowToggle => &self.config.keybind_small_window_toggle,
+            KeybindAction::Download => &self.config.keybind_download,
+            KeybindAction::DownloadFullscreen => &self.config.keybind_download_fullscreen,
         }
     }
 
@@ -4387,6 +4449,8 @@ impl App {
             17 => Some(&mut self.config.keybind_toggle_mode),
             18 => Some(&mut self.config.keybind_toggle_like_collapsed),
             19 => Some(&mut self.config.keybind_small_window_toggle),
+            20 => Some(&mut self.config.keybind_download),
+            21 => Some(&mut self.config.keybind_download_fullscreen),
             _ => None,
         }
     }
@@ -4413,6 +4477,8 @@ impl App {
             17 => Some(self.config.keybind_toggle_mode.as_str()),
             18 => Some(self.config.keybind_toggle_like_collapsed.as_str()),
             19 => Some(self.config.keybind_small_window_toggle.as_str()),
+            20 => Some(self.config.keybind_download.as_str()),
+            21 => Some(self.config.keybind_download_fullscreen.as_str()),
             _ => None,
         }
     }
@@ -4458,6 +4524,8 @@ impl App {
             17 => self.lang_text("折叠栏模式切换", "Collapsed Mode Switch"),
             18 => self.lang_text("折叠栏收藏/取消收藏", "Collapsed Like/Unlike"),
             19 => self.lang_text("小窗口切换显示", "Small Window Switch"),
+            20 => self.lang_text("下载歌曲（主应用）", "Download Song (Host)"),
+            21 => self.lang_text("下载歌曲（全屏页）", "Download Song (Fullscreen)"),
             _ => self.lang_text("未知", "Unknown"),
         }
     }
@@ -4487,6 +4555,8 @@ impl App {
         self.config.keybind_toggle_like_collapsed =
             DEFAULT_KEYBIND_TOGGLE_LIKE_COLLAPSED.to_string();
         self.config.keybind_small_window_toggle = DEFAULT_KEYBIND_SMALL_WINDOW_TOGGLE.to_string();
+        self.config.keybind_download = DEFAULT_KEYBIND_DOWNLOAD.to_string();
+        self.config.keybind_download_fullscreen = DEFAULT_KEYBIND_DOWNLOAD_FULLSCREEN.to_string();
     }
 
     pub fn keybind_label_for_index(&self, index: usize) -> String {
@@ -4511,6 +4581,8 @@ impl App {
             17 => KeybindAction::ToggleMode,
             18 => KeybindAction::ToggleLikeCollapsed,
             19 => KeybindAction::SmallWindowToggle,
+            20 => KeybindAction::Download,
+            21 => KeybindAction::DownloadFullscreen,
             _ => KeybindAction::SearchBox,
         });
         format!("{}: {}", self.keybind_name_for_index(index), value)
@@ -4673,6 +4745,199 @@ impl App {
     /// 当前曲目 id。
     fn current_song_id(&self) -> Option<String> {
         self.now_playing.as_ref().map(|track| track.song_id.clone())
+    }
+
+    /// 下载根目录：`None` 表示系统里拿不到可写位置（下载整体禁用）。
+    pub fn download_root(&self) -> Option<&Path> {
+        self.download_root.as_deref()
+    }
+
+    /// 重新解析下载根目录（设置里改了路径、或全屏页同步回来时调用）。
+    pub fn refresh_download_root(&mut self) {
+        let next =
+            crate::app::download::resolve_download_root(self.config.download_path.as_deref());
+        if next != self.download_root {
+            self.download_root = next;
+            self.download_manager.clear_disk_cache();
+        }
+    }
+
+    /// 当前聚焦的单曲（歌单页 / 搜索页）与它所在页面的下载上下文。
+    fn focused_download_song(&self) -> Option<DownloadCandidate> {
+        match self.page {
+            Page::Playlist => {
+                let track = self.playlist.tracks.get(self.playlist.focused_idx)?;
+                if track.kind != PlaylistTrackKind::Song {
+                    return None;
+                }
+                let album_page = self.playlist_page_kind == PlaylistPageKind::Album;
+                Some(DownloadCandidate {
+                    song_id: track.id.clone()?,
+                    title: track.title.clone(),
+                    artist: track.artist.clone(),
+                    album: track.album.clone(),
+                    album_folder: album_page.then(|| self.playlist.title.clone()),
+                    album_cover_url: album_page
+                        .then(|| self.playlist.cover.url.clone())
+                        .flatten(),
+                })
+            }
+            Page::Search => {
+                let item = self.search.results.get(self.search.focused_idx)?;
+                if item.kind != SearchItemKind::Song {
+                    return None;
+                }
+                Some(DownloadCandidate {
+                    song_id: item.song_id.clone()?,
+                    title: item.title.clone().unwrap_or_else(|| item.left_label.clone()),
+                    artist: item.artist.clone().unwrap_or_default(),
+                    album: item.album.clone().unwrap_or_default(),
+                    album_folder: None,
+                    album_cover_url: None,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// 主应用 Ctrl+Alt+D：下载聚焦的单曲（在途则取消）。
+    async fn download_focused_song(&mut self) {
+        let Some(candidate) = self.focused_download_song() else {
+            self.set_runtime_status(self.lang_text(
+                "当前列表里没有可下载的单曲",
+                "No downloadable song in this list",
+            ));
+            return;
+        };
+        self.toggle_download(candidate);
+    }
+
+    /// 全屏页 Ctrl+D / 点下载图标：下载当前播放的单曲（在途则取消）。
+    pub fn download_current_song(&mut self) {
+        let Some(track) = self.now_playing.clone() else {
+            self.set_runtime_status(self.lang_text(
+                "当前没有正在播放的歌曲",
+                "Nothing is playing right now",
+            ));
+            return;
+        };
+
+        self.toggle_download(DownloadCandidate {
+            song_id: track.song_id,
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            album_folder: None,
+            album_cover_url: None,
+        });
+    }
+
+    /// 发起 / 取消下载（图标点击、两处快捷键共用这一条路径）。
+    fn toggle_download(&mut self, candidate: DownloadCandidate) {
+        if self.download_manager.is_downloading(&candidate.song_id) {
+            self.download_manager.cancel(&candidate.song_id);
+            self.set_runtime_status(format!(
+                "{}: {}",
+                self.lang_text("已取消下载", "Download cancelled"),
+                candidate.title
+            ));
+            return;
+        }
+
+        if self.download_manager.is_busy(&candidate.song_id) {
+            self.set_runtime_status(self.lang_text(
+                "正在取消上一任务，请稍候",
+                "Cancelling the previous download, please wait",
+            ));
+            return;
+        }
+
+        let Some(root) = self.download_root.clone() else {
+            self.set_runtime_status(self.lang_text(
+                "下载不可用：没有可用的下载目录",
+                "Download unavailable: no usable download directory",
+            ));
+            return;
+        };
+
+        let dir = match candidate.album_folder.as_deref() {
+            Some(album) => root.join(crate::app::download::album_folder_name(album)),
+            None => root,
+        };
+        let target = DownloadTarget {
+            dir,
+            base: crate::app::download::download_file_stem(
+                &candidate.title,
+                &candidate.artist,
+                &candidate.album,
+            ),
+        };
+        let level = self
+            .config
+            .download_audio_quality
+            .clamp_for_vip(self.vip_audio_unlocked);
+        let request = DownloadRequest {
+            song_id: candidate.song_id.clone(),
+            level,
+            title: candidate.title.clone(),
+            artist: candidate.artist.clone(),
+            album: candidate.album.clone(),
+            target,
+            album_cover_url: candidate.album_cover_url.clone(),
+        };
+
+        match self.download_manager.enqueue(&self.api, request) {
+            Ok(()) => self.set_runtime_status(format!(
+                "{}: {} ({})",
+                self.lang_text("开始下载", "Downloading"),
+                candidate.title,
+                level.as_api_level()
+            )),
+            Err(message) => self.set_runtime_status(message),
+        }
+    }
+
+    /// 每帧搬运下载结果：完成 / 失败 / 取消都写状态行。
+    fn tick_download(&mut self) {
+        for event in self.download_manager.poll() {
+            match event {
+                DownloadEvent::Finished {
+                    title,
+                    path,
+                    level,
+                    file_type,
+                    tag_error,
+                } => {
+                    let mut text = format!(
+                        "{}: {} [{}.{}] -> {}",
+                        self.lang_text("已下载", "Downloaded"),
+                        title,
+                        level,
+                        file_type,
+                        path.display()
+                    );
+                    if let Some(error) = tag_error {
+                        text.push_str(&format!(
+                            " ({}{error})",
+                            self.lang_text("标签写入失败: ", "tag write failed: ")
+                        ));
+                    }
+                    self.set_runtime_status(text);
+                }
+                DownloadEvent::Failed { title, error } => {
+                    self.set_runtime_status(format!(
+                        "{}: {title}: {error}",
+                        self.lang_text("下载失败", "Download failed")
+                    ));
+                }
+                DownloadEvent::Cancelled { title } => {
+                    self.set_runtime_status(format!(
+                        "{}: {title}",
+                        self.lang_text("已取消下载", "Download cancelled")
+                    ));
+                }
+            }
+        }
     }
 
     /// 把某首歌的显示值同步到状态机（未决意图优先，其次已确认值）。
@@ -5526,6 +5791,7 @@ impl App {
             fallback_cover_url,
         );
         let fut: PlaylistFetchTask = Box::pin(async move { Some(fut.await) });
+        self.playlist_page_kind = PlaylistPageKind::Album;
         self.playlist_fetch = Some(PlaylistFetchSlot {
             kind: PlaylistPageKind::Album,
             future: shot_and_share(fut),
@@ -5570,6 +5836,7 @@ impl App {
             self.home_sidebar.user_id.clone(),
         );
         let fut: PlaylistFetchTask = Box::pin(async move { Some(fut.await) });
+        self.playlist_page_kind = PlaylistPageKind::Playlist;
         self.playlist_fetch = Some(PlaylistFetchSlot {
             kind: PlaylistPageKind::Playlist,
             future: shot_and_share(fut),
@@ -6835,6 +7102,7 @@ impl App {
 
         let fut = fetch_album_page_from_song(self.api.clone(), self.config.language, song_id);
         let fut: PlaylistFetchTask = Box::pin(async move { Some(fut.await) });
+        self.playlist_page_kind = PlaylistPageKind::Album;
         self.playlist_fetch = Some(PlaylistFetchSlot {
             kind: PlaylistPageKind::Album,
             future: shot_and_share(fut),
@@ -6854,6 +7122,8 @@ impl App {
             page_lyrics_pos_x: self.config.page_lyrics_pos_x,
             page_lyrics_pos_y: self.config.page_lyrics_pos_y,
             audio_quality: self.config.audio_quality,
+            download_audio_quality: self.config.download_audio_quality,
+            download_path: self.config.download_path.clone(),
             eq_bands_db: self.config.eq_bands_db,
             playback_memory: self.config.playback_memory,
             vip_audio_unlocked: self.vip_audio_unlocked,
@@ -6939,6 +7209,26 @@ impl App {
             changed = true;
         }
 
+        // 下载音质与播放音质同一套可选值，同样按会员收口。
+        let clamped_download_quality = sync
+            .download_audio_quality
+            .clamp_for_vip(self.vip_audio_unlocked);
+        if self.config.download_audio_quality != clamped_download_quality {
+            self.config.download_audio_quality = clamped_download_quality;
+            changed = true;
+        }
+
+        // 全屏页改的下载路径：非法（空/非绝对/不可写）就保留修改前的值。
+        if self.config.download_path != sync.download_path
+            && sync
+                .download_path
+                .as_deref()
+                .is_none_or(|raw| crate::app::download::validate_download_path(raw).is_ok())
+        {
+            self.config.download_path = sync.download_path.clone();
+            changed = true;
+        }
+
         if self.config.eq_bands_db != sync.eq_bands_db {
             self.config.eq_bands_db = sync.eq_bands_db;
             let _ = self
@@ -7004,6 +7294,9 @@ impl App {
             self.config.bar_channel_reverse = sync.bar_channel_reverse;
             changed = true;
         }
+
+        // 下载路径可能刚被全屏页改过：重算根目录并作废"已下载"缓存。
+        self.refresh_download_root();
 
         if changed {
             let _ = self.config.save();
