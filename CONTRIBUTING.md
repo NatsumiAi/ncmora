@@ -45,12 +45,17 @@ sudo pacman -S --needed base-devel cmake pkg-config alsa-lib chafa pipewire open
 - `libchafa-dev` must be chafa ≥ 1.8.0 — the image renderer probes it through
   `pkg-config`;
 - `libclang-dev` and `libpipewire-0.3-dev` are needed because the PipeWire
-  audio backend generates bindings at build time.
+  audio backend generates bindings at build time;
+- `libasound2-dev` / `alsa-lib` is needed at **build time** only: `cpal`
+  compiles its ALSA backend unconditionally on Linux, so the develop package
+  must be installed to build, but playback goes through PipeWire and the ALSA
+  path is not a supported runtime configuration.
 
-Runtime: ALSA or PipeWire for audio plus the chafa shared library, an optional
-`cava` binary for the `bars` visualizer (without it the default visualizer
-becomes the oscilloscope), and a Nerd Font is strongly recommended — some UI
-glyphs render as missing-glyph boxes otherwise.
+Runtime: PipeWire for audio — the ALSA backend is deprecated, do not test or
+document it — plus the chafa shared library, an optional `cava` binary for the
+`bars` visualizer (without it the default visualizer becomes the oscilloscope),
+and a Nerd Font is strongly recommended — some UI glyphs render as
+missing-glyph boxes otherwise.
 
 Commands:
 
@@ -119,19 +124,31 @@ syncs the AUR packages.
 
 A patch that "works on my machine" is not enough for a terminal UI.
 
+- **The keyboard is the primary interface.** Design keyboard-first: every
+  function must be reachable and operable with the keyboard alone, and the
+  keyboard path is the reference behaviour when the two disagree. Mouse
+  interaction is an optional layer on top of it — a convenience for
+  non-essential features, never the only way to reach something.
+- **Basic functionality must work in a plain TTY.** `kmscon` is the reference
+  environment: no emulator-only escape sequences, no Nerd Font, and mouse
+  reporting may not be available at all. Login, browsing, playback control and
+  quitting must all stay usable there.
 - **Rendering changes need rendering evidence.** For anything that changes what
   is drawn — layout, animation, cover art, visualizers, colors — attach a
   screenshot or a short recording to the pull request.
 - **State your environment**: terminal emulator (name and version), font,
   terminal size, and whether a Nerd Font is installed. The UI draws icon glyphs
-  in several places, and most rendering problems are terminal-specific.
+  in several places, and most rendering problems are terminal-specific. When
+  you touch input handling, keys or keybinds, also try a bare TTY (`kmscon`):
+  that is where the keyboard-first baseline has to hold.
 - **Cover the small-window thresholds.** Host content pages switch to the flat
   layout below the thresholds documented in README → *Small window mode*; verify
   at the boundary sizes, including the `Terminal too small` case.
-- **Exercise both keyboard and mouse paths** for the widgets you touch: the
-  collapsed player bar's previous / play-pause / next buttons and its progress
-  bar are clickable, and the sidebar supports the wheel, a single click and a
-  double click (400 ms window).
+- **Exercise the keyboard path for the widgets you touch, plus the mouse path
+  where one exists**: the collapsed player bar's previous / play-pause / next,
+  like and repeat-mode buttons and its progress bar are clickable, and the
+  sidebar supports the wheel, a single click and a double click (400 ms
+  window).
 - **Check both UI languages** (`language = "zh"` / `"en"`) when you add or change
   user-visible strings.
 - **Verify cava-dependent work in both states.** If you touch the spectrum code,

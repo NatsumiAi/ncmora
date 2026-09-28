@@ -49,7 +49,7 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 - 搜索页：每次请求 50 条，继续滚动会自动追加
 - 私人漫游：每日刷新时把上次播放的歌曲保留在首位；播放到列表末尾会续拉新歌（接口每次返回 3 首，连拉三次并去重）追加到队尾；磁贴封面跟随当前播放的漫游歌曲，队列来源会持久化，重启后仍能续播
 - 键盘导航：`Enter` 打开或播放，`Esc` / `Left` 返回，`Tab` / `Down` 与 `Shift+Tab` / `Up` 移动，`PageUp` / `PageDown` 翻页
-- 鼠标：滚轮滚动，单击聚焦，双击打开（400 ms 判定窗口）；折叠播放栏的上一首 / 播放暂停 / 下一首按钮与进度条可点击
+- 鼠标：滚轮滚动，单击聚焦，双击打开（400 ms 判定窗口）；折叠播放栏的上一首 / 播放暂停 / 下一首、收藏与循环模式按钮，以及进度条可点击
 
 ### 搜索语法
 
@@ -95,7 +95,7 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 | 两个方向都过小 | 显示「终端窗口过小」 |
 
 进入小窗口会关闭侧边栏与已打开的弹窗；在小窗口内设置、搜索框、侧边栏都无法打开，只有退出、上一首、下一首、播放暂停、循环模式、折叠栏收藏与小窗口开关快捷键仍然可用。
-扁窗的播放栏保留鼠标目标（上一首、播放暂停、下一首、点击进度跳转）。
+扁窗的播放栏保留鼠标目标（上一首、播放暂停、下一首、收藏、循环模式、点击进度跳转）。
 
 ### 界面
 
@@ -147,11 +147,11 @@ sudo apt install -y build-essential cmake pkg-config \
   libasound2-dev libchafa-dev libpipewire-0.3-dev libssl-dev libglib2.0-dev libclang-dev
 ```
 
-`libchafa-dev` 要求 chafa ≥ 1.8.0（图像渲染通过 `pkg-config` 探测），`libclang-dev` 与 `libpipewire-0.3-dev` 则是 PipeWire 音频后端在构建期生成绑定所需。
+`libchafa-dev` 要求 chafa ≥ 1.8.0（图像渲染通过 `pkg-config` 探测），`libclang-dev` 与 `libpipewire-0.3-dev` 则是 PipeWire 音频后端在构建期生成绑定所需。`libasound2-dev` 只在构建期需要：`cpal` 在 Linux 上无条件编译其 ALSA 后端，而播放本身走 PipeWire。
 
 ### 运行要求
 
-- Linux 上的 ALSA 或 PipeWire 音频，以及运行时的 chafa 共享库
+- Linux 上的 PipeWire 音频（ALSA 后端已弃用），以及运行时的 chafa 共享库
 - 可选的 `cava` 可执行文件，用于 `bars` 频谱
 - 强烈建议使用 Nerd Font：界面中有一些图标字形，没有这类字体时部分图标会显示为缺字方块
 
@@ -296,6 +296,7 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 设置弹窗：
 
 - `Up` / `Down` / `Tab` / `Shift+Tab` 移动，`Left` / `Right` / `Enter` 修改取值，`Esc` 逐级返回
+- 鼠标：滚轮移动选中行，单击聚焦、双击执行；「歌词浮窗」子页为单击直接改值
 - 按键绑定页：`Enter` 开始重绑，等待输入时按 `Esc` 取消
 
 全屏播放页：
@@ -305,7 +306,7 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 - `T` 打开设置弹窗，`Ctrl+K` 打开按键绑定列表，`About` 在设置弹窗内
 - `E` 打开均衡器弹窗；方向键选择与调整，`Alt+R` 重置，`Esc` / `E` 关闭
 - `Up` / `Down` 调整音量，`Left` / `Right` 切歌，`Space` 播放或暂停，`M` 切换循环模式，`L` 收藏当前歌曲
-- `Ctrl+F` 或 `Esc` 返回主程序；鼠标可点击控制按钮、进度条、音量条与歌单行
+- `Ctrl+F` 或 `Esc` 返回主程序；鼠标可点击控制按钮、进度条、音量条（点击或按住拖动）、爱心与歌单行；弹窗打开时滚轮切换聚焦行，条目单击聚焦、双击执行（EQ 弹窗点击即设定该段增益）
 - 若开启了 `small_window_display` 且终端降到 50 列或 12 行以下，全屏页会自动返回主程序
 
 ## 注意事项
@@ -323,7 +324,7 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 - TUI：ratatui + crossterm
 - 异步与网络：compio + cyper
 - 网易云 API：`ncm-api`（由 [ncm-api-rs](https://github.com/imsyy/ncm-api-rs) 以 path 依赖形式 vendored 进 `ncm-api-rs/`）
-- 播放：rodio + symphonia（mp3 / flac），后端为 ALSA 或 PipeWire
+- 播放：rodio + symphonia（mp3 / flac），后端为 PipeWire
 - 元数据与封面：image + qrcode
 - 图像渲染：ratatui-image + chafa
 - 可视化：外部 `cava`，以及内部 PCM 抽头驱动的示波器与 LUFS 计量

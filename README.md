@@ -49,7 +49,7 @@ Playback belongs to the host: streaming with a local cache, queue memory, privat
 - Search page: 50 results per request, appended as you scroll further
 - Private roam: refreshed daily while keeping the last played track at the head; reaching the end of the list fetches more (each API call returns 3 songs, three calls are merged and de-duplicated) and appends them; the tile cover follows the currently playing roam song, and the queue origin survives a restart
 - Navigation: Enter opens or plays, Esc / Left goes back, Tab / Down and Shift+Tab / Up move, PageUp / PageDown jump one page
-- Mouse: the wheel scrolls, a single click focuses, a double click activates (400 ms window); the collapsed player bar's previous / play-pause / next buttons and its progress bar are clickable
+- Mouse: the wheel scrolls, a single click focuses, a double click activates (400 ms window); the collapsed player bar's previous / play-pause / next, like and repeat-mode buttons and its progress bar are clickable
 
 ### Search syntax
 
@@ -95,7 +95,7 @@ Enabled by default (`small_window_display = false` turns it off). It applies to 
 | both dimensions too small | `Terminal too small` |
 
 Entering the mode closes the sidebar and any open overlay. Settings, the search box and the sidebar cannot be opened while it is active, and only quit, previous, next, play-pause, repeat mode, like (collapsed) and the small-window toggle key still respond.
-The flat player bar keeps its mouse targets (previous, play-pause, next, progress seek).
+The flat player bar keeps its mouse targets (previous, play-pause, next, like, repeat mode, progress seek).
 
 ### Interface
 
@@ -147,11 +147,11 @@ sudo apt install -y build-essential cmake pkg-config \
   libasound2-dev libchafa-dev libpipewire-0.3-dev libssl-dev libglib2.0-dev libclang-dev
 ```
 
-`libchafa-dev` must be chafa ≥ 1.8.0 (the image renderer probes it through `pkg-config`), and `libclang-dev` plus `libpipewire-0.3-dev` are needed because the PipeWire audio backend generates bindings at build time.
+`libchafa-dev` must be chafa ≥ 1.8.0 (the image renderer probes it through `pkg-config`), and `libclang-dev` plus `libpipewire-0.3-dev` are needed because the PipeWire audio backend generates bindings at build time. `libasound2-dev` is a build-time requirement only: `cpal` compiles its ALSA backend unconditionally on Linux, while playback itself goes through PipeWire.
 
 ### Requirements
 
-- Linux with ALSA or PipeWire for audio, and the chafa shared library at runtime
+- Linux with PipeWire for audio (the ALSA backend is deprecated), and the chafa shared library at runtime
 - An optional `cava` binary for the `bars` visualizer
 - A Nerd Font is strongly recommended: the UI uses icon glyphs in several places, and without such a font some icons may render as missing-glyph boxes
 
@@ -296,6 +296,7 @@ Search, playlist and artist pages:
 Settings modal:
 
 - `Up` / `Down` / `Tab` / `Shift+Tab` move, `Left` / `Right` / `Enter` change a value, `Esc` steps back
+- Mouse: the wheel moves the selection, a single click focuses a row and a double click activates it — except in the lyrics subpage, where a single click flips the switch
 - Keybind modal: `Enter` starts rebinding, `Esc` cancels it while waiting for input
 
 Fullscreen page:
@@ -305,7 +306,7 @@ Fullscreen page:
 - `T` opens the settings modal, `Ctrl+K` the keybind list, `About` is reachable from the settings modal
 - `E` opens the EQ modal; arrows move and adjust a band, `Alt+R` resets it, `Esc` / `E` closes it
 - `Up` / `Down` adjust the volume, `Left` / `Right` change track, `Space` plays or pauses, `M` cycles the repeat mode, `L` likes the song
-- `Ctrl+F` or `Esc` returns to the host; the mouse clicks the control buttons, the progress bar, the volume bar and the playlist rows
+- `Ctrl+F` or `Esc` returns to the host; the mouse clicks the control buttons, the progress bar, the volume bar (click, or press and drag), the like glyph and the playlist rows; an open overlay takes the wheel for row focus, and its rows focus on a single click and activate on a double click (the EQ modal sets a band on click)
 - If `small_window_display` is on and the terminal drops below 50 columns or 12 rows, the fullscreen page returns to the host by itself
 
 ## Notes
@@ -323,7 +324,7 @@ Fullscreen page:
 - TUI: ratatui + crossterm
 - Async and networking: compio + cyper
 - NetEase API client: `ncm-api` (vendored from [ncm-api-rs](https://github.com/imsyy/ncm-api-rs) into `ncm-api-rs/` as a path dependency)
-- Playback: rodio + symphonia (mp3 / flac) over ALSA or PipeWire
+- Playback: rodio + symphonia (mp3 / flac) over PipeWire
 - Metadata and artwork: image + qrcode
 - Image rendering: ratatui-image + chafa
 - Visualization: external `cava`, plus an internal PCM tap that feeds the oscilloscope and the LUFS meter
