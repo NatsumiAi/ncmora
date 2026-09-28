@@ -7398,6 +7398,10 @@ impl App {
 
         self.login = LoginState::default();
         self.search = SearchState::default();
+        // 登出同样要作废在途拉取：它们带着上一账号的 cookie 落地，会把已清空的
+        // 状态写回旧账号的数据（同 `apply_playlist_fetch` 的规则）。
+        self.playlist_fetch = None;
+        self.author_fetch = None;
         self.playlist = PlaylistState::default();
         self.author = AuthorState::default();
         self.home = HomeState::default();
