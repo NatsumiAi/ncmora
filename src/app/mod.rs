@@ -558,18 +558,13 @@ struct PlaylistFetchSlot {
 }
 
 /// 一次性生成歌单页 / 专辑页的整页行数据：文件名与磁盘缓存 key 都在这里做完，
-/// 之后每帧只查状态表（列表代或下载根目录变化时才重建）。
+/// 之后每帧只查状态表（列表代或下载根目录变化时才重建）。所有下载都直接落根目录。
 fn playlist_download_rows(
     tracks: &[PlaylistTrack],
     root: Option<&Path>,
-    album_folder: Option<&str>,
 ) -> Vec<Option<DownloadRow>> {
     let Some(root) = root else {
         return vec![None; tracks.len()];
-    };
-    let dir = match album_folder {
-        Some(album) => root.join(crate::app::download::album_folder_name(album)),
-        None => root.to_path_buf(),
     };
 
     tracks
@@ -580,7 +575,7 @@ fn playlist_download_rows(
             }
             let song_id = track.id.clone()?;
             let target = DownloadTarget {
-                dir: dir.clone(),
+                dir: root.to_path_buf(),
                 base: crate::app::download::download_file_stem(
                     &track.title,
                     &track.artist,
@@ -626,23 +621,21 @@ enum PlaylistPageKind {
     Album,
 }
 
-/// 下载路径行的行内编辑状态（光标按字符计数，横向窗口按显示宽度算）。
+/// 下载路径行的行内编辑状态（光标按字符计数，横向窗口按显示列算）。
 #[derive(Debug, Clone, Default)]
 pub struct DownloadPathEdit {
     pub buffer: String,
     pub cursor: usize,
+    /// 可见窗口左边界所在的显示列：只在光标撞到窗口边界时才挪动。
+    pub window_col: usize,
 }
 
-/// 一次下载的候选歌曲：UI 侧决定落点（专辑页子文件夹 / 封面）所需的全部信息。
+/// 一次下载的候选歌曲：UI 侧决定落点所需的全部信息。
 struct DownloadCandidate {
     song_id: String,
     title: String,
     artist: String,
     album: String,
-    /// 专辑页下载：子文件夹名（专辑名）。
-    album_folder: Option<String>,
-    /// 专辑页下载：额外落一张 `cover.*` 的封面地址。
-    album_cover_url: Option<String>,
 }
 
 impl PlaylistPageKind {
@@ -4164,8 +4157,6 @@ impl App {
                     title: track.title,
                     artist: track.artist,
                     album: track.album,
-                    album_folder: None,
-                    album_cover_url: None,
                 })
                 .unwrap_or(DownloadState::NotDownloaded),
             None => DownloadState::NotDownloaded,
@@ -4934,16 +4925,11 @@ impl App {
         if track.kind != PlaylistTrackKind::Song {
             return None;
         }
-        let album_page = self.playlist_page_kind == PlaylistPageKind::Album;
         Some(DownloadCandidate {
             song_id: track.id.clone()?,
             title: track.title.clone(),
             artist: track.artist.clone(),
             album: track.album.clone(),
-            album_folder: album_page.then(|| self.playlist.title.clone()),
-            album_cover_url: album_page
-                .then(|| self.playlist.cover.url.clone())
-                .flatten(),
         })
     }
 
@@ -4961,8 +4947,6 @@ impl App {
                 .unwrap_or_else(|| item.left_label.clone()),
             artist: item.artist.clone().unwrap_or_default(),
             album: item.album.clone().unwrap_or_default(),
-            album_folder: None,
-            album_cover_url: None,
         })
     }
 
@@ -4974,13 +4958,11 @@ impl App {
     /// 歌单页 / 专辑页的行内图标：每帧调一次；列表代与任务版本都不变时几乎零成本。
     pub(crate) fn refresh_playlist_downloads(&mut self) {
         let epoch = self.playlist.generation() ^ self.download_rows_epoch;
-        let album_folder = (self.playlist_page_kind == PlaylistPageKind::Album)
-            .then(|| self.playlist.title.clone());
         let root = self.download_root.clone();
         let tracks = &self.playlist.tracks;
         self.playlist_download_cache
             .refresh(epoch, &mut self.download_manager, || {
-                playlist_download_rows(tracks, root.as_deref(), album_folder.as_deref())
+                playlist_download_rows(tracks, root.as_deref())
             });
     }
 
@@ -5010,12 +4992,8 @@ impl App {
         candidate: &DownloadCandidate,
     ) -> Option<DownloadState> {
         let root = self.download_root.clone()?;
-        let dir = match candidate.album_folder.as_deref() {
-            Some(album) => root.join(crate::app::download::album_folder_name(album)),
-            None => root,
-        };
         let target = DownloadTarget {
-            dir,
+            dir: root,
             base: crate::app::download::download_file_stem(
                 &candidate.title,
                 &candidate.artist,
@@ -5051,8 +5029,6 @@ impl App {
             title: track.title,
             artist: track.artist,
             album: track.album,
-            album_folder: None,
-            album_cover_url: None,
         });
     }
 
@@ -5084,12 +5060,8 @@ impl App {
             return;
         };
 
-        let dir = match candidate.album_folder.as_deref() {
-            Some(album) => root.join(crate::app::download::album_folder_name(album)),
-            None => root,
-        };
         let target = DownloadTarget {
-            dir,
+            dir: root,
             base: crate::app::download::download_file_stem(
                 &candidate.title,
                 &candidate.artist,
@@ -5107,7 +5079,6 @@ impl App {
             artist: candidate.artist.clone(),
             album: candidate.album.clone(),
             target,
-            album_cover_url: candidate.album_cover_url.clone(),
         };
 
         let queued = self.download_manager.is_active();
@@ -6513,19 +6484,22 @@ impl App {
     }
 
     /// 进入路径行的行内编辑：以当前生效路径为初值，光标停在末尾。
+    ///
+    /// 填字面量 `Null` 回车 = 显式禁用下载；填绝对路径恢复。
     fn begin_download_path_edit(&mut self) {
         let current = self
             .download_root
             .as_ref()
             .map(|path| path.display().to_string())
-            .unwrap_or_default();
+            .unwrap_or_else(|| self.download_display_path());
         self.download_path_edit = Some(DownloadPathEdit {
             cursor: current.chars().count(),
             buffer: current,
+            window_col: 0,
         });
         self.set_runtime_status(self.lang_text(
-            "编辑下载路径：回车确认，Esc 取消",
-            "Editing download path: Enter confirms, Esc cancels",
+            "编辑下载路径：回车确认，Esc 取消（填 Null 禁用下载）",
+            "Editing download path: Enter confirms, Esc cancels (type Null to disable)",
         ));
     }
 
@@ -6584,14 +6558,24 @@ impl App {
         }
     }
 
-    /// 回车确认：非法（空 / 非绝对 / 不可写）就保留修改前的值，只写状态行。
+    /// 回车确认：`Null` = 显式禁用；非法（空 / 非绝对 / 不可写）保留修改前的值。
     fn commit_download_path_edit(&mut self) {
         let Some(edit) = self.download_path_edit.take() else {
             return;
         };
         let raw = edit.buffer.trim().to_string();
-        match crate::app::download::validate_download_path(&raw) {
-            Ok(path) => {
+        match crate::app::download::parse_download_path(&raw) {
+            Ok(crate::app::download::DownloadPathChoice::Disabled) => {
+                self.config.download_path =
+                    Some(crate::app::download::DOWNLOAD_PATH_NULL.to_string());
+                let _ = self.config.save();
+                self.refresh_download_root();
+                self.set_runtime_status(self.lang_text(
+                    "已禁用下载（路径填 Null）",
+                    "Downloads disabled (path is Null)",
+                ));
+            }
+            Ok(crate::app::download::DownloadPathChoice::Dir(path)) => {
                 self.config.download_path = Some(path.display().to_string());
                 let _ = self.config.save();
                 self.refresh_download_root();
@@ -7772,7 +7756,7 @@ impl App {
             && sync
                 .download_path
                 .as_deref()
-                .is_none_or(|raw| crate::app::download::validate_download_path(raw).is_ok())
+                .is_none_or(|raw| crate::app::download::parse_download_path(raw).is_ok())
         {
             self.config.download_path = sync.download_path.clone();
             changed = true;

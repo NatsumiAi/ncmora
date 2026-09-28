@@ -87,8 +87,7 @@ Artists and playlists are capped at the 5 most relevant hits and never paginate;
 - Three icon states: not downloaded (`ec74`), downloading (spinning `f1ce`), downloaded (`f00c`); pressing/clicking again cancels and removes the partial file
 - Exactly one download task exists: extra requests queue up and run in order
 - File name is `Title - Artist - Album.<mp3|flac>`, with tags written in: title, artists, album, track number, date, embedded cover and lyrics (Vorbis Comment for lossless, ID3v2 for mp3)
-- Downloads started on an album page go into a subfolder named after the album, which also gets the album cover as `cover.jpg`
-- The "Download Settings" page in the settings modal holds the download quality (same option set as playback quality, VIP-aware) and an absolute download path (Enter to confirm); "Restore Defaults" needs a second confirmation
+- The "Download Settings" page holds the download quality (same option set as playback quality, VIP-aware) and the download path: an absolute path enables downloads, the literal `Null` disables them (the other rows grey out and no download button is drawn); typing an absolute path back re-enables
 
 ### Visualization
 
@@ -228,7 +227,7 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 | `default_opening_title` | `""` | Replaces the ASCII banner on the login and loading pages; supports `\n` |
 | `audio_quality` | `exhigh` | `standard`, `higher`, `exhigh`, `lossless`, `hires`, `jyeffect`, `sky`, `dolby`, `jymaster`; clamped to `exhigh` without VIP |
 | `download_audio_quality` | `exhigh` | Download quality: same option set as `audio_quality`, VIP-aware as well |
-| `download_path` | unset | Download directory (absolute; defaults to `<music dir>/cnmplayer/`, falling back to `~/Music/cnmplayer/`) |
+| `download_path` | unset | Download directory (absolute; defaults to `<music dir>/cnmplayer/`, falling back to `~/Music/cnmplayer/`); the literal `Null` disables downloads |
 | `playback_memory` | `false` | Persist and restore the queue, index and repeat mode |
 | `eq_bands_db` | 10 × `0.0` | EQ gains in dB, edited from the fullscreen EQ modal |
 | `bar_number` | `auto` | `auto`, `16`, `32`, `48`, `64`, `80`, `96` (fullscreen spectrum) |

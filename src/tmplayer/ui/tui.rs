@@ -939,6 +939,7 @@ fn render_download_settings_modal(
     let accent2 = app.theme.color_accent2();
     let warning = app.theme.color_accent3();
     let buff = app.theme.color_buff();
+    let surface = app.theme.color_surface();
 
     let quality_label = match app.config.download_audio_quality {
         crate::tmplayer::data::config::AudioQuality::Standard => lang_text(app, "标准", "Standard"),
@@ -1000,13 +1001,27 @@ fn render_download_settings_modal(
                 let avail = usize::from(rows[1].width)
                     .saturating_sub(crate::ui::settings::display_width(&path_prefix) + 2)
                     .max(1);
-                match app.download_path_edit.as_ref() {
+                match app.download_path_edit.as_mut() {
                     Some(edit) if editing => {
-                        let (visible, caret) =
-                            crate::ui::settings::path_window(&edit.buffer, edit.cursor, avail);
-                        let edit_style = base_style.bg(buff);
-                        let mut spans: Vec<Span> =
-                            vec![Span::styled(format!("  {path_prefix}"), edit_style)];
+                        // 同主应用：只有路径值段落变底色；窗口只在光标撞边界时才滚。
+                        let caret_col =
+                            crate::ui::settings::caret_display_col(&edit.buffer, edit.cursor);
+                        edit.window_col = crate::ui::settings::adjust_path_window(
+                            edit.window_col,
+                            caret_col,
+                            avail,
+                        );
+                        let (visible, caret) = crate::ui::settings::path_window(
+                            &edit.buffer,
+                            edit.cursor,
+                            avail,
+                            edit.window_col,
+                        );
+                        let value_style = Style::default().fg(text_color).bg(buff);
+                        let mut spans: Vec<Span> = vec![Span::styled(
+                            format!("  {path_prefix}"),
+                            base_style.bg(surface),
+                        )];
                         let head: String = visible.chars().take(caret).collect();
                         let caret_char = visible
                             .chars()
@@ -1014,12 +1029,12 @@ fn render_download_settings_modal(
                             .map(|ch| ch.to_string())
                             .unwrap_or_else(|| " ".to_string());
                         let tail: String = visible.chars().skip(caret + 1).collect();
-                        spans.push(Span::styled(head, edit_style));
+                        spans.push(Span::styled(head, value_style));
                         spans.push(Span::styled(
                             caret_char,
-                            edit_style.add_modifier(Modifier::REVERSED),
+                            value_style.add_modifier(Modifier::REVERSED),
                         ));
-                        spans.push(Span::styled(tail, edit_style));
+                        spans.push(Span::styled(tail, value_style));
                         f.render_widget(
                             Paragraph::new(Line::from(spans)),
                             Rect {
@@ -2309,6 +2324,36 @@ mod tests {
         );
     }
 
+    /// 编辑态只有路径值段落换底色（标签保持 modal 底色）。
+    #[test]
+    fn download_path_edit_paints_only_the_value_area() {
+        let mut app = state(Overlay::DownloadSettingsModal);
+        app.download_root = Some(std::path::PathBuf::from("/tmp/cnmplayer"));
+        app.download_path_edit = Some(crate::app::DownloadPathEdit {
+            buffer: "/tmp/cnmplayer".to_string(),
+            cursor: 5,
+            window_col: 0,
+        });
+
+        let (rows, buf) = render_to_buffer_sized(80, 24, &mut app, |f, app, rows| {
+            render_download_settings_modal(f, f.area(), app, rows)
+        });
+
+        let path_row = rows.get(1).expect("路径行");
+        let label_x = path_row.x + 2;
+        let value_x = label_x + 10; // "下载路径" 4 个 CJK（8 列）+ ": "
+        let surface = app.theme.color_surface();
+        let buff = app.theme.color_buff();
+
+        let label_cell = &buf[(label_x, path_row.y)];
+        assert_eq!(label_cell.symbol(), "下");
+        assert_eq!(label_cell.style().bg, Some(surface), "标签不换底色");
+
+        let value_cell = &buf[(value_x, path_row.y)];
+        assert_eq!(value_cell.symbol(), "/");
+        assert_eq!(value_cell.style().bg, Some(buff), "路径值段落换底色");
+        assert_eq!(value_cell.style().fg, Some(app.theme.color_text()));
+    }
     /// 标题行右端实际渲染出来的三格：下载图标、空格、爱心（与命中格同源）。
     #[test]
     fn info_title_row_renders_download_then_gap_then_heart() {

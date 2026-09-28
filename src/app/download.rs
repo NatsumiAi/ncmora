@@ -5,7 +5,7 @@
 use crate::app::api::ApiState;
 use crate::data::config::AudioQuality;
 use crate::launch;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use compio::io::{AsyncWrite, AsyncWriteExt};
 use directories::{BaseDirs, UserDirs};
 use futures::StreamExt;
@@ -72,12 +72,24 @@ pub enum DownloadPathError {
     NotWritable,
 }
 
+/// 用户在设置里填的下载目录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadPathChoice {
+    /// 显式禁用下载（填的就是字面量 `Null`）。
+    Disabled,
+    /// 可写的绝对路径。
+    Dir(PathBuf),
+}
+
 /// 解析实际使用的下载目录。
 ///
-/// 优先级：用户自定义（写入前已校验）→ 系统音乐目录下的 `cnmplayer/`
+/// 优先级：用户自定义（`Null` = 显式禁用）→ 系统音乐目录下的 `cnmplayer/`
 /// → `~/Music/cnmplayer/` → `None`（下载整体禁用，UI 不显示下载入口）。
 pub fn resolve_download_root(custom: Option<&str>) -> Option<PathBuf> {
     if let Some(raw) = custom.map(str::trim).filter(|value| !value.is_empty()) {
+        if is_null_download_path(raw) {
+            return None;
+        }
         return Some(PathBuf::from(raw));
     }
 
@@ -88,11 +100,21 @@ pub fn resolve_download_root(custom: Option<&str>) -> Option<PathBuf> {
     BaseDirs::new().map(|dirs| dirs.home_dir().join("Music").join(DOWNLOAD_DIR_NAME))
 }
 
-/// 校验用户填写的下载目录：非空、绝对路径、能建出来且可写。
-pub fn validate_download_path(raw: &str) -> Result<PathBuf, DownloadPathError> {
+/// 填的是不是"禁用下载"的哨兵值（`Null`，忽略大小写与首尾空白）。
+pub fn is_null_download_path(raw: &str) -> bool {
+    raw.trim().eq_ignore_ascii_case(DOWNLOAD_PATH_NULL)
+}
+
+/// 解析并校验用户填写的下载目录：`Null` = 显式禁用；其余必须非空、
+/// 是绝对路径、能建出来且可写。
+pub fn parse_download_path(raw: &str) -> Result<DownloadPathChoice, DownloadPathError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(DownloadPathError::Empty);
+    }
+
+    if is_null_download_path(trimmed) {
+        return Ok(DownloadPathChoice::Disabled);
     }
 
     let path = PathBuf::from(trimmed);
@@ -104,7 +126,7 @@ pub fn validate_download_path(raw: &str) -> Result<PathBuf, DownloadPathError> {
         return Err(DownloadPathError::NotWritable);
     }
 
-    Ok(path)
+    Ok(DownloadPathChoice::Dir(path))
 }
 
 /// 目录可写性用一次真实的建/删探针判定：`create_dir_all` 在"目录已存在但只读"时也会成功。
@@ -179,12 +201,7 @@ pub fn download_file_stem(title: &str, artist: &str, album: &str) -> String {
     parts.join(" - ")
 }
 
-/// 专辑子文件夹名（与文件名用同一套清理规则）。
-pub fn album_folder_name(album: &str) -> String {
-    sanitize_component(album, "未知专辑")
-}
-
-/// 一次下载的目标位置：`dir`（已在专辑页场景下带上子文件夹）+ 文件名主干。
+/// 一次下载的目标位置：下载根目录 + 文件名主干（所有下载都直接落根目录）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadTarget {
     pub dir: PathBuf,
@@ -218,8 +235,6 @@ pub struct DownloadRequest {
     pub artist: String,
     pub album: String,
     pub target: DownloadTarget,
-    /// 专辑页下载：额外把专辑封面写成同目录的 `cover.<ext>`。
-    pub album_cover_url: Option<String>,
 }
 
 /// 任务结束的通知（由 `DownloadManager::poll` 交给 UI 写状态行）。
@@ -709,13 +724,6 @@ async fn download_task(
         return Err(TaskError::Cancelled);
     }
 
-    if let Some(url) = request.album_cover_url.as_deref() {
-        if let Err(err) = write_album_cover(api, url, &request.target.dir).await {
-            // 专辑封面失败只影响这一张图，不影响刚下好的音频。
-            log::warn!("album cover download failed: {err}");
-        }
-    }
-
     Ok(DownloadOutcome {
         path: final_path,
         level: source.level,
@@ -911,29 +919,6 @@ async fn fetch_lyrics(api: &ApiState, song_id: &str) -> Option<String> {
 }
 
 /// 专辑封面（专辑页下载时额外落一张 `cover.*`）。
-async fn write_album_cover(api: &ApiState, url: &str, dir: &Path) -> Result<()> {
-    let bytes = api.fetch_cover_bytes(url).await?;
-    if bytes.is_empty() {
-        bail!("empty cover bytes");
-    }
-    let ext = image_extension(&bytes);
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("create dir failed: {}", dir.display()))?;
-    let path = dir.join(format!("cover.{ext}"));
-    std::fs::write(&path, &bytes)
-        .with_context(|| format!("write cover failed: {}", path.display()))?;
-    Ok(())
-}
-
-/// 封面字节的扩展名（JPEG/PNG 魔数，其余按 jpg 处理）。
-fn image_extension(bytes: &[u8]) -> &'static str {
-    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-        "png"
-    } else {
-        "jpg"
-    }
-}
-
 /// `type` 字段归一化：只认 mp3/flac，其余（含空）按 mp3。
 fn normalize_extension(file_type: &str) -> &'static str {
     match file_type.trim().to_ascii_lowercase().as_str() {
@@ -1186,10 +1171,27 @@ mod tests {
 
     #[test]
     fn validate_rejects_relative_and_empty() {
-        assert_eq!(validate_download_path("  "), Err(DownloadPathError::Empty));
+        assert_eq!(parse_download_path("  "), Err(DownloadPathError::Empty));
         assert_eq!(
-            validate_download_path("relative/dir"),
+            parse_download_path("relative/dir"),
             Err(DownloadPathError::NotAbsolute)
         );
+    }
+
+    /// `Null` 是"显式禁用下载"的哨兵：解析成 Disabled，解析根目录得到 None。
+    #[test]
+    fn null_path_disables_downloads() {
+        assert_eq!(
+            parse_download_path("Null"),
+            Ok(DownloadPathChoice::Disabled)
+        );
+        assert_eq!(
+            parse_download_path("  null  "),
+            Ok(DownloadPathChoice::Disabled)
+        );
+        assert!(is_null_download_path("NULL"));
+        assert!(!is_null_download_path("Nullx"));
+        assert_eq!(resolve_download_root(Some("Null")), None);
+        assert_eq!(resolve_download_root(Some("null")), None);
     }
 }

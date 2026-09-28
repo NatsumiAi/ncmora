@@ -392,9 +392,9 @@ fn draw_download_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
     let accent2 = app.theme.color_accent2();
     let warning = app.theme.color_accent3();
     let buff = app.theme.color_buff();
+    let surface = app.theme.color_surface();
 
     let selected = app.settings_download_selected;
-    let editing = app.download_path_edit.is_some();
     let quality = audio_quality_label(app, app.config.download_audio_quality);
     let path_prefix = format!("{}: ", l(app, "下载路径", "Download Path"));
     let path_display = app.download_display_path();
@@ -404,7 +404,8 @@ fn draw_download_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
         l(app, "恢复默认", "Restore Defaults")
     };
 
-    let row_style = |idx: usize| -> Style {
+    // 三行的样式先算好（后面要可变借用 `download_path_edit`，不能再借 `app`）。
+    let row_styles: [Style; crate::app::SETTINGS_DOWNLOAD_ITEMS] = std::array::from_fn(|idx| {
         let disabled = !app.download_row_selectable(idx);
         if idx == selected {
             if disabled {
@@ -417,11 +418,11 @@ fn draw_download_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
         } else {
             Style::default().fg(text_color)
         }
-    };
+    });
 
     let mut lines: Vec<Line> = Vec::with_capacity(crate::app::SETTINGS_DOWNLOAD_ITEMS);
     for idx in 0..crate::app::SETTINGS_DOWNLOAD_ITEMS {
-        let style = row_style(idx);
+        let style = row_styles[idx];
         let spans: Vec<Span> = match idx {
             0 => vec![Span::styled(
                 format!("  {}: {}", l(app, "音质", "Audio Quality"), quality),
@@ -431,12 +432,15 @@ fn draw_download_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
                 let avail = usize::from(rows[1].width)
                     .saturating_sub(display_width(&path_prefix) + 2)
                     .max(1);
-                if let Some(edit) = app.download_path_edit.as_ref() {
-                    // 编辑态：整行 buff 底色，光标所在字符反显；超宽时按光标位置横向滚动。
-                    let (visible, caret) = path_window(&edit.buffer, edit.cursor, avail);
-                    let base = Style::default().fg(text_color).bg(buff);
-                    let mut spans = vec![Span::styled(format!("  {path_prefix}"), base)];
-                    let caret_style = base.add_modifier(Modifier::REVERSED);
+                if let Some(edit) = app.download_path_edit.as_mut() {
+                    // 编辑态：只有**路径值**这一段的底色变 buff（标签保持行样式），
+                    // 光标所在字符反显；窗口只在光标撞到边界时才横向滚动。
+                    let caret_col = caret_display_col(&edit.buffer, edit.cursor);
+                    edit.window_col = adjust_path_window(edit.window_col, caret_col, avail);
+                    let (visible, caret) =
+                        path_window(&edit.buffer, edit.cursor, avail, edit.window_col);
+                    let value_style = Style::default().fg(text_color).bg(buff);
+                    let caret_style = value_style.add_modifier(Modifier::REVERSED);
                     let head: String = visible.chars().take(caret).collect();
                     let caret_char = visible
                         .chars()
@@ -444,17 +448,15 @@ fn draw_download_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
                         .map(|ch| ch.to_string())
                         .unwrap_or_else(|| " ".to_string());
                     let tail: String = visible.chars().skip(caret + 1).collect();
-                    spans.push(Span::styled(head, base));
-                    spans.push(Span::styled(caret_char, caret_style));
-                    spans.push(Span::styled(tail, base));
-                    spans
+                    vec![
+                        // 标签保持 modal 底色（只有路径值段落换成 buff）。
+                        Span::styled(format!("  {path_prefix}"), style.bg(surface)),
+                        Span::styled(head, value_style),
+                        Span::styled(caret_char, caret_style),
+                        Span::styled(tail, value_style),
+                    ]
                 } else {
                     let clipped = clip_to_display_width(&path_display, avail);
-                    let style = if editing && idx == selected {
-                        style.bg(buff)
-                    } else {
-                        style
-                    };
                     vec![Span::styled(format!("  {path_prefix}{clipped}"), style)]
                 }
             }
@@ -496,11 +498,44 @@ fn draw_download_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
     }
 }
 
-/// 路径行的可见窗口：`(窗口串, 光标在窗口内的字符下标)`。
+/// 光标所在的显示列（按字符宽度累计）。
+pub(crate) fn caret_display_col(text: &str, cursor: usize) -> usize {
+    text.chars()
+        .take(cursor)
+        .map(|ch| ch.width().unwrap_or(0))
+        .sum()
+}
+
+/// 编辑态窗口的左边界：**只在光标撞到边界时**才挪动。
 ///
-/// 光标列超出窗口右边界时整体左移（贴着右边界显示），回到开头时窗口回到 0，
-/// 于是长路径也能靠左右键看到任意一段。
-pub(crate) fn path_window(text: &str, cursor: usize, width: usize) -> (String, usize) {
+/// 光标在窗口内 → 不动（文本不会跟着每一次光标移动一起滑）；
+/// 撞右边界 → 往右跳半屏（光标一次性跳很远时保证它落在窗口内）；
+/// 撞左边界 → 往左跳半屏，最多对齐到光标那一列。
+pub(crate) fn adjust_path_window(window: usize, caret_col: usize, width: usize) -> usize {
+    if width == 0 {
+        return 0;
+    }
+
+    let jump = (width / 2).max(1);
+    if caret_col < window {
+        // 撞左边界：往左跳半屏；一次性跳到很左边（Home/点击）时保证光标在窗口内。
+        window.saturating_sub(jump).min(caret_col)
+    } else if caret_col >= window + width {
+        (window + jump)
+            .min(caret_col)
+            .max(caret_col.saturating_sub(width - 1))
+    } else {
+        window
+    }
+}
+
+/// 路径行的可见窗口：`(窗口串, 光标在窗口内的字符下标)`；`start_col` 是窗口左边界的显示列。
+pub(crate) fn path_window(
+    text: &str,
+    cursor: usize,
+    width: usize,
+    start_col: usize,
+) -> (String, usize) {
     let chars: Vec<char> = text.chars().collect();
     let cursor = cursor.min(chars.len());
     if width == 0 {
@@ -508,9 +543,6 @@ pub(crate) fn path_window(text: &str, cursor: usize, width: usize) -> (String, u
     }
 
     let widths: Vec<usize> = chars.iter().map(|ch| ch.width().unwrap_or(0)).collect();
-    let caret_col: usize = widths[..cursor].iter().sum();
-    let start_col = caret_col.saturating_sub(width.saturating_sub(1));
-
     let mut out = String::new();
     let mut col = 0usize;
     let mut used = 0usize;
@@ -1229,6 +1261,55 @@ fn l<'a>(app: &App, zh: &'a str, en: &'a str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_window_only_scrolls_at_the_edges() {
+        // 窗口内：不动（文本不跟着每一次光标移动一起滑）。
+        assert_eq!(adjust_path_window(10, 15, 20), 10);
+        assert_eq!(adjust_path_window(0, 19, 20), 0);
+
+        // 撞右边界：往右跳半屏，光标留在窗口内。
+        let window = adjust_path_window(0, 20, 20);
+        assert_eq!(window, 10);
+        assert!(agent_in_window(20, window, 20));
+
+        // 一次性跳很远（End/点击）：光标仍落在窗口内。
+        let window = adjust_path_window(0, 200, 20);
+        assert!(agent_in_window(200, window, 20));
+
+        // 撞左边界：往左跳半屏，光标留在窗口内；跳到最左边时窗口回到 0。
+        assert_eq!(adjust_path_window(100, 95, 20), 90);
+        assert_eq!(adjust_path_window(100, 5, 20), 5);
+        assert_eq!(adjust_path_window(100, 0, 20), 0);
+
+        // 宽度 0 时不滚动。
+        assert_eq!(adjust_path_window(7, 0, 0), 0);
+    }
+
+    fn agent_in_window(caret_col: usize, window: usize, width: usize) -> bool {
+        caret_col >= window && caret_col < window + width
+    }
+
+    #[test]
+    fn caret_column_counts_wide_chars() {
+        // "/tmp/" 5 列；再接 "音乐" 各占两列。
+        assert_eq!(caret_display_col("/tmp/音乐", 5), 5);
+        assert_eq!(caret_display_col("/tmp/音乐", 6), 7);
+        assert_eq!(caret_display_col("/tmp/音乐", 7), 9);
+        assert_eq!(caret_display_col("/tmp/音乐", 0), 0);
+    }
+
+    /// 窗口串：从 `start_col` 起截断，光标下标按窗口内字符位置给出。
+    #[test]
+    fn path_window_slices_from_the_start_column() {
+        let (visible, caret) = path_window("abcdef", 6, 3, 2);
+        assert_eq!(visible, "cde");
+        assert_eq!(caret, visible.chars().count(), "光标在串尾时跟在最后");
+
+        let (visible, caret) = path_window("abcdef", 3, 3, 2);
+        assert_eq!(visible, "cde");
+        assert_eq!(caret, 1);
+    }
 
     /// 焦点条目必须始终落在可视窗口内——否则键盘选中的那一行点不到，
     /// 鼠标点的行也不是看到的那一行。

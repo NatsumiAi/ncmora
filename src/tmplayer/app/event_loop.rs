@@ -183,7 +183,7 @@ fn apply_host_config_sync(app: &mut AppState, config: HostConfigSync) {
         && config
             .download_path
             .as_deref()
-            .is_none_or(|raw| crate::app::download::validate_download_path(raw).is_ok())
+            .is_none_or(|raw| crate::app::download::parse_download_path(raw).is_ok())
     {
         app.config.download_path = config.download_path.clone();
     }
@@ -1686,16 +1686,17 @@ fn begin_download_path_edit(app: &mut AppState) {
         .download_root
         .as_ref()
         .map(|path| path.display().to_string())
-        .unwrap_or_default();
+        .unwrap_or_else(|| app.download_display_path());
     app.download_path_edit = Some(crate::app::DownloadPathEdit {
         cursor: current.chars().count(),
         buffer: current,
+        window_col: 0,
     });
     app.overlay = Overlay::DownloadPathEditModal;
     app.set_toast(crate::tmplayer::ui::tui::lang_text(
         app,
-        "编辑下载路径：回车确认，Esc 取消",
-        "Editing download path: Enter confirms, Esc cancels",
+        "编辑下载路径：回车确认，Esc 取消（填 Null 禁用下载）",
+        "Editing download path: Enter confirms, Esc cancels (type Null to disable)",
     ));
 }
 
@@ -1749,8 +1750,18 @@ async fn commit_download_path_edit(
     let raw = edit.buffer.trim().to_string();
     app.overlay = Overlay::DownloadSettingsModal;
 
-    match crate::app::download::validate_download_path(&raw) {
-        Ok(path) => {
+    match crate::app::download::parse_download_path(&raw) {
+        Ok(crate::app::download::DownloadPathChoice::Disabled) => {
+            app.config.download_path = Some(crate::app::download::DOWNLOAD_PATH_NULL.to_string());
+            save_and_sync_host_config(app, host_bridge).await;
+            app.refresh_download_root();
+            app.set_toast(crate::tmplayer::ui::tui::lang_text(
+                app,
+                "已禁用下载（路径填 Null）",
+                "Downloads disabled (path is Null)",
+            ));
+        }
+        Ok(crate::app::download::DownloadPathChoice::Dir(path)) => {
             app.config.download_path = Some(path.display().to_string());
             save_and_sync_host_config(app, host_bridge).await;
             app.refresh_download_root();
