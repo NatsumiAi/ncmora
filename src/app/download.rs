@@ -34,9 +34,12 @@ const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub const ICON_DOWNLOAD: char = '\u{ec74}';
 /// 已下载（Nerd Font `f00c`）。
 pub const ICON_DONE: char = '\u{f00c}';
-/// 下载中的旋转帧（Nerd Font 的旋转系字符；终端不能真的旋转单个字形，用四帧循环表达）。
-const SPINNER_FRAMES: [char; 4] = ['\u{f1ce}', '\u{f110}', '\u{f021}', '\u{f01e}'];
-const SPINNER_FRAME_MS: u128 = 160;
+/// 下载中的旋转帧：Braille 转轮（`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`）。
+const SPINNER_FRAMES: [char; 10] = [
+    '\u{280b}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}', '\u{2826}', '\u{2827}',
+    '\u{2807}', '\u{280f}',
+];
+const SPINNER_FRAME_MS: u128 = 100;
 
 /// 下载按钮/图标三态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -987,6 +990,19 @@ mod tests {
             ),
             SPINNER_FRAMES[1]
         );
+    }
+
+    /// 加载态是 Braille 转轮：每帧都是 Braille 块，且十帧互不相同。
+    #[test]
+    fn spinner_frames_are_braille_and_distinct() {
+        for frame in SPINNER_FRAMES {
+            assert!(
+                ('\u{2800}'..='\u{28ff}').contains(&frame),
+                "{frame:?} 不是 Braille 字符"
+            );
+        }
+        let unique: std::collections::HashSet<char> = SPINNER_FRAMES.iter().copied().collect();
+        assert_eq!(unique.len(), SPINNER_FRAMES.len());
     }
 
     #[test]
