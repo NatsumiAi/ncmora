@@ -33,12 +33,23 @@ pub fn core_rows_visible(l: &InfoPanelLayout) -> bool {
     l.meta.height >= 1 && l.progress.height >= 1 && l.volume.height >= 1 && l.controls.height >= 1
 }
 
-pub fn layout(area: Rect) -> InfoPanelLayout {
+/// 内容（封面、标题、进度、音量、控制）的宽度上限 = 窗口宽度的 1/3。
+///
+/// 边框不受影响：它仍按 `area` 铺满（「关闭」档位下 `area` 就是整个终端）。
+/// 收窄后整块内容在 `area` 内水平居中，各行矩形都由同一份 `inner` 派生，
+/// 命中区因此跟着一起收窄，不会留下"看得见点不到"的控件。
+pub fn layout(area: Rect, window_width: u16) -> InfoPanelLayout {
     // Keep borders outside and reserve an inner content area.
-    let inner = area.inner(ratatui::layout::Margin {
+    let mut inner = area.inner(ratatui::layout::Margin {
         horizontal: 2,
         vertical: 2,
     });
+
+    let max_inner_w = window_width / 3;
+    if inner.width > max_inner_w {
+        inner.width = max_inner_w;
+        inner.x = area.x + (area.width.saturating_sub(max_inner_w)) / 2;
+    }
 
     // Required rows in priority order (must survive resize as long as possible):
     // 1) metadata (3 lines) 2) progress 3) volume 4) controls
@@ -152,14 +163,14 @@ pub fn layout(area: Rect) -> InfoPanelLayout {
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
+pub fn render(f: &mut Frame, area: Rect, window_width: u16, app: &mut AppState) {
     let b = Block::default()
         .borders(Borders::ALL)
         .border_set(SOLID_BORDER)
         .style(Style::default().fg(app.theme.color_subtext()));
     f.render_widget(b, area);
 
-    let l = layout(area);
+    let l = layout(area, window_width);
 
     // cover (animated as a whole: content + border)
     if l.cover.width > 0 && l.cover.height > 0 {

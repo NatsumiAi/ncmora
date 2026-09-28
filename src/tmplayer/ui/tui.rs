@@ -189,7 +189,7 @@ impl Tui {
                 };
             }
 
-            let info_l = info_panel::layout(left);
+            let info_l = info_panel::layout(left, size.width);
             layout_out.info_progress = info_l.progress;
             layout_out.info_volume = info_l.volume;
             layout_out.info_controls = info_l.controls;
@@ -214,7 +214,7 @@ impl Tui {
             }
             f.render_widget(ratatui::widgets::Block::default().style(base_style), size);
 
-            info_panel::render(f, left, app);
+            info_panel::render(f, left, size.width, app);
             if show_right {
                 visual_panel::render(f, lyric_row, spectrum_row, app);
             }
