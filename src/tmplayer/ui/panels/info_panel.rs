@@ -68,6 +68,11 @@ pub fn artist_row_rect(meta: Rect, artist: &str) -> Rect {
     meta_text_rect(meta, META_ARTIST_ROW, artist)
 }
 
+/// 专辑行的命中矩形（meta 块第 3 行画出来的字符范围）。
+pub fn album_row_rect(meta: Rect, album: &str) -> Rect {
+    meta_text_rect(meta, META_ALBUM_ROW, album)
+}
+
 /// 内容（封面、标题、进度、音量、控制）的宽度上限 = 窗口宽度的 1/3。
 ///
 /// 边框不受影响：它仍按 `area` 铺满（「关闭」档位下 `area` 就是整个终端）。

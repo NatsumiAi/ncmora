@@ -6255,11 +6255,6 @@ impl App {
             return;
         };
 
-        self.set_runtime_status(
-            self.lang_text("正在解析作者", "Resolving the artist")
-                .to_string(),
-        );
-
         let (artist_id, _) = self.song_artist_album_ids(&song_id).await;
         let Some(artist_id) = artist_id else {
             self.set_runtime_status(self.lang_text(
@@ -6285,6 +6280,47 @@ impl App {
                 self.set_runtime_status(format!(
                     "{}: {err}",
                     self.lang_text("打开作者页失败", "Failed to open the artist page"),
+                ));
+            }
+        }
+    }
+
+    /// 全屏页点了专辑名：宿主按当前播放歌曲解析出专辑并打开专辑页（Esc 回首页）。
+    ///
+    /// 与作者页同理：全屏页只有专辑显示名，ID 取 `song/detail` 的 `al.id`。
+    pub async fn open_album_page_from_fullscreen(&mut self) {
+        let Some(song_id) = self.current_song_id() else {
+            self.set_runtime_status(
+                self.lang_text("当前没有正在播放的歌曲", "Nothing is playing right now"),
+            );
+            return;
+        };
+
+        let (_, album_id) = self.song_artist_album_ids(&song_id).await;
+        let Some(album_id) = album_id else {
+            self.set_runtime_status(self.lang_text(
+                "无法解析当前歌曲的专辑",
+                "Failed to resolve the album of the current song",
+            ));
+            return;
+        };
+
+        match self.load_album_detail(&album_id).await {
+            Ok(()) => {
+                self.playlist_section_return_snapshot = None;
+                // 从全屏页进来：Esc 回首页，而不是回上一次的来源页。
+                self.playlist_return_page = Page::Home;
+                self.page = Page::Playlist;
+                self.set_runtime_status(format!(
+                    "{} {}",
+                    self.lang_text("已打开专辑", "Opened album"),
+                    self.playlist.title
+                ));
+            }
+            Err(err) => {
+                self.set_runtime_status(format!(
+                    "{}: {err}",
+                    self.lang_text("打开专辑失败", "Failed to open the album"),
                 ));
             }
         }

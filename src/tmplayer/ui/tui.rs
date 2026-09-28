@@ -1851,6 +1851,15 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
         return Some(Action::OpenAuthorPage);
     }
 
+    // 专辑名贴 meta 块第 3 行左端，同样只算画出来的字符：点了打开专辑页。
+    if contains(
+        info_panel::album_row_rect(layout.info_meta, &app.player.track.album),
+        col,
+        row,
+    ) {
+        return Some(Action::OpenAlbumPage);
+    }
+
     if let Some(volume) = volume_at(layout, col, row) {
         return Some(Action::SetVolume(volume));
     }
@@ -2107,7 +2116,42 @@ mod tests {
         assert_eq!(hit_test(&layout, &app, 4, 6), Some(Action::OpenAuthorPage));
         assert_eq!(hit_test(&layout, &app, 5, 6), None, "作者行行尾空白不算");
         assert_eq!(hit_test(&layout, &app, 2, 5), None, "标题行不是作者行");
-        assert_eq!(hit_test(&layout, &app, 2, 7), None, "专辑行不打开作者页");
+        assert_ne!(
+            hit_test(&layout, &app, 2, 7),
+            Some(Action::OpenAuthorPage),
+            "专辑行不打开作者页"
+        );
+    }
+
+    /// 专辑名贴 meta 块第 3 行左端：同样只算画出来的字符。
+    #[test]
+    fn clicking_the_album_row_opens_the_album_page() {
+        let layout = UiLayout {
+            info_meta: rect(2, 5, 20, 3),
+            ..UiLayout::default()
+        };
+        let mut app = state(Overlay::None);
+        app.player.track.artist.clear();
+        app.player.track.album = "Album".to_string();
+
+        assert_eq!(hit_test(&layout, &app, 2, 7), Some(Action::OpenAlbumPage));
+        assert_eq!(hit_test(&layout, &app, 6, 7), Some(Action::OpenAlbumPage));
+        assert_eq!(hit_test(&layout, &app, 7, 7), None, "专辑行行尾空白不算");
+        assert_eq!(
+            hit_test(&layout, &app, 2, 6),
+            None,
+            "作者行走作者页（这里作者名为空），不是专辑页"
+        );
+
+        let two_rows = UiLayout {
+            info_meta: rect(2, 5, 20, 2),
+            ..UiLayout::default()
+        };
+        assert_eq!(
+            hit_test(&two_rows, &app, 2, 7),
+            None,
+            "meta 只有两行时专辑行没画"
+        );
     }
 
     /// 命中宽度按显示宽度算：中日韩名字一个字占两格。

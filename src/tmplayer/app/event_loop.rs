@@ -1282,6 +1282,13 @@ async fn handle_action(
                 app.set_toast("Author page is unavailable in standalone mode");
             }
         }
+        Action::OpenAlbumPage => {
+            if host_bridge.is_some() {
+                app.exit_request = Some(crate::tmplayer::FullscreenExit::BackToHostOpenAlbum);
+            } else {
+                app.set_toast("Album page is unavailable in standalone mode");
+            }
+        }
         Action::SeekToFraction(r) => {
             if let Some(bridge) = host_bridge.as_mut() {
                 (*bridge).seek_to_ratio(r);
