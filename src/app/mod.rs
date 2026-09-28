@@ -761,6 +761,29 @@ async fn fetch_album_page(
     })
 }
 
+/// 全屏页点专辑名要拉的东西：先 `song/detail` 解析出 `al.id`，再拉专辑页数据。
+///
+/// 与作者页同理：整段不借 `&mut App`，交给 `shot_and_share` 后台跑；
+/// 全屏页只有显示名，本机音频 / 无播放时解析不出来，错误写进占位页与状态行。
+async fn fetch_album_page_from_song(
+    api: ApiState,
+    language: Language,
+    song_id: String,
+) -> Result<PlaylistFetch, String> {
+    let refs = fetch_song_page_refs(api.clone(), &song_id).await;
+    let album_id = refs.album_id.ok_or_else(|| {
+        lang_text(
+            language,
+            "无法解析当前歌曲的专辑",
+            "Failed to resolve the album of the current song",
+        )
+        .to_string()
+    })?;
+
+    // 全屏页只有显示名，没有搜索结果那行的封面可以兜底。
+    fetch_album_page(api, language, album_id, None).await
+}
+
 fn shot_and_share<F>(fut: F) -> Shared<F>
 where
     F: Future + Sized + 'static,
@@ -6774,10 +6797,11 @@ impl App {
         self.author_fetch = Some(shot_and_share(fut));
     }
 
-    /// 全屏页点了专辑名：宿主按当前播放歌曲解析出专辑并打开专辑页（Esc 回首页）。
+    /// 全屏页点了专辑名：立即落占位专辑页 + 派发后台拉取，结果由 `App::tick_playlist_fetch`
+    /// 搬进来（宿主循环在这期间照常重绘、照常响应输入）。
     ///
     /// 与作者页同理：全屏页只有专辑显示名，ID 取 `song/detail` 的 `al.id`。
-    pub async fn open_album_page_from_fullscreen(&mut self) {
+    pub fn open_album_page_from_fullscreen(&mut self) {
         let Some(song_id) = self.current_song_id() else {
             self.set_runtime_status(
                 self.lang_text("当前没有正在播放的歌曲", "Nothing is playing right now"),
@@ -6785,42 +6809,36 @@ impl App {
             return;
         };
 
-        let refs = self.song_page_refs(&song_id).await;
-        let Some(album_id) = refs.album_id else {
-            self.set_runtime_status(self.lang_text(
-                "无法解析当前歌曲的专辑",
-                "Failed to resolve the album of the current song",
-            ));
-            return;
+        // 标题先显示正在播放的专辑名；解析失败时也只是把错误写进简介。
+        let title = {
+            let album = self
+                .now_playing
+                .as_ref()
+                .map(|track| track.album.trim().to_string())
+                .unwrap_or_default();
+            if album.is_empty() {
+                self.lang_text("专辑页", "Album Page").to_string()
+            } else {
+                album
+            }
         };
 
-        match self.load_album_detail(&album_id).await {
-            Ok(()) => {
-                self.playlist_section_return_snapshot = None;
-                // 从全屏页进来：Esc 回首页，而不是回上一次的来源页。
-                self.playlist_return_page = Page::Home;
-                self.page = Page::Playlist;
-                self.set_runtime_status(format!(
-                    "{} {}",
-                    self.lang_text("已打开专辑", "Opened album"),
-                    self.playlist.title
-                ));
-            }
-            Err(err) => {
-                self.set_runtime_status(format!(
-                    "{}: {err}",
-                    self.lang_text("打开专辑失败", "Failed to open the album"),
-                ));
-            }
-        }
-    }
+        self.playlist = PlaylistState::placeholder(
+            title,
+            self.lang_text("正在加载专辑…", "Loading album…")
+                .to_string(),
+        );
+        self.playlist_section_return_snapshot = None;
+        // 从全屏页进来：Esc 回首页，而不是回上一次的来源页。
+        self.playlist_return_page = Page::Home;
+        self.page = Page::Playlist;
 
-    /// 当前歌曲在 `song/detail` 里"点名字进页面"用得上的两样东西。
-    ///
-    /// 队列/搜索结果只带歌曲 ID 与拼好的显示名（曲目行没有 `ar`/`al` 的 ID），
-    /// 所以从全屏页点名字进页面时按需解析一次。
-    async fn song_page_refs(&mut self, song_id: &str) -> SongPageRefs {
-        fetch_song_page_refs(self.api.clone(), song_id).await
+        let fut = fetch_album_page_from_song(self.api.clone(), self.config.language, song_id);
+        let fut: PlaylistFetchTask = Box::pin(async move { Some(fut.await) });
+        self.playlist_fetch = Some(PlaylistFetchSlot {
+            kind: PlaylistPageKind::Album,
+            future: shot_and_share(fut),
+        });
     }
 
     pub fn fullscreen_config_snapshot(&self) -> crate::tmplayer::HostConfigSync {
