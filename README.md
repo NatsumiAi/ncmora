@@ -32,6 +32,9 @@ A single process carries two UIs:
 
 Playback belongs to the host: streaming with a local cache, queue memory, private roam, VIP-aware audio quality, and the visualizers (cava bars, a real-PCM oscilloscope, a LUFS VU meter) that the other UIs draw.
 
+> Read the [Disclaimer](#disclaimer) first: this is an unofficial client, music copyright belongs to the
+> rights holders, and the cache/download features are for personal offline use only — **no redistribution**.
+
 ## Main Features
 
 ### Account
@@ -367,6 +370,30 @@ Release (`release.yml`) triggers on a `v*` tag: it verifies that the tag matches
 
 - [TMPlayer](https://github.com/professor-lee/TMPlayer): the fullscreen playback UI, embedded into CNMPlayer
 - [ncm-api-rs](https://github.com/imsyy/ncm-api-rs): the NetEase Cloud Music API client vendored in `ncm-api-rs/`
+
+## Disclaimer
+
+> Short version: this is an unofficial client, music copyright belongs to the rights holders, and the
+> cache/download features are for personal offline use only — **redistribution is not allowed**.
+
+- **Unofficial project**: CNMPlayer is a third-party open-source client with no affiliation, authorization or
+  endorsement from NetEase Cloud Music or its affiliates. It talks to the service through `ncm-api-rs`
+  (a community-maintained, unofficial API client vendored in this repository) and makes no promise about
+  API availability or stability.
+- **Music copyright belongs to the rights holders**: all music, cover art, lyrics and metadata reached through
+  this software remain the property of their respective rights holders (labels, songwriters, performers).
+  This repository ships no music, and it neither hosts, proxies nor redistributes any audio.
+- **Personal use only**: the streaming cache and the download feature are meant for the user's own study,
+  research and offline listening; downloaded files stay on the user's machine.
+- **No redistribution**: you must not use any content obtained through this software (including downloaded
+  files and the covers/lyrics embedded in them) for commercial purposes, public performance, redistribution
+  or re-upload — for example to cloud drives, video platforms, other music services, or shared archives.
+  Such use may infringe the rights holders' rights, and the risk and consequences are the user's own.
+- **Account risk is yours**: third-party clients may violate the platform's terms of service (rate limits,
+  bans). Please assess and accept that risk yourself.
+- **Liability**: the project is provided "as is" (see the warranty disclaimer in [LICENSE](LICENSE)) and
+  accepts no liability for the consequences of use. If a rights holder believes this project or its
+  documentation infringes, please open an issue and we will remove or amend the relevant content.
 
 ## License
 
