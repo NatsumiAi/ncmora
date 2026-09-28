@@ -1,6 +1,6 @@
 [package]
 name = "cnmplayer"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 
 [features]
@@ -23,6 +23,7 @@ futures = "0.3"
 ncm-api = { path = "./ncm-api-rs" }
 qrcode = "0.14"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+parking_lot = "0.12"
 cyper = { version = "0.9", features = ["json", "cookies", "stream", "http2"] }
 compio = { version = "0.19", features = ["macros", "time"] }
 http = "1.4"

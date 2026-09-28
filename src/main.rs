@@ -412,20 +412,31 @@ async fn launch_tmplayer_fullscreen(
 
     let config = app.config.clone();
     let mut bridge = AppFullscreenBridge { app };
-    let status_text = match tmplayer::run_fullscreen(&config, bootstrap, Some(&mut bridge)).await {
-        Ok(tmplayer::FullscreenExit::BackToHost) => String::new(),
-        Ok(tmplayer::FullscreenExit::BackToHostOpenSettings) => {
-            bridge.app.open_settings_from_fullscreen();
-            String::new()
-        }
-        Err(err) => format!("TMPlayer 运行失败: {}", err),
-    };
+    let (exit, status_text) =
+        match tmplayer::run_fullscreen(&config, bootstrap, Some(&mut bridge)).await {
+            Ok(exit) => (Some(exit), String::new()),
+            Err(err) => (None, format!("TMPlayer 运行失败: {}", err)),
+        };
 
     *terminal = init_terminal()?;
     app.resume_main_cava_after_fullscreen();
     play_fullscreen_transition(terminal, app, false).await?;
     if !status_text.is_empty() {
         app.set_runtime_status(status_text);
+    }
+
+    // 全屏页里的点击交给宿主接着做：宿主在自己的页面上打开对应页面。
+    match exit {
+        Some(tmplayer::FullscreenExit::BackToHostOpenSettings) => {
+            app.open_settings_from_fullscreen()
+        }
+        Some(tmplayer::FullscreenExit::BackToHostOpenAuthor(index)) => {
+            app.open_author_page_from_fullscreen(index)
+        }
+        Some(tmplayer::FullscreenExit::BackToHostOpenAlbum) => {
+            app.open_album_page_from_fullscreen()
+        }
+        Some(tmplayer::FullscreenExit::BackToHost) | None => {}
     }
     Ok(())
 }

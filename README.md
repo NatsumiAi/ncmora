@@ -46,23 +46,27 @@ Playback belongs to the host: streaming with a local cache, queue memory, privat
 - Home sidebar (toggle keybind, default `P`): your created and collected playlists, up to 100 each; `Ctrl+Up/Down` switches section, Enter opens, Esc collapses; the wheel scrolls the section under the cursor (stopping at either end), a click focuses and a double click opens
 - Playlist page — also used for albums, there is no separate album page; a header (cover, title, author, description, track count) above a virtualized track list
 - Artist page: avatar, name, hot-song / album / EP / single counts and a tile grid per section
-- Search page: 50 results per request, appended as you scroll further
+- Search page: a plain keyword searches artists, playlists and songs at once (artists and playlists show the 5 most relevant hits each, above separate rules); songs are requested 50 at a time and appended as you scroll further
 - Private roam: refreshed daily while keeping the last played track at the head; reaching the end of the list fetches more (each API call returns 3 songs, three calls are merged and de-duplicated) and appends them; the tile cover follows the currently playing roam song, and the queue origin survives a restart
 - Navigation: Enter opens or plays, Esc / Left goes back, Tab / Down and Shift+Tab / Up move, PageUp / PageDown jump one page
 - Mouse: the wheel scrolls, a single click focuses, a double click activates (400 ms window); the collapsed player bar's previous / play-pause / next, like and repeat-mode buttons and its progress bar are clickable
 
 ### Search syntax
 
-The search box (`Ctrl+S`) takes a trailing suffix; without one the search behaves like `@single`.
+The search box (`Ctrl+S`) searches artists, playlists and songs at once; a trailing suffix narrows it to one type.
+Results are stacked as artist cards (avatar + name) → rule → playlists → rule → songs; the rules are visual only and scrolling runs through the whole list.
 `@author` and `@artist` are synonyms, and an empty keyword with `@author` lists the artists you follow.
 
 | Query | Results | Enter |
 | --- | --- | --- |
-| `keyword`, `keyword@single` | songs | plays the song, queueing the result set from that row |
+| `keyword` | most relevant artists, playlists and songs | depends on the focused row: play the song, open the artist or the playlist |
+| `keyword@single` | songs | plays the song, queueing the result set from that row |
 | `keyword@album` | albums | opens the album in the playlist layout |
 | `keyword@list` | playlists | opens the playlist |
 | `keyword@author` / `keyword@artist` | artists | opens the artist page |
 | `@author` (no keyword) | followed artists | opens the artist page |
+
+Artists and playlists are capped at the 5 most relevant hits and never paginate; only the song section appends more when you scroll to the end.
 
 ### Playback
 
@@ -77,10 +81,12 @@ The search box (`Ctrl+S`) takes a trailing suffix; without one the search behave
 
 ### Visualization
 
+- `hidden` (shown as "Off" in settings) — the whole right-hand side of the fullscreen page is collapsed: neither a visualizer nor the lyrics are drawn, and the song info panel stretches across the full terminal width (its border spans the full width, while the content inside is capped at 1/3 of the window and centred).
+- `lyrics` (shown as "Lyrics") — the right-hand side only shows the lyrics; no visualizer is drawn. The old `off` value still selects this mode.
 - `bars` — cava spectrum bars. Requires the external `cava` binary.
 - `oscilloscope` — a real PCM waveform tapped from the playback chain: rising-edge trigger, min/max peak extraction per sub-column and absolute amplitude mapping, so quiet passages hug the centre line and loud ones fill the panel. It does **not** need cava.
 - If cava is missing, the default becomes `oscilloscope` and cycling the setting skips `bars` instead of failing.
-- The collapsed player bar always draws a 10-cell braille mini spectrum; the narrow small window draws a stereo VU meter driven by a 400 ms momentary LUFS meter (display range −60…0 LUFS).
+- The collapsed player bar draws a 10-cell braille mini spectrum from cava; that spot stays blank in `lyrics` and `hidden` because cava is not started there. The narrow small window draws a stereo VU meter driven by a 400 ms momentary LUFS meter (display range −60…0 LUFS).
 
 ### Small window mode
 
@@ -196,7 +202,7 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 | --- | --- | --- |
 | `theme` | `frappe` | `system`, `latte`, `frappe`, `macchiato`, `mocha` |
 | `language` | `zh` | `zh`, `en` |
-| `visualize` | cava present → `bars`, otherwise `oscilloscope` | `off`, `bars`, `oscilloscope`; only `bars` needs cava |
+| `visualize` | cava present → `bars`, otherwise `oscilloscope` | `hidden` (shown as "Off" in settings), `lyrics` ("Lyrics"; the old `off` means the same), `bars`, `oscilloscope`; only `bars` needs cava |
 | `graphics_protocol` | `halfblocks` | `off`, `halfblocks`; `off` draws covers as ASCII art |
 | `transparent_background` | `true` | Use the terminal background |
 | `album_border` | `true` | Border around the fullscreen cover |
@@ -306,7 +312,7 @@ Fullscreen page:
 - `T` opens the settings modal, `Ctrl+K` the keybind list, `About` is reachable from the settings modal
 - `E` opens the EQ modal; arrows move and adjust a band, `Alt+R` resets it, `Esc` / `E` closes it
 - `Up` / `Down` adjust the volume, `Left` / `Right` change track, `Space` plays or pauses, `M` cycles the repeat mode, `L` likes the song
-- `Ctrl+F` or `Esc` returns to the host; the mouse clicks the control buttons, the progress bar, the volume bar (click, or press and drag), the like glyph and the playlist rows; an open overlay takes the wheel for row focus, and its rows focus on a single click and activate on a double click (the EQ modal sets a band on click)
+- `Ctrl+F` or `Esc` returns to the host; the mouse clicks the control buttons, the progress bar, the volume bar (click, or press and drag), the like glyph and the playlist rows; clicking an artist name (each name of a multi-artist line is its own target) or the album name leaves the fullscreen page for that artist's or album's page in the host; an open overlay takes the wheel for row focus, and its rows focus on a single click and activate on a double click (the EQ modal sets a band on click)
 - If `small_window_display` is on and the terminal drops below 50 columns or 12 rows, the fullscreen page returns to the host by itself
 
 ## Notes

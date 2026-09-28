@@ -52,6 +52,10 @@ pub struct FullscreenBootstrap {
 pub enum FullscreenExit {
     BackToHost,
     BackToHostOpenSettings,
+    /// 全屏页里点了作者名：宿主退出后打开该作者页（附带显示串里的段序号）。
+    BackToHostOpenAuthor(usize),
+    /// 全屏页里点了专辑名：宿主退出后打开该专辑页。
+    BackToHostOpenAlbum,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

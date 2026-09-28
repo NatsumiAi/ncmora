@@ -664,10 +664,12 @@ pub async fn run(
     tui.exit()?;
     disable_raw_mode()?;
 
-    let exit = if app.request_host_settings_open {
-        crate::tmplayer::FullscreenExit::BackToHostOpenSettings
-    } else {
-        crate::tmplayer::FullscreenExit::BackToHost
+    let exit = match app.exit_request {
+        Some(exit) => exit,
+        None if app.request_host_settings_open => {
+            crate::tmplayer::FullscreenExit::BackToHostOpenSettings
+        }
+        None => crate::tmplayer::FullscreenExit::BackToHost,
     };
     Ok(exit)
 }
@@ -1270,6 +1272,23 @@ async fn handle_action(
             }
 
             app.set_toast("Like is unavailable in local mode");
+        }
+        Action::OpenAuthorPage(index) => {
+            // 作者页归宿主（全屏页只有显示名，没有作者 ID）：记下请求退出与段序号，
+            // 宿主在关闭全屏页后按当前播放歌曲解析并打开。
+            if host_bridge.is_some() {
+                app.exit_request =
+                    Some(crate::tmplayer::FullscreenExit::BackToHostOpenAuthor(index));
+            } else {
+                app.set_toast("Author page is unavailable in standalone mode");
+            }
+        }
+        Action::OpenAlbumPage => {
+            if host_bridge.is_some() {
+                app.exit_request = Some(crate::tmplayer::FullscreenExit::BackToHostOpenAlbum);
+            } else {
+                app.set_toast("Album page is unavailable in standalone mode");
+            }
         }
         Action::SeekToFraction(r) => {
             if let Some(bridge) = host_bridge.as_mut() {

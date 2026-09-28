@@ -88,6 +88,12 @@ impl Tui {
             self.should_quit = true;
         }
 
+        // 点击作者名/专辑名这类"退出后交给宿主"的请求：请求一旦写下就退出。
+        // 退出判定只在 draw 里做一次，避免每条事件分支各自记一遍。
+        if app.exit_request.is_some() {
+            self.should_quit = true;
+        }
+
         let mut layout_out = UiLayout::default();
 
         // 小窗口显示开启时，全屏页过小不再显示提示，而是直接请求退出回主程序。
@@ -139,42 +145,57 @@ impl Tui {
                 Rect::default()
             };
 
-            let cols = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(33), Constraint::Percentage(67)])
-                .split(content_area);
-            layout_out.left = cols[0];
-            layout_out.right = cols[1];
-            layout_out.left_width = cols[0].width;
-
-            // right: lyrics (10%) + spectrum (rest)
-            let lyric_h = ((cols[1].height as f32) * 0.10).round() as u16;
-            let lyric_h = lyric_h.clamp(3, cols[1].height.saturating_sub(6));
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(lyric_h), Constraint::Min(1)])
-                .split(cols[1]);
-
-            // Mirror visual panel inner layout for auto bar count.
-            let outer = Rect {
-                x: rows[0].x,
-                y: rows[0].y,
-                width: rows[0].width,
-                height: rows[0].height.saturating_add(rows[1].height),
+            // 「关闭」档位把右侧区（可视化 + 歌词）整块收起，歌曲信息区独占整宽。
+            let show_right =
+                app.config.visualize != crate::tmplayer::data::config::VisualizeMode::Hidden;
+            let (left, right) = if show_right {
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(33), Constraint::Percentage(67)])
+                    .split(content_area);
+                (cols[0], cols[1])
+            } else {
+                (content_area, Rect::default())
             };
-            let inner = outer.inner(ratatui::layout::Margin {
-                horizontal: 1,
-                vertical: 1,
-            });
-            let lyric_h_inner = rows[0].height.saturating_sub(2).min(inner.height);
-            layout_out.spectrum_rect = Rect {
-                x: inner.x,
-                y: inner.y + lyric_h_inner,
-                width: inner.width,
-                height: inner.height.saturating_sub(lyric_h_inner),
-            };
+            layout_out.left = left;
+            layout_out.right = right;
+            layout_out.left_width = left.width;
 
-            let info_l = info_panel::layout(cols[0]);
+            // 右栏的两行（歌词 / 可视化）；收起时保持零矩形。
+            let mut lyric_row = Rect::default();
+            let mut spectrum_row = Rect::default();
+            if show_right {
+                // right: lyrics (10%) + spectrum (rest)
+                let lyric_h = ((right.height as f32) * 0.10).round() as u16;
+                let lyric_h = lyric_h.clamp(3, right.height.saturating_sub(6));
+                let rows = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(lyric_h), Constraint::Min(1)])
+                    .split(right);
+                lyric_row = rows[0];
+                spectrum_row = rows[1];
+
+                // Mirror visual panel inner layout for auto bar count.
+                let outer = Rect {
+                    x: rows[0].x,
+                    y: rows[0].y,
+                    width: rows[0].width,
+                    height: rows[0].height.saturating_add(rows[1].height),
+                };
+                let inner = outer.inner(ratatui::layout::Margin {
+                    horizontal: 1,
+                    vertical: 1,
+                });
+                let lyric_h_inner = rows[0].height.saturating_sub(2).min(inner.height);
+                layout_out.spectrum_rect = Rect {
+                    x: inner.x,
+                    y: inner.y + lyric_h_inner,
+                    width: inner.width,
+                    height: inner.height.saturating_sub(lyric_h_inner),
+                };
+            }
+
+            let info_l = info_panel::layout(left, size.width);
             layout_out.info_progress = info_l.progress;
             layout_out.info_volume = info_l.volume;
             layout_out.info_controls = info_l.controls;
@@ -199,8 +220,10 @@ impl Tui {
             }
             f.render_widget(ratatui::widgets::Block::default().style(base_style), size);
 
-            info_panel::render(f, cols[0], app);
-            visual_panel::render(f, rows[0], rows[1], app);
+            info_panel::render(f, left, size.width, app);
+            if show_right {
+                visual_panel::render(f, lyric_row, spectrum_row, app);
+            }
 
             // playlist overlay slides in/out over left
             if app.overlay == Overlay::Playlist
@@ -211,14 +234,14 @@ impl Tui {
 
                 // 动画推进在 AppState::tick 里完成，渲染只读取当前进度。
                 // Slide effect via visible width growth/shrink (x stays at left edge)
-                let full_w = cols[0].width as i16;
+                let full_w = left.width as i16;
                 let visible_w = (full_w + app.playlist_slide_x).clamp(0, full_w) as u16;
                 if visible_w > 0 {
                     let r = Rect {
-                        x: cols[0].x,
-                        y: cols[0].y,
+                        x: left.x,
+                        y: left.y,
                         width: visible_w,
-                        height: cols[0].height,
+                        height: left.height,
                     };
                     layout_out.playlist_rect = r;
 
@@ -691,7 +714,10 @@ fn render_bar_settings_modal(
             "{}: {}",
             lang_text(app, "可视化", "Visualization"),
             match app.config.visualize {
-                crate::tmplayer::data::config::VisualizeMode::Off => lang_text(app, "关闭", "Off"),
+                crate::tmplayer::data::config::VisualizeMode::Lyrics =>
+                    lang_text(app, "仅歌词", "Lyrics"),
+                crate::tmplayer::data::config::VisualizeMode::Hidden =>
+                    lang_text(app, "关闭", "Off"),
                 crate::tmplayer::data::config::VisualizeMode::Bars =>
                     lang_text(app, "频谱", "Bars"),
                 crate::tmplayer::data::config::VisualizeMode::Oscilloscope => {
@@ -1815,6 +1841,37 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
         }
     }
 
+    // 歌单浮层（含滑出动画）画在信息区之上：它盖住的那几行不再是"看得见的名字"，
+    // 命中区按空名字处理（空名字本就不返回命中区），以免点在可见的歌单行上被判成
+    // "点作者名/专辑名"而退出全屏页。浮层自己的行命中在下面按绘制顺序判定。
+    let covered_by_playlist_panel =
+        !layout.playlist_rect.is_empty() && contains(layout.playlist_rect, col, row);
+    let (artist_hit, album_hit) = if covered_by_playlist_panel {
+        ("", "")
+    } else {
+        (
+            app.player.track.artist.as_str(),
+            app.player.track.album.as_str(),
+        )
+    };
+
+    // 作者名贴 meta 块第 2 行左端，多作者按字符位置分段（"A / B" 点谁的名字进谁）：
+    // 只有名字画出来的那几格可点，连接符与行尾空白都不算。
+    for (index, rect) in info_panel::artist_row_hits(layout.info_meta, artist_hit) {
+        if contains(rect, col, row) {
+            return Some(Action::OpenAuthorPage(index));
+        }
+    }
+
+    // 专辑名贴 meta 块第 3 行左端，同样只算画出来的字符：点了打开专辑页。
+    if contains(
+        info_panel::album_row_rect(layout.info_meta, album_hit),
+        col,
+        row,
+    ) {
+        return Some(Action::OpenAlbumPage);
+    }
+
     if let Some(volume) = volume_at(layout, col, row) {
         return Some(Action::SetVolume(volume));
     }
@@ -2054,6 +2111,200 @@ mod tests {
             hit_test(&layout, &app, 2 + 20 - 1, 6),
             None,
             "专辑行没有爱心"
+        );
+    }
+
+    /// 作者名贴 meta 块第 2 行左端：只有名字画出来的那几格可点，行尾空白不算。
+    #[test]
+    fn clicking_the_artist_row_opens_the_author_page() {
+        let layout = UiLayout {
+            info_meta: rect(2, 5, 20, 3),
+            ..UiLayout::default()
+        };
+        let mut app = state(Overlay::None);
+        app.player.track.artist = "Jay".to_string();
+
+        assert_eq!(
+            hit_test(&layout, &app, 2, 6),
+            Some(Action::OpenAuthorPage(0))
+        );
+        assert_eq!(
+            hit_test(&layout, &app, 4, 6),
+            Some(Action::OpenAuthorPage(0))
+        );
+        assert_eq!(hit_test(&layout, &app, 5, 6), None, "作者行行尾空白不算");
+        assert_eq!(hit_test(&layout, &app, 2, 5), None, "标题行不是作者行");
+        assert_ne!(
+            hit_test(&layout, &app, 2, 7),
+            Some(Action::OpenAuthorPage(0)),
+            "专辑行不打开作者页"
+        );
+    }
+
+    /// 多作者（"A / B"）：按字符位置分段，点谁的名字进谁的页面，连接符不算。
+    #[test]
+    fn clicking_each_artist_segment_opens_that_artist() {
+        let layout = UiLayout {
+            info_meta: rect(2, 5, 20, 3),
+            ..UiLayout::default()
+        };
+        let mut app = state(Overlay::None);
+        app.player.track.artist = "Caffeine / 初音ミク".to_string();
+
+        // 行首在 x=2："Caffeine" 占 2..=9，" / " 占 10..=12，"初音ミク" 占 13..=20。
+        assert_eq!(
+            hit_test(&layout, &app, 2, 6),
+            Some(Action::OpenAuthorPage(0))
+        );
+        assert_eq!(
+            hit_test(&layout, &app, 9, 6),
+            Some(Action::OpenAuthorPage(0))
+        );
+        assert_eq!(hit_test(&layout, &app, 10, 6), None, "连接符不是作者名");
+        assert_eq!(hit_test(&layout, &app, 12, 6), None, "连接符不是作者名");
+        assert_eq!(
+            hit_test(&layout, &app, 13, 6),
+            Some(Action::OpenAuthorPage(1))
+        );
+        assert_eq!(
+            hit_test(&layout, &app, 20, 6),
+            Some(Action::OpenAuthorPage(1))
+        );
+        assert_eq!(hit_test(&layout, &app, 21, 6), None, "第二个名字画完了");
+
+        // 行宽不足以放下整段时，只算画出来的那几格（"初" 两格，"音" 放不下）。
+        let narrow = UiLayout {
+            info_meta: rect(0, 0, 13, 3),
+            ..UiLayout::default()
+        };
+        assert_eq!(
+            hit_test(&narrow, &app, 12, 1),
+            Some(Action::OpenAuthorPage(1))
+        );
+        assert_eq!(hit_test(&narrow, &app, 13, 1), None, "meta 只有 13 格");
+    }
+
+    /// 专辑名贴 meta 块第 3 行左端：同样只算画出来的字符。
+    #[test]
+    fn clicking_the_album_row_opens_the_album_page() {
+        let layout = UiLayout {
+            info_meta: rect(2, 5, 20, 3),
+            ..UiLayout::default()
+        };
+        let mut app = state(Overlay::None);
+        app.player.track.artist.clear();
+        app.player.track.album = "Album".to_string();
+
+        assert_eq!(hit_test(&layout, &app, 2, 7), Some(Action::OpenAlbumPage));
+        assert_eq!(hit_test(&layout, &app, 6, 7), Some(Action::OpenAlbumPage));
+        assert_eq!(hit_test(&layout, &app, 7, 7), None, "专辑行行尾空白不算");
+        assert_eq!(
+            hit_test(&layout, &app, 2, 6),
+            None,
+            "作者行走作者页（这里作者名为空），不是专辑页"
+        );
+
+        let two_rows = UiLayout {
+            info_meta: rect(2, 5, 20, 2),
+            ..UiLayout::default()
+        };
+        assert_eq!(
+            hit_test(&two_rows, &app, 2, 7),
+            None,
+            "meta 只有两行时专辑行没画"
+        );
+    }
+
+    #[test]
+    fn playlist_panel_takes_the_clicks_over_the_names_it_covers() {
+        // 浮层整块盖住左栏（无封面时列表内区就是整条左栏）：它的行命中排在最后，
+        // 但被它盖住的作者名/专辑名必须让位，否则点在可见的歌单行上会退出全屏页。
+        let mut app = state(Overlay::Playlist);
+        app.player.track.artist = "Jay".to_string();
+        app.player.track.album = "Fantasy".to_string();
+        app.playlist_list_scroll = 0;
+        app.playlist_list_rows = 10;
+        let layout = UiLayout {
+            info_meta: rect(2, 5, 20, 3),
+            playlist_rect: rect(0, 4, 24, 12),
+            playlist_list_inner: rect(1, 5, 22, 10),
+            ..UiLayout::default()
+        };
+
+        assert_eq!(
+            hit_test(&layout, &app, 2, 6),
+            Some(Action::PlaylistSelect(1))
+        );
+        assert_eq!(
+            hit_test(&layout, &app, 2, 7),
+            Some(Action::PlaylistSelect(2))
+        );
+
+        // 浮层收起（滑出动画结束）后名字重新可点：命中区只看实际绘制的那块矩形。
+        let uncovered = UiLayout {
+            info_meta: rect(2, 5, 20, 3),
+            ..UiLayout::default()
+        };
+        assert_eq!(
+            hit_test(&uncovered, &app, 2, 6),
+            Some(Action::OpenAuthorPage(0))
+        );
+        assert_eq!(
+            hit_test(&uncovered, &app, 2, 7),
+            Some(Action::OpenAlbumPage)
+        );
+    }
+
+    /// 命中宽度按显示宽度算：中日韩名字一个字占两格。
+    #[test]
+    fn artist_hit_region_uses_display_width() {
+        let layout = UiLayout {
+            info_meta: rect(0, 0, 10, 3),
+            ..UiLayout::default()
+        };
+        let mut app = state(Overlay::None);
+        app.player.track.artist = "周杰伦".to_string();
+
+        assert_eq!(
+            hit_test(&layout, &app, 5, 1),
+            Some(Action::OpenAuthorPage(0))
+        );
+        assert_eq!(hit_test(&layout, &app, 6, 1), None, "名字只有 6 格宽");
+    }
+
+    /// 作者行没画出来（meta 不够高 / 名字为空）时不登记命中区。
+    #[test]
+    fn artist_hit_region_is_absent_when_the_row_is_not_drawn() {
+        let mut app = state(Overlay::None);
+        app.player.track.artist = "Jay".to_string();
+
+        let one_row = UiLayout {
+            info_meta: rect(2, 5, 20, 1),
+            ..UiLayout::default()
+        };
+        assert_eq!(hit_test(&one_row, &app, 2, 6), None, "只有标题行");
+
+        let three_rows = UiLayout {
+            info_meta: rect(2, 5, 20, 3),
+            ..UiLayout::default()
+        };
+        assert_eq!(
+            hit_test(&three_rows, &app, 2, 6),
+            Some(Action::OpenAuthorPage(0))
+        );
+
+        app.player.track.artist.clear();
+        assert_eq!(
+            hit_test(&three_rows, &app, 2, 6),
+            None,
+            "空名字不登记命中区"
+        );
+
+        app.player.track.artist = "Jay".to_string();
+        assert_eq!(
+            hit_test(&UiLayout::default(), &app, 0, 1),
+            None,
+            "整个信息区没画时零矩形不命中"
         );
     }
 

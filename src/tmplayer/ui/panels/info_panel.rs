@@ -33,12 +33,102 @@ pub fn core_rows_visible(l: &InfoPanelLayout) -> bool {
     l.meta.height >= 1 && l.progress.height >= 1 && l.volume.height >= 1 && l.controls.height >= 1
 }
 
-pub fn layout(area: Rect) -> InfoPanelLayout {
+/// meta 块内的行号：0 标题（含爱心），1 作者，2 专辑。
+const META_TITLE_ROW: u16 = 0;
+const META_ARTIST_ROW: u16 = 1;
+const META_ALBUM_ROW: u16 = 2;
+
+/// meta 块某一行文字（作者/专辑）的命中矩形。
+///
+/// 只覆盖**画出来的字符**：宽度取按显示宽度裁剪后的结果，名字短时右侧的空白不算命中；
+/// 该行没画（meta 不够高）或文字为空时返回零矩形 —— 零矩形在 `hit_test` 里天然不命中，
+/// 于是不会留下"看不见却可点"的区域。
+///
+/// 与渲染同源：行号与裁剪函数都从这里取，改 meta 版式不会让命中区漂移。
+fn meta_text_rect(meta: Rect, row: u16, text: &str) -> Rect {
+    if meta.width == 0 || meta.height <= row {
+        return Rect::default();
+    }
+
+    let width = clip_to_display_width(text, meta.width as usize).width() as u16;
+    if width == 0 {
+        return Rect::default();
+    }
+
+    Rect {
+        x: meta.x,
+        y: meta.y + row,
+        width,
+        height: 1,
+    }
+}
+
+/// 作者行按作者分段后的命中矩形（多作者显示串 "A / B"：点谁的名字进谁的页面）。
+///
+/// 返回 `(段序号, 矩形)`，顺序即显示顺序；段序号与宿主 `song/detail` 的 `ar` 顺序同源，
+/// 全屏页退出后由宿主按它取 ID。只返回画出来的部分：meta 宽度之外的段/片段不返回，
+/// 名字短的段右侧空白与连接符本身都不是命中区，名字为空（宽度 0）的段也不返回。
+pub fn artist_row_hits(meta: Rect, artist: &str) -> Vec<(usize, Rect)> {
+    if meta.width == 0 || meta.height <= META_ARTIST_ROW || artist.is_empty() {
+        return Vec::new();
+    }
+
+    let budget = meta.width as usize;
+    let separator_w = crate::app::ARTIST_SEPARATOR.width();
+    let mut hits = Vec::new();
+    let mut offset = 0usize;
+
+    for (index, name) in crate::app::artist_name_segments(artist)
+        .into_iter()
+        .enumerate()
+    {
+        // 与渲染同源：整行按 meta 宽度裁剪，落在裁剪边界上的段只算画出来的那几格。
+        let visible = if offset < budget {
+            clip_to_display_width(name, budget - offset).width()
+        } else {
+            0
+        };
+
+        if visible > 0 {
+            hits.push((
+                index,
+                Rect {
+                    x: meta.x + offset as u16,
+                    y: meta.y + META_ARTIST_ROW,
+                    width: visible as u16,
+                    height: 1,
+                },
+            ));
+        }
+
+        offset += name.width() + separator_w;
+    }
+
+    hits
+}
+
+/// 专辑行的命中矩形（meta 块第 3 行画出来的字符范围）。
+pub fn album_row_rect(meta: Rect, album: &str) -> Rect {
+    meta_text_rect(meta, META_ALBUM_ROW, album)
+}
+
+/// 内容（封面、标题、进度、音量、控制）的宽度上限 = 窗口宽度的 1/3。
+///
+/// 边框不受影响：它仍按 `area` 铺满（「关闭」档位下 `area` 就是整个终端）。
+/// 收窄后整块内容在 `area` 内水平居中，各行矩形都由同一份 `inner` 派生，
+/// 命中区因此跟着一起收窄，不会留下"看得见点不到"的控件。
+pub fn layout(area: Rect, window_width: u16) -> InfoPanelLayout {
     // Keep borders outside and reserve an inner content area.
-    let inner = area.inner(ratatui::layout::Margin {
+    let mut inner = area.inner(ratatui::layout::Margin {
         horizontal: 2,
         vertical: 2,
     });
+
+    let max_inner_w = window_width / 3;
+    if inner.width > max_inner_w {
+        inner.width = max_inner_w;
+        inner.x = area.x + (area.width.saturating_sub(max_inner_w)) / 2;
+    }
 
     // Required rows in priority order (must survive resize as long as possible):
     // 1) metadata (3 lines) 2) progress 3) volume 4) controls
@@ -152,14 +242,14 @@ pub fn layout(area: Rect) -> InfoPanelLayout {
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
+pub fn render(f: &mut Frame, area: Rect, window_width: u16, app: &mut AppState) {
     let b = Block::default()
         .borders(Borders::ALL)
         .border_set(SOLID_BORDER)
         .style(Style::default().fg(app.theme.color_subtext()));
     f.render_widget(b, area);
 
-    let l = layout(area);
+    let l = layout(area, window_width);
 
     // cover (animated as a whole: content + border)
     if l.cover.width > 0 && l.cover.height > 0 {
@@ -340,7 +430,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
 
         let meta_rect = Rect {
             x: l.meta.x,
-            y: l.meta.y,
+            y: l.meta.y + META_TITLE_ROW,
             width: l.meta.width,
             height: 1,
         };
@@ -363,12 +453,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
         let a = Paragraph::new(clip_to_display_width(artist, meta_rect.width as usize))
             .style(sub_style)
             .alignment(Alignment::Left);
-        if l.meta.height >= 2 {
+        if l.meta.height > META_ARTIST_ROW {
             f.render_widget(
                 a,
                 Rect {
                     x: meta_rect.x,
-                    y: l.meta.y + 1,
+                    y: l.meta.y + META_ARTIST_ROW,
                     width: meta_rect.width,
                     height: 1,
                 },
@@ -377,12 +467,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
         let al = Paragraph::new(clip_to_display_width(album, meta_rect.width as usize))
             .style(sub_style)
             .alignment(Alignment::Left);
-        if l.meta.height >= 3 {
+        if l.meta.height > META_ALBUM_ROW {
             f.render_widget(
                 al,
                 Rect {
                     x: meta_rect.x,
-                    y: l.meta.y + 2,
+                    y: l.meta.y + META_ALBUM_ROW,
                     width: meta_rect.width,
                     height: 1,
                 },
