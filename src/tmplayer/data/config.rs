@@ -307,7 +307,7 @@ fn default_audio_quality() -> AudioQuality {
 }
 
 /// 下载音质默认档与播放默认档同源。
-fn default_download_audio_quality() -> AudioQuality {
+pub fn default_download_audio_quality() -> AudioQuality {
     default_audio_quality()
 }
 

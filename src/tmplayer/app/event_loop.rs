@@ -31,6 +31,8 @@ fn settings_parent(overlay: Overlay) -> Option<Overlay> {
             | Overlay::BarSettingsModal
             | Overlay::LocalAudioSettingsModal
             | Overlay::LyricsSettingsModal
+            | Overlay::DownloadSettingsModal
+            | Overlay::DownloadPathEditModal
             | Overlay::HelpModal
             | Overlay::AboutModal
     )
@@ -208,6 +210,9 @@ fn apply_host_config_sync(app: &mut AppState, config: HostConfigSync) {
         crate::data::config::BarChannels::Mono => BarChannels::Mono,
     };
     app.config.bar_channel_reverse = config.bar_channel_reverse;
+
+    // 下载路径可能刚被宿主改过：重算本地根目录（Gray 状态与 `Null` 显示都看它）。
+    app.refresh_download_root();
 }
 
 async fn save_and_sync_host_config(
@@ -458,6 +463,11 @@ fn apply_host_runtime_snapshot(app: &mut AppState, runtime: HostPlaybackRuntimeS
 
     if app.player.seeking != runtime.seeking {
         app.player.seeking = runtime.seeking;
+        changed = true;
+    }
+
+    if app.download_state != runtime.download {
+        app.download_state = runtime.download;
         changed = true;
     }
 
@@ -767,7 +777,7 @@ async fn handle_action(
             app.set_toast("Bye");
         }
         Action::OpenSettingsModal => {
-            app.settings_selected = app.settings_selected.min(11);
+            app.settings_selected = app.settings_selected.min(12);
             app.overlay = Overlay::SettingsModal;
         }
         Action::OpenHelpModal => {
@@ -800,11 +810,15 @@ async fn handle_action(
         Action::FolderChar(c) => {
             if app.overlay == Overlay::AcoustIdModal {
                 app.acoustid_input.push(c);
+            } else if app.overlay == Overlay::DownloadPathEditModal {
+                download_path_edit_insert(app, c);
             }
         }
         Action::FolderBackspace => {
             if app.overlay == Overlay::AcoustIdModal {
                 app.acoustid_input.pop();
+            } else if app.overlay == Overlay::DownloadPathEditModal {
+                download_path_edit_backspace(app);
             }
         }
         Action::CloseOverlay => {
@@ -812,6 +826,10 @@ async fn handle_action(
                 // 面板状态立即关闭，滑出动画由 tick 推进到位。
                 app.start_playlist_slide(-(layout.left_width as i16));
                 app.overlay = Overlay::None;
+            } else if app.overlay == Overlay::DownloadPathEditModal {
+                // 路径编辑中的 Esc = 取消编辑（丢弃输入），回下载设置页。
+                app.download_path_edit = None;
+                app.overlay = Overlay::DownloadSettingsModal;
             } else if let Some(parent) = settings_parent(app.overlay) {
                 // 设置类子页：回上一级，而不是直接退出全屏页。
                 app.overlay = parent;
@@ -891,13 +909,26 @@ async fn handle_action(
                     apply_settings_delta(app, host_bridge, 1).await;
                 }
                 10 => {
-                    app.set_toast("Logout is unavailable in fullscreen");
+                    app.download_settings_selected =
+                        download_selectable_rows(app).first().copied().unwrap_or(1);
+                    app.download_reset_armed = false;
+                    app.download_path_edit = None;
+                    app.overlay = Overlay::DownloadSettingsModal;
                 }
                 11 => {
+                    app.set_toast("Logout is unavailable in fullscreen");
+                }
+                12 => {
                     app.overlay = Overlay::AboutModal;
                 }
                 _ => {}
             },
+            Overlay::DownloadSettingsModal => {
+                activate_download_settings_item(app, host_bridge).await;
+            }
+            Overlay::DownloadPathEditModal => {
+                commit_download_path_edit(app, host_bridge).await;
+            }
             Overlay::BarSettingsModal => match app.bar_settings_selected {
                 0 => {
                     app.config.visualize = app.config.visualize.cycle(1);
@@ -1012,12 +1043,14 @@ async fn handle_action(
         Action::PrevAlbum | Action::NextAlbum => (),
         Action::ModalUp => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 12;
+                let count = 13;
                 if app.settings_selected == 0 {
                     app.settings_selected = count - 1;
                 } else {
                     app.settings_selected -= 1;
                 }
+            } else if app.overlay == Overlay::DownloadSettingsModal {
+                move_download_selection(app, -1);
             } else if app.overlay == Overlay::BarSettingsModal {
                 let count = 8;
                 if app.bar_settings_selected == 0 {
@@ -1060,8 +1093,10 @@ async fn handle_action(
         }
         Action::ModalDown => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 12;
+                let count = 13;
                 app.settings_selected = (app.settings_selected + 1) % count;
+            } else if app.overlay == Overlay::DownloadSettingsModal {
+                move_download_selection(app, 1);
             } else if app.overlay == Overlay::BarSettingsModal {
                 let count = 8;
                 app.bar_settings_selected = (app.bar_settings_selected + 1) % count;
@@ -1088,6 +1123,10 @@ async fn handle_action(
         Action::ModalLeft => {
             if app.overlay == Overlay::SettingsModal {
                 apply_settings_delta(app, host_bridge, -1).await;
+            } else if app.overlay == Overlay::DownloadSettingsModal {
+                apply_download_settings_delta(app, host_bridge, -1).await;
+            } else if app.overlay == Overlay::DownloadPathEditModal {
+                download_path_edit_move(app, -1);
             } else if app.overlay == Overlay::BarSettingsModal {
                 match app.bar_settings_selected {
                     0 => {
@@ -1141,6 +1180,10 @@ async fn handle_action(
         Action::ModalRight => {
             if app.overlay == Overlay::SettingsModal {
                 apply_settings_delta(app, host_bridge, 1).await;
+            } else if app.overlay == Overlay::DownloadSettingsModal {
+                apply_download_settings_delta(app, host_bridge, 1).await;
+            } else if app.overlay == Overlay::DownloadPathEditModal {
+                download_path_edit_move(app, 1);
             } else if app.overlay == Overlay::BarSettingsModal {
                 match app.bar_settings_selected {
                     0 => {
@@ -1306,6 +1349,21 @@ async fn handle_action(
 
             app.set_toast("Like is unavailable in local mode");
         }
+        Action::ToggleDownload => {
+            if let Some(bridge) = host_bridge.as_mut() {
+                (*bridge).download_current();
+                // 立刻回显一次运行态：图标马上切到"下载中"，不用等下一帧。
+                let snapshot = (*bridge).runtime_snapshot();
+                apply_host_runtime_snapshot(app, snapshot);
+                return Ok(());
+            }
+
+            app.set_toast(crate::tmplayer::ui::tui::lang_text(
+                app,
+                "独立模式不支持下载",
+                "Download is unavailable in standalone mode",
+            ));
+        }
         Action::OpenAuthorPage(index) => {
             // 作者页归宿主（全屏页只有显示名，没有作者 ID）：记下请求退出与段序号，
             // 宿主在关闭全屏页后按当前播放歌曲解析并打开。
@@ -1399,6 +1457,12 @@ async fn handle_action(
                     // 开关行：左键直接改值（与宿主一致），不走双击。
                     app.lyrics_settings_selected = idx.min(2);
                     apply_lyrics_settings_delta(app, host_bridge, 1).await;
+                    return Ok(());
+                }
+                Overlay::DownloadSettingsModal => {
+                    // 与歌词浮窗同构：单击即执行（音质改值 / 路径进编辑 / 恢复默认两段式）。
+                    app.download_settings_selected = idx.min(2);
+                    activate_download_settings_item(app, host_bridge).await;
                     return Ok(());
                 }
                 Overlay::HelpModal => app.help_keybind_selected = idx,
@@ -1528,6 +1592,203 @@ async fn apply_settings_delta(
             }
         }
         _ => {}
+    }
+}
+
+/// 下载设置页的可选中行：下载不可用时只有路径行（它是唯一的自救入口）。
+fn download_selectable_rows(app: &AppState) -> Vec<usize> {
+    (0..3)
+        .filter(|row| app.download_enabled() || *row == 1)
+        .collect()
+}
+
+fn move_download_selection(app: &mut AppState, delta: i32) {
+    let rows = download_selectable_rows(app);
+    if rows.is_empty() || delta == 0 {
+        return;
+    }
+    let current = rows
+        .iter()
+        .position(|row| *row == app.download_settings_selected)
+        .unwrap_or(0) as i32;
+    let next = (current + delta).rem_euclid(rows.len() as i32) as usize;
+    app.download_settings_selected = rows[next];
+    // 换行即撤下待确认态：恢复默认必须连着选两次同一个地方。
+    app.download_reset_armed = false;
+}
+
+/// 下载设置页的「执行」：Enter / 左右键 / 双击共用。
+async fn activate_download_settings_item(
+    app: &mut AppState,
+    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+) {
+    match app.download_settings_selected {
+        0 => apply_download_settings_delta(app, host_bridge, 1).await,
+        1 => begin_download_path_edit(app),
+        2 => activate_download_reset(app, host_bridge).await,
+        _ => {}
+    }
+}
+
+/// 音质行：与播放设置同一套可选值（按会员放开）。
+async fn apply_download_settings_delta(
+    app: &mut AppState,
+    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+    delta: i32,
+) {
+    if delta == 0 || app.download_settings_selected != 0 || !app.download_enabled() {
+        return;
+    }
+    let next = app
+        .config
+        .download_audio_quality
+        .cycle(delta, app.vip_audio_unlocked);
+    if next != app.config.download_audio_quality {
+        app.config.download_audio_quality = next;
+        save_and_sync_host_config(app, host_bridge).await;
+    }
+}
+
+/// 「恢复默认」两段式：首次进入待确认态，再选一次才写回默认值。
+async fn activate_download_reset(
+    app: &mut AppState,
+    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+) {
+    if !app.download_enabled() {
+        return;
+    }
+    if !app.download_reset_armed {
+        app.download_reset_armed = true;
+        app.set_toast(crate::tmplayer::ui::tui::lang_text(
+            app,
+            "再按一次确认恢复下载设置",
+            "Press again to restore download settings",
+        ));
+        return;
+    }
+
+    app.download_reset_armed = false;
+    app.config.download_audio_quality =
+        crate::tmplayer::data::config::default_download_audio_quality();
+    app.config.download_path = None;
+    save_and_sync_host_config(app, host_bridge).await;
+    app.refresh_download_root();
+    app.set_toast(crate::tmplayer::ui::tui::lang_text(
+        app,
+        "下载设置已恢复默认",
+        "Download settings restored to defaults",
+    ));
+}
+
+/// 进入路径行的行内编辑（独立的 overlay，字符按键因此直接进输入框）。
+fn begin_download_path_edit(app: &mut AppState) {
+    let current = app
+        .download_root
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    app.download_path_edit = Some(crate::app::DownloadPathEdit {
+        cursor: current.chars().count(),
+        buffer: current,
+    });
+    app.overlay = Overlay::DownloadPathEditModal;
+    app.set_toast(crate::tmplayer::ui::tui::lang_text(
+        app,
+        "编辑下载路径：回车确认，Esc 取消",
+        "Editing download path: Enter confirms, Esc cancels",
+    ));
+}
+
+fn char_to_byte_index(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .nth(char_index)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len())
+}
+
+fn download_path_edit_insert(app: &mut AppState, ch: char) {
+    let Some(edit) = app.download_path_edit.as_mut() else {
+        return;
+    };
+    if edit.cursor >= 4096 {
+        return;
+    }
+    let index = char_to_byte_index(&edit.buffer, edit.cursor);
+    edit.buffer.insert(index, ch);
+    edit.cursor += 1;
+}
+
+fn download_path_edit_backspace(app: &mut AppState) {
+    let Some(edit) = app.download_path_edit.as_mut() else {
+        return;
+    };
+    if edit.cursor == 0 {
+        return;
+    }
+    let index = char_to_byte_index(&edit.buffer, edit.cursor - 1);
+    edit.buffer.remove(index);
+    edit.cursor -= 1;
+}
+
+fn download_path_edit_move(app: &mut AppState, delta: i32) {
+    let Some(edit) = app.download_path_edit.as_mut() else {
+        return;
+    };
+    let last = edit.buffer.chars().count() as i32;
+    edit.cursor = (edit.cursor as i32 + delta).clamp(0, last) as usize;
+}
+
+/// 回车确认：非法（空 / 非绝对 / 不可写）就保留修改前的值，只弹一次 toast。
+async fn commit_download_path_edit(
+    app: &mut AppState,
+    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+) {
+    let Some(edit) = app.download_path_edit.take() else {
+        return;
+    };
+    let raw = edit.buffer.trim().to_string();
+    app.overlay = Overlay::DownloadSettingsModal;
+
+    match crate::app::download::validate_download_path(&raw) {
+        Ok(path) => {
+            app.config.download_path = Some(path.display().to_string());
+            save_and_sync_host_config(app, host_bridge).await;
+            app.refresh_download_root();
+            app.set_toast(format!(
+                "{}: {}",
+                crate::tmplayer::ui::tui::lang_text(app, "下载路径已更新", "Download path updated"),
+                path.display()
+            ));
+        }
+        Err(err) => {
+            let reason = match err {
+                crate::app::download::DownloadPathError::Empty => {
+                    crate::tmplayer::ui::tui::lang_text(
+                        app,
+                        "路径不能为空",
+                        "path must not be empty",
+                    )
+                }
+                crate::app::download::DownloadPathError::NotAbsolute => {
+                    crate::tmplayer::ui::tui::lang_text(
+                        app,
+                        "必须使用绝对路径",
+                        "path must be absolute",
+                    )
+                }
+                crate::app::download::DownloadPathError::NotWritable => {
+                    crate::tmplayer::ui::tui::lang_text(app, "路径不可写", "path is not writable")
+                }
+            };
+            app.set_toast(format!(
+                "{}（{reason}）",
+                crate::tmplayer::ui::tui::lang_text(
+                    app,
+                    "下载路径无效，保留修改前的值",
+                    "Invalid download path, keeping the previous value"
+                )
+            ));
+        }
     }
 }
 

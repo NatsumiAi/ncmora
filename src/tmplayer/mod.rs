@@ -95,6 +95,20 @@ pub struct HostPlaybackRuntimeSnapshot {
     pub position: Duration,
     pub volume: f32,
     pub seeking: bool,
+    /// 信息区下载图标状态（宿主每帧同步；`Hidden` = 不显示）。
+    pub download: DownloadIconState,
+}
+
+/// 信息区下载图标的状态。
+///
+/// `Hidden`：下载不可用（宿主没有可写目录）或没有播放中的歌曲——图标整格不画、不可点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DownloadIconState {
+    #[default]
+    Hidden,
+    NotDownloaded,
+    Downloading,
+    Done,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +179,7 @@ pub async fn run_fullscreen(
     let _ = std::fs::create_dir_all(&ncm_cover_cache_dir);
     app.ncm_cover_cache_dir = Some(ncm_cover_cache_dir);
     app.eq.bands_db = app.config.eq_bands_db;
+    app.refresh_download_root();
 
     apply_bootstrap(&mut app, bootstrap);
 

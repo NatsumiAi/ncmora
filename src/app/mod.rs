@@ -54,13 +54,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthChar;
 
 use api::ApiState;
-use download::{DownloadEvent, DownloadManager, DownloadRequest, DownloadTarget};
+use download::{DownloadEvent, DownloadManager, DownloadRequest, DownloadState, DownloadTarget};
 use mpris_bridge::{MprisBridge, MprisControlEvent, MprisSyncPayload};
 use player::{AudioPlayer, AudioPlayerState, cleanup_cache_dir, resolve_cache_root};
 use startup::StartupInit;
 use streaming::StreamingReader;
 
 const MAX_INPUT_LEN: usize = 64;
+/// 下载路径输入框的长度上限（字符）。
+const DOWNLOAD_PATH_MAX_CHARS: usize = 4096;
 const SEARCH_RESULT_PAGE_SIZE: usize = 50;
 /// 无后缀（混合）搜索里作者 / 歌单分区只取最相关的少量条目，不参与分页。
 const MIXED_AUX_RESULT_LIMIT: usize = 5;
@@ -73,7 +75,7 @@ const HOME_SIDEBAR_PLAYLIST_LIMIT: usize = 100;
 const SETTINGS_ROOT_ITEMS: usize = 13;
 const SETTINGS_PLAYBACK_ITEMS: usize = 8;
 const SETTINGS_LYRICS_ITEMS: usize = 3;
-const SETTINGS_DOWNLOAD_ITEMS: usize = 3;
+pub(crate) const SETTINGS_DOWNLOAD_ITEMS: usize = 3;
 pub(crate) const SETTINGS_KEYBIND_ITEMS: usize = 22;
 /// 主程序内容页小窗口模式的统一触发阈值，与主页既有判定一致。
 pub(crate) const SMALL_WINDOW_MIN_WIDTH: u16 = 32;
@@ -2663,6 +2665,8 @@ pub struct FullscreenRuntimeSnapshot {
     pub position: Duration,
     pub volume: f32,
     pub seeking: bool,
+    /// 当前播放歌曲的下载图标状态；`None` = 下载不可用或没有播放中的歌曲。
+    pub download: Option<DownloadState>,
 }
 
 #[derive(Debug, Clone)]
@@ -2808,8 +2812,12 @@ pub struct App {
     pub home_sidebar_section_hits: Vec<(HitRect, HomeSidebarSection)>,
     pub home_tile_hits: Vec<(HitRect, usize)>,
     pub playlist_track_hits: Vec<(HitRect, usize)>,
+    /// 歌单页 / 专辑页行内下载图标的命中区（先于整行命中判定）。
+    pub playlist_track_download_hits: Vec<(HitRect, usize)>,
     pub author_tile_hits: Vec<(HitRect, usize)>,
     pub search_item_hits: Vec<(HitRect, usize)>,
+    /// 搜索页单曲行内下载图标的命中区。
+    pub search_item_download_hits: Vec<(HitRect, usize)>,
     pub search_box_input: String,
     pub search_box_cursor: usize,
     pub search_box_anim_height: u16,
@@ -2866,6 +2874,10 @@ pub struct App {
     audio_player: AudioPlayer,
     /// 下载任务表（异步后台任务；状态行与图标都从这里读）。
     pub download_manager: DownloadManager,
+    /// 下载图标的动画相位基准（time-based 旋转帧的起点）。
+    download_spinner_start: Instant,
+    /// 当前播放歌曲的下载图标状态缓存（全屏页每帧读，写入在 tick 里）。
+    now_playing_download_state: DownloadState,
     /// 解析后的下载根目录；`None` = 系统里既没有音乐目录也没有家目录 → 下载禁用。
     pub download_root: Option<PathBuf>,
     /// 当前歌单页实际是歌单还是专辑（专辑页下载要落子文件夹 + 写 `cover.*`）。
@@ -2896,7 +2908,8 @@ impl App {
         let http_client = Client::builder().default_headers(headers).build()?;
         let cache_root = resolve_cache_root(&config);
         let cover_cache_dir = cache_root.join(COVER_CACHE_SUBDIR);
-        let download_root = crate::app::download::resolve_download_root(config.download_path.as_deref());
+        let download_root =
+            crate::app::download::resolve_download_root(config.download_path.as_deref());
         let mpris_bridge = MprisBridge::new(&cache_root, &config.cache);
         if config.cache.clean_on_startup {
             let _ = cleanup_cache_dir(&cover_cache_dir, &config.cache);
@@ -2963,8 +2976,10 @@ impl App {
             home_sidebar_section_hits: Vec::new(),
             home_tile_hits: Vec::new(),
             playlist_track_hits: Vec::new(),
+            playlist_track_download_hits: Vec::new(),
             author_tile_hits: Vec::new(),
             search_item_hits: Vec::new(),
+            search_item_download_hits: Vec::new(),
             search_box_input: String::new(),
             search_box_cursor: 0,
             search_box_anim_height: 0,
@@ -3012,6 +3027,8 @@ impl App {
             api,
             audio_player,
             download_manager: DownloadManager::default(),
+            download_spinner_start: Instant::now(),
+            now_playing_download_state: DownloadState::NotDownloaded,
             download_root,
             playlist_page_kind: PlaylistPageKind::Playlist,
             graphics_picker: Picker::halfblocks(),
@@ -3382,8 +3399,10 @@ impl App {
         self.home_sidebar_section_hits.clear();
         self.home_tile_hits.clear();
         self.playlist_track_hits.clear();
+        self.playlist_track_download_hits.clear();
         self.author_tile_hits.clear();
         self.search_item_hits.clear();
+        self.search_item_download_hits.clear();
         self.page_lyrics_layout = None;
     }
 
@@ -3482,6 +3501,14 @@ impl App {
 
     pub fn push_playlist_track_hit(&mut self, rect: HitRect, index: usize) {
         self.playlist_track_hits.push((rect, index));
+    }
+
+    pub fn push_playlist_track_download_hit(&mut self, rect: HitRect, index: usize) {
+        self.playlist_track_download_hits.push((rect, index));
+    }
+
+    pub fn push_search_item_download_hit(&mut self, rect: HitRect, index: usize) {
+        self.search_item_download_hits.push((rect, index));
     }
 
     pub fn push_author_tile_hit(&mut self, rect: HitRect, index: usize) {
@@ -3886,6 +3913,8 @@ impl App {
         self.sync_mpris_exposure();
         // 全屏页不跑宿主主循环，收藏的派发/收敛要在这里推进。
         self.tick_like_sync();
+        // 下载结果与图标状态同理（全屏页也能发起下载）。
+        self.tick_download();
     }
 
     async fn apply_mpris_control_events(&mut self) {
@@ -4010,7 +4039,34 @@ impl App {
             position: self.audio_player.display_position(),
             volume: self.audio_player.volume(),
             seeking: self.audio_player.is_seeking(),
+            download: self.current_download_state(),
         }
+    }
+
+    /// 当前播放歌曲的下载图标状态（每帧缓存一次，全屏页只读不再查磁盘）。
+    pub fn current_download_state(&self) -> Option<DownloadState> {
+        if self.download_root.is_none() || self.now_playing.is_none() {
+            return None;
+        }
+        Some(self.now_playing_download_state)
+    }
+
+    /// 供全屏页每帧刷新的缓存：任务表与磁盘状态都封在这一处。
+    fn refresh_current_download_state(&mut self) {
+        let state = match self.now_playing.clone() {
+            Some(track) => self
+                .download_state_for_candidate(&DownloadCandidate {
+                    song_id: track.song_id,
+                    title: track.title,
+                    artist: track.artist,
+                    album: track.album,
+                    album_folder: None,
+                    album_cover_url: None,
+                })
+                .unwrap_or(DownloadState::NotDownloaded),
+            None => DownloadState::NotDownloaded,
+        };
+        self.now_playing_download_state = state;
     }
 
     pub fn fullscreen_metadata_signature(&self) -> u64 {
@@ -4747,11 +4803,6 @@ impl App {
         self.now_playing.as_ref().map(|track| track.song_id.clone())
     }
 
-    /// 下载根目录：`None` 表示系统里拿不到可写位置（下载整体禁用）。
-    pub fn download_root(&self) -> Option<&Path> {
-        self.download_root.as_deref()
-    }
-
     /// 重新解析下载根目录（设置里改了路径、或全屏页同步回来时调用）。
     pub fn refresh_download_root(&mut self) {
         let next =
@@ -4765,39 +4816,85 @@ impl App {
     /// 当前聚焦的单曲（歌单页 / 搜索页）与它所在页面的下载上下文。
     fn focused_download_song(&self) -> Option<DownloadCandidate> {
         match self.page {
-            Page::Playlist => {
-                let track = self.playlist.tracks.get(self.playlist.focused_idx)?;
-                if track.kind != PlaylistTrackKind::Song {
-                    return None;
-                }
-                let album_page = self.playlist_page_kind == PlaylistPageKind::Album;
-                Some(DownloadCandidate {
-                    song_id: track.id.clone()?,
-                    title: track.title.clone(),
-                    artist: track.artist.clone(),
-                    album: track.album.clone(),
-                    album_folder: album_page.then(|| self.playlist.title.clone()),
-                    album_cover_url: album_page
-                        .then(|| self.playlist.cover.url.clone())
-                        .flatten(),
-                })
-            }
-            Page::Search => {
-                let item = self.search.results.get(self.search.focused_idx)?;
-                if item.kind != SearchItemKind::Song {
-                    return None;
-                }
-                Some(DownloadCandidate {
-                    song_id: item.song_id.clone()?,
-                    title: item.title.clone().unwrap_or_else(|| item.left_label.clone()),
-                    artist: item.artist.clone().unwrap_or_default(),
-                    album: item.album.clone().unwrap_or_default(),
-                    album_folder: None,
-                    album_cover_url: None,
-                })
-            }
+            Page::Playlist => self.playlist_download_candidate(self.playlist.focused_idx),
+            Page::Search => self.search_download_candidate(self.search.focused_idx),
             _ => None,
         }
+    }
+
+    /// 歌单页 / 专辑页某一行对应的下载候选（非单曲行返回 `None`）。
+    fn playlist_download_candidate(&self, index: usize) -> Option<DownloadCandidate> {
+        let track = self.playlist.tracks.get(index)?;
+        if track.kind != PlaylistTrackKind::Song {
+            return None;
+        }
+        let album_page = self.playlist_page_kind == PlaylistPageKind::Album;
+        Some(DownloadCandidate {
+            song_id: track.id.clone()?,
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: track.album.clone(),
+            album_folder: album_page.then(|| self.playlist.title.clone()),
+            album_cover_url: album_page
+                .then(|| self.playlist.cover.url.clone())
+                .flatten(),
+        })
+    }
+
+    /// 搜索页某一行对应的下载候选（仅单曲行）。
+    fn search_download_candidate(&self, index: usize) -> Option<DownloadCandidate> {
+        let item = self.search.results.get(index)?;
+        if item.kind != SearchItemKind::Song {
+            return None;
+        }
+        Some(DownloadCandidate {
+            song_id: item.song_id.clone()?,
+            title: item
+                .title
+                .clone()
+                .unwrap_or_else(|| item.left_label.clone()),
+            artist: item.artist.clone().unwrap_or_default(),
+            album: item.album.clone().unwrap_or_default(),
+            album_folder: None,
+            album_cover_url: None,
+        })
+    }
+
+    /// 下载图标的动画相位（time-based：空闲节流下也按真实时间推进）。
+    pub fn download_spinner_phase(&self) -> Duration {
+        self.download_spinner_start.elapsed()
+    }
+
+    /// 歌单页 / 专辑页某行的下载图标状态；`None` = 不显示图标（不可下载或整体禁用）。
+    pub(crate) fn playlist_download_state(&mut self, index: usize) -> Option<DownloadState> {
+        let candidate = self.playlist_download_candidate(index)?;
+        self.download_state_for_candidate(&candidate)
+    }
+
+    /// 搜索页某行的下载图标状态。
+    pub(crate) fn search_download_state(&mut self, index: usize) -> Option<DownloadState> {
+        let candidate = self.search_download_candidate(index)?;
+        self.download_state_for_candidate(&candidate)
+    }
+
+    fn download_state_for_candidate(
+        &mut self,
+        candidate: &DownloadCandidate,
+    ) -> Option<DownloadState> {
+        let root = self.download_root.clone()?;
+        let dir = match candidate.album_folder.as_deref() {
+            Some(album) => root.join(crate::app::download::album_folder_name(album)),
+            None => root,
+        };
+        let target = DownloadTarget {
+            dir,
+            base: crate::app::download::download_file_stem(
+                &candidate.title,
+                &candidate.artist,
+                &candidate.album,
+            ),
+        };
+        Some(self.download_manager.state_of(&candidate.song_id, &target))
     }
 
     /// 主应用 Ctrl+Alt+D：下载聚焦的单曲（在途则取消）。
@@ -4815,10 +4912,9 @@ impl App {
     /// 全屏页 Ctrl+D / 点下载图标：下载当前播放的单曲（在途则取消）。
     pub fn download_current_song(&mut self) {
         let Some(track) = self.now_playing.clone() else {
-            self.set_runtime_status(self.lang_text(
-                "当前没有正在播放的歌曲",
-                "Nothing is playing right now",
-            ));
+            self.set_runtime_status(
+                self.lang_text("当前没有正在播放的歌曲", "Nothing is playing right now"),
+            );
             return;
         };
 
@@ -4899,6 +4995,7 @@ impl App {
 
     /// 每帧搬运下载结果：完成 / 失败 / 取消都写状态行。
     fn tick_download(&mut self) {
+        self.refresh_current_download_state();
         for event in self.download_manager.poll() {
             match event {
                 DownloadEvent::Finished {
@@ -6017,6 +6114,11 @@ impl App {
                 self.settings_lyrics_selected = index;
                 self.apply_settings_lyrics_delta(1);
             }
+            Overlay::SettingsDownload => {
+                // 与歌词浮窗同构：单击即执行（音质改值 / 路径进编辑 / 恢复默认两段式）。
+                self.settings_download_selected = index;
+                self.activate_settings_download_item();
+            }
             Overlay::SettingsKeybinds => {
                 self.settings_keybind_selected = index;
                 if self.is_double_settings_click(overlay, index) {
@@ -6041,6 +6143,12 @@ impl App {
                 *selected - 1
             };
         };
+
+        // 下载设置页的行在禁用态下不连续，单独走"可选中行"列表。
+        if self.overlay == Some(Overlay::SettingsDownload) {
+            self.move_download_selection(if forward { 1 } else { -1 });
+            return;
+        }
 
         match self.overlay {
             Some(Overlay::Settings) => step(&mut self.settings_selected, SETTINGS_ROOT_ITEMS),
@@ -6086,8 +6194,9 @@ impl App {
                 self.overlay = Some(Overlay::SettingsLyrics);
             }
             7..=9 => self.apply_settings_root_delta(1).await,
-            10 => self.logout_to_login().await,
-            11 => {
+            10 => self.open_download_settings(),
+            11 => self.logout_to_login().await,
+            12 => {
                 self.overlay = Some(Overlay::SettingsAbout);
             }
             _ => {}
@@ -6158,6 +6267,271 @@ impl App {
                 self.settings_lyrics_selected =
                     (self.settings_lyrics_selected + 1) % SETTINGS_LYRICS_ITEMS;
             }
+            _ => {}
+        }
+    }
+
+    /// 打开「下载设置」子页：光标落在第一个可选中行（禁用态下就是路径行）。
+    fn open_download_settings(&mut self) {
+        self.download_path_edit = None;
+        self.download_reset_armed = false;
+        self.settings_download_selected = self
+            .download_selectable_rows()
+            .first()
+            .copied()
+            .unwrap_or(1);
+        self.overlay = Some(Overlay::SettingsDownload);
+    }
+
+    /// 下载目录可用（系统里能找到可写位置）。不可用时除路径行外全部灰置。
+    pub fn download_settings_enabled(&self) -> bool {
+        self.download_root.is_some()
+    }
+
+    /// 某一行是否可选中：路径行永远可选中（禁用态下唯一的自救入口）。
+    pub fn download_row_selectable(&self, row: usize) -> bool {
+        self.download_settings_enabled() || row == 1
+    }
+
+    fn download_selectable_rows(&self) -> Vec<usize> {
+        (0..SETTINGS_DOWNLOAD_ITEMS)
+            .filter(|row| self.download_row_selectable(*row))
+            .collect()
+    }
+
+    fn move_download_selection(&mut self, delta: i32) {
+        let rows = self.download_selectable_rows();
+        if rows.is_empty() || delta == 0 {
+            return;
+        }
+        let current = rows
+            .iter()
+            .position(|row| *row == self.settings_download_selected)
+            .unwrap_or(0) as i32;
+        let next = (current + delta).rem_euclid(rows.len() as i32) as usize;
+        self.settings_download_selected = rows[next];
+        // 换行即撤下待确认态：恢复默认必须连着选两次同一个地方。
+        self.download_reset_armed = false;
+    }
+
+    /// 下载设置页的「执行」：Enter、双击与单击共用。
+    fn activate_settings_download_item(&mut self) {
+        match self.settings_download_selected {
+            0 => self.apply_settings_download_delta(1),
+            1 => self.begin_download_path_edit(),
+            2 => self.activate_download_reset(),
+            _ => {}
+        }
+    }
+
+    /// 音质行：与播放设置同一套可选值（按会员放开）。
+    fn apply_settings_download_delta(&mut self, delta: i32) {
+        if delta == 0 || self.settings_download_selected != 0 || !self.download_settings_enabled() {
+            return;
+        }
+        let next = self
+            .config
+            .download_audio_quality
+            .cycle(delta, self.vip_audio_unlocked);
+        if next != self.config.download_audio_quality {
+            self.config.download_audio_quality = next;
+            let _ = self.config.save();
+        }
+    }
+
+    /// 「恢复默认」两段式：首次进入待确认态（文字换成警戒色），再选一次才写回默认。
+    fn activate_download_reset(&mut self) {
+        if !self.download_settings_enabled() {
+            return;
+        }
+        if !self.download_reset_armed {
+            self.download_reset_armed = true;
+            self.set_runtime_status(self.lang_text(
+                "再按一次确认恢复下载设置",
+                "Press again to restore download settings",
+            ));
+            return;
+        }
+
+        self.download_reset_armed = false;
+        self.config.download_audio_quality = crate::data::config::default_download_audio_quality();
+        self.config.download_path = None;
+        let _ = self.config.save();
+        self.refresh_download_root();
+        self.set_runtime_status(self.lang_text(
+            "下载设置已恢复默认",
+            "Download settings restored to defaults",
+        ));
+    }
+
+    /// 进入路径行的行内编辑：以当前生效路径为初值，光标停在末尾。
+    fn begin_download_path_edit(&mut self) {
+        let current = self
+            .download_root
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        self.download_path_edit = Some(DownloadPathEdit {
+            cursor: current.chars().count(),
+            buffer: current,
+        });
+        self.set_runtime_status(self.lang_text(
+            "编辑下载路径：回车确认，Esc 取消",
+            "Editing download path: Enter confirms, Esc cancels",
+        ));
+    }
+
+    fn download_path_edit_insert(&mut self, ch: char) {
+        let Some(edit) = self.download_path_edit.as_mut() else {
+            return;
+        };
+        if edit.cursor >= DOWNLOAD_PATH_MAX_CHARS {
+            return;
+        }
+        let index = byte_index_for_char(&edit.buffer, edit.cursor);
+        edit.buffer.insert(index, ch);
+        edit.cursor += 1;
+    }
+
+    fn download_path_edit_backspace(&mut self) {
+        let Some(edit) = self.download_path_edit.as_mut() else {
+            return;
+        };
+        if edit.cursor == 0 {
+            return;
+        }
+        let index = byte_index_for_char(&edit.buffer, edit.cursor - 1);
+        edit.buffer.remove(index);
+        edit.cursor -= 1;
+    }
+
+    fn download_path_edit_delete(&mut self) {
+        let Some(edit) = self.download_path_edit.as_mut() else {
+            return;
+        };
+        if edit.cursor >= char_count(&edit.buffer) {
+            return;
+        }
+        let index = byte_index_for_char(&edit.buffer, edit.cursor);
+        edit.buffer.remove(index);
+    }
+
+    fn download_path_edit_move(&mut self, delta: i32) {
+        let Some(edit) = self.download_path_edit.as_mut() else {
+            return;
+        };
+        let last = char_count(&edit.buffer) as i32;
+        edit.cursor = (edit.cursor as i32 + delta).clamp(0, last) as usize;
+    }
+
+    fn download_path_edit_home(&mut self) {
+        if let Some(edit) = self.download_path_edit.as_mut() {
+            edit.cursor = 0;
+        }
+    }
+
+    fn download_path_edit_end(&mut self) {
+        if let Some(edit) = self.download_path_edit.as_mut() {
+            edit.cursor = char_count(&edit.buffer);
+        }
+    }
+
+    /// 回车确认：非法（空 / 非绝对 / 不可写）就保留修改前的值，只写状态行。
+    fn commit_download_path_edit(&mut self) {
+        let Some(edit) = self.download_path_edit.take() else {
+            return;
+        };
+        let raw = edit.buffer.trim().to_string();
+        match crate::app::download::validate_download_path(&raw) {
+            Ok(path) => {
+                self.config.download_path = Some(path.display().to_string());
+                let _ = self.config.save();
+                self.refresh_download_root();
+                self.set_runtime_status(format!(
+                    "{}: {}",
+                    self.lang_text("下载路径已更新", "Download path updated"),
+                    path.display()
+                ));
+            }
+            Err(err) => {
+                let reason = match err {
+                    crate::app::download::DownloadPathError::Empty => {
+                        self.lang_text("路径不能为空", "path must not be empty")
+                    }
+                    crate::app::download::DownloadPathError::NotAbsolute => {
+                        self.lang_text("必须使用绝对路径", "path must be absolute")
+                    }
+                    crate::app::download::DownloadPathError::NotWritable => {
+                        self.lang_text("路径不可写", "path is not writable")
+                    }
+                };
+                self.set_runtime_status(format!(
+                    "{}（{reason}）",
+                    self.lang_text(
+                        "下载路径无效，保留修改前的值",
+                        "Invalid download path, keeping the previous value"
+                    )
+                ));
+            }
+        }
+    }
+
+    /// 设置弹窗里显示的下载路径（`Null` = 系统里没有可用位置）。
+    pub fn download_display_path(&self) -> String {
+        self.download_root
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| crate::app::download::DOWNLOAD_PATH_NULL.to_string())
+    }
+
+    /// 「下载设置」页：音质 / 路径 / 恢复默认三行。
+    ///
+    /// 编辑态下所有按键都进输入框（含 `t`）；非编辑态沿用设置弹窗的习惯（Esc 返回、t 关闭）。
+    fn handle_settings_download_key(&mut self, key: KeyEvent) {
+        if self.download_path_edit.is_some() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.download_path_edit = None;
+                    self.set_runtime_status(
+                        self.lang_text("已取消修改下载路径", "Download path edit cancelled"),
+                    );
+                }
+                KeyCode::Enter => self.commit_download_path_edit(),
+                KeyCode::Backspace => self.download_path_edit_backspace(),
+                KeyCode::Delete => self.download_path_edit_delete(),
+                KeyCode::Left => self.download_path_edit_move(-1),
+                KeyCode::Right => self.download_path_edit_move(1),
+                KeyCode::Home => self.download_path_edit_home(),
+                KeyCode::End => self.download_path_edit_end(),
+                KeyCode::Char(ch) => {
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        && !ch.is_control()
+                    {
+                        self.download_path_edit_insert(ch);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.download_reset_armed = false;
+                self.overlay = Some(Overlay::Settings);
+            }
+            KeyCode::Char('t') | KeyCode::Char('T') => {
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                    self.download_reset_armed = false;
+                    self.close_overlay();
+                }
+            }
+            KeyCode::Up | KeyCode::BackTab => self.move_download_selection(-1),
+            KeyCode::Down | KeyCode::Tab => self.move_download_selection(1),
+            KeyCode::Left => self.apply_settings_download_delta(-1),
+            KeyCode::Right | KeyCode::Enter => self.activate_settings_download_item(),
             _ => {}
         }
     }
@@ -6908,6 +7282,19 @@ impl App {
                 }
             }
             Page::Playlist => {
+                // 行内下载图标优先于整行命中：命中即下载 / 取消下载，
+                // 且不更新 `last_content_click`（否则 400ms 双击会顺带播放该行）。
+                if let Some(idx) = self
+                    .playlist_track_download_hits
+                    .iter()
+                    .find(|(rect, _)| rect.contains(col, row))
+                    .map(|(_, idx)| *idx)
+                    && let Some(candidate) = self.playlist_download_candidate(idx)
+                {
+                    self.toggle_download(candidate);
+                    return true;
+                }
+
                 let hit = self
                     .playlist_track_hits
                     .iter()
@@ -6940,6 +7327,18 @@ impl App {
                 }
             }
             Page::Search => {
+                // 与歌单页同理：图标命中先于整行命中，且不动双击判定。
+                if let Some(idx) = self
+                    .search_item_download_hits
+                    .iter()
+                    .find(|(rect, _)| rect.contains(col, row))
+                    .map(|(_, idx)| *idx)
+                    && let Some(candidate) = self.search_download_candidate(idx)
+                {
+                    self.toggle_download(candidate);
+                    return true;
+                }
+
                 let hit = self
                     .search_item_hits
                     .iter()
@@ -6976,6 +7375,8 @@ impl App {
         self.search_box_anim_height = 0;
         self.search_box_anim_started_at = None;
         self.last_settings_click = None;
+        self.download_path_edit = None;
+        self.download_reset_armed = false;
         self.clear_settings_item_hits();
     }
 

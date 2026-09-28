@@ -15,7 +15,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::Duration;
 
 /// 默认下载目录名：`{系统音乐目录}/cnmplayer/`。
 pub const DOWNLOAD_DIR_NAME: &str = "cnmplayer";
@@ -42,13 +42,13 @@ pub enum DownloadState {
     Done,
 }
 
-/// 三态对应的字形；`Downloading` 按时间取旋转帧（time-based，空闲节流下也自洽）。
-pub fn state_glyph(state: DownloadState, now: Instant) -> char {
+/// 三态对应的字形；`Downloading` 按相位取旋转帧（time-based，空闲节流下也自洽）。
+pub fn state_glyph(state: DownloadState, phase: Duration) -> char {
     match state {
         DownloadState::NotDownloaded => ICON_DOWNLOAD,
         DownloadState::Done => ICON_DONE,
         DownloadState::Downloading => {
-            let frame = (now.elapsed().as_millis() / SPINNER_FRAME_MS) as usize;
+            let frame = (phase.as_millis() / SPINNER_FRAME_MS) as usize;
             SPINNER_FRAMES[frame % SPINNER_FRAMES.len()]
         }
     }
@@ -272,7 +272,14 @@ impl DownloadManager {
                 shared: shared.clone(),
             },
         );
-        self.disk_cache.remove(&request.target.dir.join(&request.target.base).display().to_string());
+        self.disk_cache.remove(
+            &request
+                .target
+                .dir
+                .join(&request.target.base)
+                .display()
+                .to_string(),
+        );
 
         let api = api.clone();
         launch(async move {
@@ -305,9 +312,7 @@ impl DownloadManager {
 
     /// 该歌曲是否处于可取消的下载中。
     pub fn is_downloading(&self, song_id: &str) -> bool {
-        self.jobs
-            .get(song_id)
-            .is_some_and(|job| !job.cancelling)
+        self.jobs.get(song_id).is_some_and(|job| !job.cancelling)
     }
 
     /// 每帧搬运完成的任务。
@@ -336,10 +341,8 @@ impl DownloadManager {
                             .file_stem()
                             .map(|value| value.to_string_lossy().to_string())
                             .unwrap_or_default();
-                        self.disk_cache.insert(
-                            parent.join(&stem).display().to_string(),
-                            true,
-                        );
+                        self.disk_cache
+                            .insert(parent.join(&stem).display().to_string(), true);
                     }
                     events.push(DownloadEvent::Finished {
                         title: job.title,
@@ -349,9 +352,9 @@ impl DownloadManager {
                         tag_error: outcome.tag_error,
                     });
                 }
-                Err(TaskError::Cancelled) => events.push(DownloadEvent::Cancelled {
-                    title: job.title,
-                }),
+                Err(TaskError::Cancelled) => {
+                    events.push(DownloadEvent::Cancelled { title: job.title })
+                }
                 Err(TaskError::Failed(error)) => events.push(DownloadEvent::Failed {
                     title: job.title,
                     error,
@@ -674,9 +677,11 @@ async fn write_album_cover(api: &ApiState, url: &str, dir: &Path) -> Result<()> 
         bail!("empty cover bytes");
     }
     let ext = image_extension(&bytes);
-    std::fs::create_dir_all(dir).with_context(|| format!("create dir failed: {}", dir.display()))?;
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("create dir failed: {}", dir.display()))?;
     let path = dir.join(format!("cover.{ext}"));
-    std::fs::write(&path, &bytes).with_context(|| format!("write cover failed: {}", path.display()))?;
+    std::fs::write(&path, &bytes)
+        .with_context(|| format!("write cover failed: {}", path.display()))?;
     Ok(())
 }
 
@@ -783,7 +788,10 @@ mod tests {
 
     #[test]
     fn stem_skips_missing_parts() {
-        assert_eq!(download_file_stem("歌名", "作者", "专辑"), "歌名 - 作者 - 专辑");
+        assert_eq!(
+            download_file_stem("歌名", "作者", "专辑"),
+            "歌名 - 作者 - 专辑"
+        );
         assert_eq!(download_file_stem("歌名", "作者", ""), "歌名 - 作者");
         assert_eq!(download_file_stem("歌名", "", ""), "歌名");
         assert_eq!(download_file_stem("  ", "", ""), "未知歌曲");
@@ -814,7 +822,10 @@ mod tests {
             dir: PathBuf::from("/tmp/cnm"),
             base: "A - B".to_string(),
         };
-        assert_eq!(target.file_path("flac"), PathBuf::from("/tmp/cnm/A - B.flac"));
+        assert_eq!(
+            target.file_path("flac"),
+            PathBuf::from("/tmp/cnm/A - B.flac")
+        );
         assert_eq!(
             target.part_path("mp3"),
             PathBuf::from("/tmp/cnm/A - B.mp3.part")
@@ -823,12 +834,23 @@ mod tests {
 
     #[test]
     fn state_glyph_uses_expected_frames() {
-        assert_eq!(state_glyph(DownloadState::NotDownloaded, Instant::now()), ICON_DOWNLOAD);
-        assert_eq!(state_glyph(DownloadState::Done, Instant::now()), ICON_DONE);
-        assert!(SPINNER_FRAMES.contains(&state_glyph(
-            DownloadState::Downloading,
-            Instant::now()
-        )));
+        let phase = Duration::from_millis(0);
+        assert_eq!(
+            state_glyph(DownloadState::NotDownloaded, phase),
+            ICON_DOWNLOAD
+        );
+        assert_eq!(state_glyph(DownloadState::Done, phase), ICON_DONE);
+        assert_eq!(
+            state_glyph(DownloadState::Downloading, phase),
+            SPINNER_FRAMES[0]
+        );
+        assert_eq!(
+            state_glyph(
+                DownloadState::Downloading,
+                Duration::from_millis(SPINNER_FRAME_MS as u64)
+            ),
+            SPINNER_FRAMES[1]
+        );
     }
 
     #[test]

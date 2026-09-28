@@ -280,7 +280,11 @@ impl ApiState {
     }
 
     /// 客户端下载链接（新版）：登录后可用，对免费歌曲能拿到比播放更高的档位。
-    pub async fn song_download_url_v1(&mut self, song_id: &str, level: &str) -> Result<ApiResponse> {
+    pub async fn song_download_url_v1(
+        &mut self,
+        song_id: &str,
+        level: &str,
+    ) -> Result<ApiResponse> {
         let query = self
             .query_with_cookie()
             .param("id", song_id)
@@ -449,7 +453,10 @@ pub struct AudioDownloadSource {
 }
 
 /// 从 `…/url` 系列回包里取第一条 `data[0]`：空 url 视为不可用。
-fn parse_audio_source(response: &ApiResponse, requested_level: &str) -> Option<AudioDownloadSource> {
+fn parse_audio_source(
+    response: &ApiResponse,
+    requested_level: &str,
+) -> Option<AudioDownloadSource> {
     let entry = response.body.pointer("/data/0")?;
     let url = entry.get("url").and_then(|value| value.as_str())?.trim();
     if url.is_empty() {

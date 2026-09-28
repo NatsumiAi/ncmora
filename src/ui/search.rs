@@ -161,7 +161,17 @@ fn draw_result_panel(frame: &mut Frame, app: &mut App, area: Rect) {
             );
         } else {
             let ordinal = search_item_ordinal(&app.search, item_idx);
-            render_search_row(frame, app, visible_rect, item_idx, ordinal, focused);
+            // 单曲行才有图标；状态查询带缓存，非单曲行直接跳过。
+            let download_state = app.search_download_state(item_idx);
+            render_search_row(
+                frame,
+                app,
+                visible_rect,
+                item_idx,
+                ordinal,
+                focused,
+                download_state,
+            );
         }
     }
 
@@ -344,14 +354,15 @@ fn draw_search_divider(frame: &mut Frame, app: &App, row: Rect) {
 
 fn render_search_row(
     frame: &mut Frame,
-    app: &App,
+    app: &mut App,
     row: Rect,
     item_idx: usize,
     ordinal: usize,
     focused: bool,
+    download_state: Option<crate::app::download::DownloadState>,
 ) {
-    let item = &app.search.results[item_idx];
-    let is_now_playing = app.is_now_playing_song(item.song_id.as_deref());
+    let song_id = app.search.results[item_idx].song_id.clone();
+    let is_now_playing = app.is_now_playing_song(song_id.as_deref());
     let zebra_bg = if app.config.transparent_background {
         None
     } else if item_idx.is_multiple_of(2) {
@@ -380,27 +391,66 @@ fn render_search_row(
         style
     };
 
-    let right = item
+    let right = app.search.results[item_idx]
         .kind
         .tag()
         .map(str::to_string)
-        .unwrap_or_else(|| item.right_label.clone());
+        .unwrap_or_else(|| app.search.results[item_idx].right_label.clone());
+    let left = format!(
+        "{:02}. {}",
+        ordinal, app.search.results[item_idx].left_label
+    );
 
-    let left = format!("{:02}. {}", ordinal, item.left_label);
-    let reserved = display_width(&right) + 1;
+    // 下载图标落在右侧标签（单曲行就是时长）左边：图标 + 一列分隔空格。
+    let icon_width = usize::from(download_state.is_some()) * 2;
+    let reserved = display_width(&right) + 1 + icon_width;
     let left_max = usize::from(row.width).saturating_sub(reserved);
     let clipped_left = clip_to_display_width(&left, left_max);
-    let used = display_width(&clipped_left) + display_width(&right);
+    let used = display_width(&clipped_left) + icon_width + display_width(&right);
     let space = usize::from(row.width).saturating_sub(used).max(1);
 
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(clipped_left, row_style),
-            Span::styled(" ".repeat(space), row_style),
-            Span::styled(right, row_style),
-        ])),
-        row,
-    );
+    let download_style = if focused {
+        row_style
+    } else {
+        match download_state {
+            Some(crate::app::download::DownloadState::Done) => {
+                Style::default().fg(app.theme.color_accent3())
+            }
+            Some(crate::app::download::DownloadState::Downloading) => Style::default()
+                .fg(app.theme.color_accent2())
+                .add_modifier(Modifier::BOLD),
+            _ => Style::default().fg(app.theme.color_subtext()),
+        }
+    };
+
+    let mut spans: Vec<Span> = vec![
+        Span::styled(clipped_left.clone(), row_style),
+        Span::styled(" ".repeat(space), row_style),
+    ];
+
+    if let Some(state) = download_state {
+        let icon_x = row
+            .x
+            .saturating_add((display_width(&clipped_left) + space) as u16);
+        spans.push(Span::styled(
+            crate::app::download::state_glyph(state, app.download_spinner_phase()).to_string(),
+            download_style,
+        ));
+        spans.push(Span::styled(" ", row_style));
+        app.push_search_item_download_hit(
+            crate::app::HitRect {
+                x: icon_x,
+                y: row.y,
+                width: 1,
+                height: 1,
+            },
+            item_idx,
+        );
+    }
+
+    spans.push(Span::styled(right, row_style));
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), row);
 }
 
 fn base_bg_style(app: &App) -> Style {
