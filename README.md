@@ -46,23 +46,27 @@ Playback belongs to the host: streaming with a local cache, queue memory, privat
 - Home sidebar (toggle keybind, default `P`): your created and collected playlists, up to 100 each; `Ctrl+Up/Down` switches section, Enter opens, Esc collapses; the wheel scrolls the section under the cursor (stopping at either end), a click focuses and a double click opens
 - Playlist page — also used for albums, there is no separate album page; a header (cover, title, author, description, track count) above a virtualized track list
 - Artist page: avatar, name, hot-song / album / EP / single counts and a tile grid per section
-- Search page: 50 results per request, appended as you scroll further
+- Search page: a plain keyword searches artists, playlists and songs at once (artists and playlists show the 5 most relevant hits each, above separate rules); songs are requested 50 at a time and appended as you scroll further
 - Private roam: refreshed daily while keeping the last played track at the head; reaching the end of the list fetches more (each API call returns 3 songs, three calls are merged and de-duplicated) and appends them; the tile cover follows the currently playing roam song, and the queue origin survives a restart
 - Navigation: Enter opens or plays, Esc / Left goes back, Tab / Down and Shift+Tab / Up move, PageUp / PageDown jump one page
 - Mouse: the wheel scrolls, a single click focuses, a double click activates (400 ms window); the collapsed player bar's previous / play-pause / next, like and repeat-mode buttons and its progress bar are clickable
 
 ### Search syntax
 
-The search box (`Ctrl+S`) takes a trailing suffix; without one the search behaves like `@single`.
+The search box (`Ctrl+S`) searches artists, playlists and songs at once; a trailing suffix narrows it to one type.
+Results are stacked as artist cards (avatar + name) → rule → playlists → rule → songs; the rules are visual only and scrolling runs through the whole list.
 `@author` and `@artist` are synonyms, and an empty keyword with `@author` lists the artists you follow.
 
 | Query | Results | Enter |
 | --- | --- | --- |
-| `keyword`, `keyword@single` | songs | plays the song, queueing the result set from that row |
+| `keyword` | most relevant artists, playlists and songs | depends on the focused row: play the song, open the artist or the playlist |
+| `keyword@single` | songs | plays the song, queueing the result set from that row |
 | `keyword@album` | albums | opens the album in the playlist layout |
 | `keyword@list` | playlists | opens the playlist |
 | `keyword@author` / `keyword@artist` | artists | opens the artist page |
 | `@author` (no keyword) | followed artists | opens the artist page |
+
+Artists and playlists are capped at the 5 most relevant hits and never paginate; only the song section appends more when you scroll to the end.
 
 ### Playback
 
