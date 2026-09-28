@@ -5346,6 +5346,8 @@ impl App {
 
         self.playlist_return_page = Page::Author;
         self.playlist_section_return_snapshot = None;
+        // 这一页换成作者页分区：在途的占位拉取作废（同 `apply_playlist_fetch`）。
+        self.playlist_fetch = None;
         self.playlist.id = self
             .author
             .id
@@ -7664,7 +7666,11 @@ impl App {
     }
 
     /// 把拉到的歌单/专辑数据落到状态上（阻塞版与 `tick_playlist_fetch` 共用）。
+    ///
+    /// 落状态即宣告"这一页换成了新来源"：在途的那次拉取随之作废，否则它迟到时
+    /// 会把刚打开的页面覆盖成被放弃的那一份（`tick_playlist_fetch` 只看句柄）。
     fn apply_playlist_fetch(&mut self, fetch: PlaylistFetch) {
+        self.playlist_fetch = None;
         self.playlist.id = Some(fetch.id);
         self.playlist.title = fetch.title;
         self.playlist.artist = fetch.artist;
@@ -7706,6 +7712,8 @@ impl App {
 
         let cover_url = tracks.iter().find_map(|track| track.cover_url.clone());
 
+        // 这一页换成每日推荐：在途的占位拉取作废（同 `apply_playlist_fetch`）。
+        self.playlist_fetch = None;
         self.playlist.id = Some(HOME_DAILY_RECOMMEND_TILE_ID.to_string());
         self.playlist.title = self
             .lang_text("每日推荐", "Daily Recommendations")
@@ -7748,6 +7756,8 @@ impl App {
         let cover_url = self.private_roam.cover_url.clone();
         let focus_index = self.private_roam.last_played_index;
 
+        // 这一页换成私人漫游：在途的占位拉取作废（同 `apply_playlist_fetch`）。
+        self.playlist_fetch = None;
         self.playlist.id = Some(HOME_PRIVATE_ROAM_TILE_ID.to_string());
         self.playlist.title = self.lang_text("私人漫游", "Private Roam").to_string();
         self.playlist.artist = self
@@ -7967,7 +7977,10 @@ impl App {
     }
 
     /// 把拉到的作者页数据落到状态上（`tick_author_fetch` 搬运结果时用）。
+    ///
+    /// 同 `apply_playlist_fetch`：新数据落地即在途拉取作废，免得迟到的旧结果覆盖它。
     fn apply_author_fetch(&mut self, fetch: AuthorFetch) {
+        self.author_fetch = None;
         self.author.id = Some(fetch.id);
         self.author.title = fetch.title;
         self.author.artist = fetch.artist;
