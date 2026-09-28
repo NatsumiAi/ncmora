@@ -6244,10 +6244,11 @@ impl App {
 
     /// 全屏页点了作者名：宿主按当前播放歌曲解析出作者并打开作者页。
     ///
-    /// 全屏页只有显示名（且可能是 "A / B / C" 的拼接），ID 只能由宿主补：
-    /// 取 `song/detail` 里 `ar` 的第一个（即列表里排在最前的那位作者）。
+    /// `index` 是显示串（`now_playing.artist`，形如 "A / B"）里的段序号：
+    /// 全屏页信息区按字符位置分段命中，点谁的名字就传谁的序号。
+    /// 全屏页只有显示名（ID 要靠 `song/detail` 的 `ar` 补），
     /// 本机音频 / 无播放时解析不出来，只在状态行里说明，不换页。
-    pub async fn open_author_page_from_fullscreen(&mut self) {
+    pub async fn open_author_page_from_fullscreen(&mut self, index: usize) {
         let Some(song_id) = self.current_song_id() else {
             self.set_runtime_status(
                 self.lang_text("当前没有正在播放的歌曲", "Nothing is playing right now"),
@@ -6255,8 +6256,13 @@ impl App {
             return;
         };
 
-        let (artist_id, _) = self.song_artist_album_ids(&song_id).await;
-        let Some(artist_id) = artist_id else {
+        let refs = self.song_page_refs(&song_id).await;
+        let line = self
+            .now_playing
+            .as_ref()
+            .map(|track| track.artist.clone())
+            .unwrap_or_default();
+        let Some(artist_id) = pick_artist_id(&refs.artists, &line, index) else {
             self.set_runtime_status(self.lang_text(
                 "无法解析当前歌曲的作者",
                 "Failed to resolve the artist of the current song",
@@ -6296,8 +6302,8 @@ impl App {
             return;
         };
 
-        let (_, album_id) = self.song_artist_album_ids(&song_id).await;
-        let Some(album_id) = album_id else {
+        let refs = self.song_page_refs(&song_id).await;
+        let Some(album_id) = refs.album_id else {
             self.set_runtime_status(self.lang_text(
                 "无法解析当前歌曲的专辑",
                 "Failed to resolve the album of the current song",
@@ -6326,13 +6332,13 @@ impl App {
         }
     }
 
-    /// 当前歌曲在 `song/detail` 里的主作者 ID 与专辑 ID。
+    /// 当前歌曲在 `song/detail` 里"点名字进页面"用得上的两样东西。
     ///
-    /// 队列/搜索结果只带歌曲 ID（曲目行没有 `ar[0].id`、`al.id`），
+    /// 队列/搜索结果只带歌曲 ID 与拼好的显示名（曲目行没有 `ar`/`al` 的 ID），
     /// 所以从全屏页点名字进页面时按需解析一次。
-    async fn song_artist_album_ids(&mut self, song_id: &str) -> (Option<String>, Option<String>) {
+    async fn song_page_refs(&mut self, song_id: &str) -> SongPageRefs {
         let Ok(detail) = self.api.song_detail(song_id).await else {
-            return (None, None);
+            return SongPageRefs::default();
         };
 
         let Some(song) = detail
@@ -6341,16 +6347,25 @@ impl App {
             .and_then(|value| value.as_array())
             .and_then(|items| items.first())
         else {
-            return (None, None);
+            return SongPageRefs::default();
         };
 
-        let artist_id = song
+        let artists = song
             .get("ar")
             .and_then(|value| value.as_array())
-            .and_then(|artists| artists.first())
-            .and_then(|artist| parse_value_as_string(artist.get("id")));
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        let name = item.get("name").and_then(|value| value.as_str())?;
+                        Some((name.to_string(), parse_value_as_string(item.get("id"))))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let album_id = parse_value_as_string(song.pointer("/al/id"));
-        (artist_id, album_id)
+
+        SongPageRefs { artists, album_id }
     }
 
     pub fn fullscreen_config_snapshot(&self) -> crate::tmplayer::HostConfigSync {
@@ -9329,6 +9344,46 @@ fn parse_playlist_items(items: &[Value]) -> Vec<SearchItem> {
     out
 }
 
+/// 多作者显示串的连接符：`parse_artists` 用它把 `ar` 拼成一行，
+/// 全屏页信息区再按它切回每段，好让"点谁的名字进谁的页面"。
+pub(crate) const ARTIST_SEPARATOR: &str = " / ";
+
+/// 把 `parse_artists` 拼出来的作者行按连接符切回每段（显示顺序 = `ar` 顺序）。
+///
+/// 空段保留：段序号要和显示位置一一对应，全屏页传回来的序号才对得上。
+pub(crate) fn artist_name_segments(line: &str) -> Vec<&str> {
+    line.split(ARTIST_SEPARATOR).collect()
+}
+
+/// 全屏页点名字进页面时，`song/detail` 里用得上的两样东西。
+#[derive(Debug, Default)]
+struct SongPageRefs {
+    /// `ar`：显示顺序的作者（名称 + ID；缺 ID 的条目保留占位，别让后面的下标错位）。
+    artists: Vec<(String, Option<String>)>,
+    album_id: Option<String>,
+}
+
+/// `song/detail` 里显示串第 `index` 段对应的作者 ID。
+///
+/// 先按名字匹配（显示串由同一份 `ar` 拼出来，正常都能命中；`ar` 顺序或名字带后缀时也稳），
+/// 再按位置兜底（`ar` 顺序 = 显示顺序）；两者都没有就返回 `None`，让调用方只报状态、不换页。
+fn pick_artist_id(
+    artists: &[(String, Option<String>)],
+    line: &str,
+    index: usize,
+) -> Option<String> {
+    if let Some(name) = artist_name_segments(line).get(index).copied() {
+        if let Some((_, id)) = artists
+            .iter()
+            .find(|(candidate, _)| candidate.as_str() == name)
+        {
+            return id.clone();
+        }
+    }
+
+    artists.get(index).and_then(|(_, id)| id.clone())
+}
+
 fn parse_artists(track: &Value) -> Option<String> {
     let artists = track
         .get("ar")
@@ -9344,7 +9399,7 @@ fn parse_artists(track: &Value) -> Option<String> {
     if names.is_empty() {
         None
     } else {
-        Some(names.join(" / "))
+        Some(names.join(ARTIST_SEPARATOR))
     }
 }
 
@@ -10189,5 +10244,49 @@ mod tests {
             None,
             "面板未登记（侧边栏宽度不足）不响应"
         );
+    }
+
+    /// 作者行按连接符切段：下标与显示位置一一对应（空段保留占位）。
+    #[test]
+    fn artist_name_segments_split_the_display_line() {
+        assert_eq!(artist_name_segments("Jay"), vec!["Jay"]);
+        assert_eq!(
+            artist_name_segments("Caffeine / 初音ミク"),
+            vec!["Caffeine", "初音ミク"]
+        );
+        assert_eq!(artist_name_segments("A / B / C"), vec!["A", "B", "C"]);
+        assert_eq!(artist_name_segments(""), vec![""]);
+    }
+
+    /// 段序号 → 作者 ID：先认名字（`ar` 顺序不同也对），再按位置兜底，都没有就 None。
+    #[test]
+    fn pick_artist_id_matches_the_name_then_the_position() {
+        let artists = vec![
+            ("初音ミク".to_string(), Some("9001".to_string())),
+            ("Caffeine".to_string(), Some("9002".to_string())),
+        ];
+
+        assert_eq!(
+            pick_artist_id(&artists, "Caffeine / 初音ミク", 0),
+            Some("9002".to_string()),
+            "点第 1 段：名字匹配到表里的第 2 位"
+        );
+        assert_eq!(
+            pick_artist_id(&artists, "Caffeine / 初音ミク", 1),
+            Some("9001".to_string())
+        );
+
+        let only_other = vec![("Other".to_string(), Some("1".to_string()))];
+        assert_eq!(
+            pick_artist_id(&only_other, "A / B", 0),
+            Some("1".to_string()),
+            "名字对不上时按位置兜底"
+        );
+        assert_eq!(
+            pick_artist_id(&only_other, "A / B", 1),
+            None,
+            "名字对不上且位置越界"
+        );
+        assert_eq!(pick_artist_id(&[], "A", 0), None, "没有作者表");
     }
 }

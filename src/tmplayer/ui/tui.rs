@@ -1841,14 +1841,12 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
         }
     }
 
-    // 作者名贴 meta 块第 2 行左端，只有名字画出来的那几格可点（行尾空白不算）：
-    // 点了就退出全屏页，由宿主打开该作者页。
-    if contains(
-        info_panel::artist_row_rect(layout.info_meta, &app.player.track.artist),
-        col,
-        row,
-    ) {
-        return Some(Action::OpenAuthorPage);
+    // 作者名贴 meta 块第 2 行左端，多作者按字符位置分段（"A / B" 点谁的名字进谁）：
+    // 只有名字画出来的那几格可点，连接符与行尾空白都不算。
+    for (index, rect) in info_panel::artist_row_hits(layout.info_meta, &app.player.track.artist) {
+        if contains(rect, col, row) {
+            return Some(Action::OpenAuthorPage(index));
+        }
     }
 
     // 专辑名贴 meta 块第 3 行左端，同样只算画出来的字符：点了打开专辑页。
@@ -2112,15 +2110,64 @@ mod tests {
         let mut app = state(Overlay::None);
         app.player.track.artist = "Jay".to_string();
 
-        assert_eq!(hit_test(&layout, &app, 2, 6), Some(Action::OpenAuthorPage));
-        assert_eq!(hit_test(&layout, &app, 4, 6), Some(Action::OpenAuthorPage));
+        assert_eq!(
+            hit_test(&layout, &app, 2, 6),
+            Some(Action::OpenAuthorPage(0))
+        );
+        assert_eq!(
+            hit_test(&layout, &app, 4, 6),
+            Some(Action::OpenAuthorPage(0))
+        );
         assert_eq!(hit_test(&layout, &app, 5, 6), None, "作者行行尾空白不算");
         assert_eq!(hit_test(&layout, &app, 2, 5), None, "标题行不是作者行");
         assert_ne!(
             hit_test(&layout, &app, 2, 7),
-            Some(Action::OpenAuthorPage),
+            Some(Action::OpenAuthorPage(0)),
             "专辑行不打开作者页"
         );
+    }
+
+    /// 多作者（"A / B"）：按字符位置分段，点谁的名字进谁的页面，连接符不算。
+    #[test]
+    fn clicking_each_artist_segment_opens_that_artist() {
+        let layout = UiLayout {
+            info_meta: rect(2, 5, 20, 3),
+            ..UiLayout::default()
+        };
+        let mut app = state(Overlay::None);
+        app.player.track.artist = "Caffeine / 初音ミク".to_string();
+
+        // 行首在 x=2："Caffeine" 占 2..=9，" / " 占 10..=12，"初音ミク" 占 13..=20。
+        assert_eq!(
+            hit_test(&layout, &app, 2, 6),
+            Some(Action::OpenAuthorPage(0))
+        );
+        assert_eq!(
+            hit_test(&layout, &app, 9, 6),
+            Some(Action::OpenAuthorPage(0))
+        );
+        assert_eq!(hit_test(&layout, &app, 10, 6), None, "连接符不是作者名");
+        assert_eq!(hit_test(&layout, &app, 12, 6), None, "连接符不是作者名");
+        assert_eq!(
+            hit_test(&layout, &app, 13, 6),
+            Some(Action::OpenAuthorPage(1))
+        );
+        assert_eq!(
+            hit_test(&layout, &app, 20, 6),
+            Some(Action::OpenAuthorPage(1))
+        );
+        assert_eq!(hit_test(&layout, &app, 21, 6), None, "第二个名字画完了");
+
+        // 行宽不足以放下整段时，只算画出来的那几格（"初" 两格，"音" 放不下）。
+        let narrow = UiLayout {
+            info_meta: rect(0, 0, 13, 3),
+            ..UiLayout::default()
+        };
+        assert_eq!(
+            hit_test(&narrow, &app, 12, 1),
+            Some(Action::OpenAuthorPage(1))
+        );
+        assert_eq!(hit_test(&narrow, &app, 13, 1), None, "meta 只有 13 格");
     }
 
     /// 专辑名贴 meta 块第 3 行左端：同样只算画出来的字符。
@@ -2164,7 +2211,10 @@ mod tests {
         let mut app = state(Overlay::None);
         app.player.track.artist = "周杰伦".to_string();
 
-        assert_eq!(hit_test(&layout, &app, 5, 1), Some(Action::OpenAuthorPage));
+        assert_eq!(
+            hit_test(&layout, &app, 5, 1),
+            Some(Action::OpenAuthorPage(0))
+        );
         assert_eq!(hit_test(&layout, &app, 6, 1), None, "名字只有 6 格宽");
     }
 
@@ -2186,7 +2236,7 @@ mod tests {
         };
         assert_eq!(
             hit_test(&three_rows, &app, 2, 6),
-            Some(Action::OpenAuthorPage)
+            Some(Action::OpenAuthorPage(0))
         );
 
         app.player.track.artist.clear();

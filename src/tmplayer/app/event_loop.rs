@@ -1273,11 +1273,12 @@ async fn handle_action(
 
             app.set_toast("Like is unavailable in local mode");
         }
-        Action::OpenAuthorPage => {
-            // 作者页归宿主（全屏页只有显示名，没有作者 ID）：
-            // 记下请求退出，宿主在关闭全屏页后按当前播放歌曲解析并打开。
+        Action::OpenAuthorPage(index) => {
+            // 作者页归宿主（全屏页只有显示名，没有作者 ID）：记下请求退出与段序号，
+            // 宿主在关闭全屏页后按当前播放歌曲解析并打开。
             if host_bridge.is_some() {
-                app.exit_request = Some(crate::tmplayer::FullscreenExit::BackToHostOpenAuthor);
+                app.exit_request =
+                    Some(crate::tmplayer::FullscreenExit::BackToHostOpenAuthor(index));
             } else {
                 app.set_toast("Author page is unavailable in standalone mode");
             }

@@ -63,9 +63,48 @@ fn meta_text_rect(meta: Rect, row: u16, text: &str) -> Rect {
     }
 }
 
-/// 作者行的命中矩形（meta 块第 2 行画出来的字符范围）。
-pub fn artist_row_rect(meta: Rect, artist: &str) -> Rect {
-    meta_text_rect(meta, META_ARTIST_ROW, artist)
+/// 作者行按作者分段后的命中矩形（多作者显示串 "A / B"：点谁的名字进谁的页面）。
+///
+/// 返回 `(段序号, 矩形)`，顺序即显示顺序；段序号与宿主 `song/detail` 的 `ar` 顺序同源，
+/// 全屏页退出后由宿主按它取 ID。只返回画出来的部分：meta 宽度之外的段/片段不返回，
+/// 名字短的段右侧空白与连接符本身都不是命中区，名字为空（宽度 0）的段也不返回。
+pub fn artist_row_hits(meta: Rect, artist: &str) -> Vec<(usize, Rect)> {
+    if meta.width == 0 || meta.height <= META_ARTIST_ROW || artist.is_empty() {
+        return Vec::new();
+    }
+
+    let budget = meta.width as usize;
+    let separator_w = crate::app::ARTIST_SEPARATOR.width();
+    let mut hits = Vec::new();
+    let mut offset = 0usize;
+
+    for (index, name) in crate::app::artist_name_segments(artist)
+        .into_iter()
+        .enumerate()
+    {
+        // 与渲染同源：整行按 meta 宽度裁剪，落在裁剪边界上的段只算画出来的那几格。
+        let visible = if offset < budget {
+            clip_to_display_width(name, budget - offset).width()
+        } else {
+            0
+        };
+
+        if visible > 0 {
+            hits.push((
+                index,
+                Rect {
+                    x: meta.x + offset as u16,
+                    y: meta.y + META_ARTIST_ROW,
+                    width: visible as u16,
+                    height: 1,
+                },
+            ));
+        }
+
+        offset += name.width() + separator_w;
+    }
+
+    hits
 }
 
 /// 专辑行的命中矩形（meta 块第 3 行画出来的字符范围）。

@@ -430,8 +430,8 @@ async fn launch_tmplayer_fullscreen(
         Some(tmplayer::FullscreenExit::BackToHostOpenSettings) => {
             app.open_settings_from_fullscreen()
         }
-        Some(tmplayer::FullscreenExit::BackToHostOpenAuthor) => {
-            app.open_author_page_from_fullscreen().await
+        Some(tmplayer::FullscreenExit::BackToHostOpenAuthor(index)) => {
+            app.open_author_page_from_fullscreen(index).await
         }
         Some(tmplayer::FullscreenExit::BackToHostOpenAlbum) => {
             app.open_album_page_from_fullscreen().await
