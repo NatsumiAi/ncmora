@@ -8391,6 +8391,8 @@ impl App {
 
         if followed_author_query {
             let mut page = parse_followed_author_page(&response);
+            // 追加的条目同样要发起头像请求，否则第二页起的作者卡片没有头像。
+            self.load_search_item_covers(&mut page.items);
             let fetched_count = page.fetched_count;
             let added = page.items.len();
             self.search.results.append(&mut page.items);
