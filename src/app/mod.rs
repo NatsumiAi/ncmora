@@ -466,8 +466,25 @@ async fn fetch_author_page(
         .to_string()
     })?;
 
+    // 全屏页只有显示名，没有搜索结果那行的封面可以兜底。
+    fetch_author_page_by_id(api, language, artist_id, None).await
+}
+
+/// 拉一次作者页数据（作者 ID 已确定）。
+///
+/// `fallback_cover_url` 是搜索结果里那行的封面：接口没给头像时用它兜底。
+async fn fetch_author_page_by_id(
+    api: ApiState,
+    language: Language,
+    artist_id: String,
+    fallback_cover_url: Option<String>,
+) -> Result<AuthorFetch, String> {
     let responses = fetch_artist_responses(&api, &artist_id).await;
-    App::build_author_page(&api, language, &artist_id, responses)
+    let mut fetch = App::build_author_page(&api, language, &artist_id, responses)?;
+    if fetch.cover_url.is_none() {
+        fetch.cover_url = fallback_cover_url;
+    }
+    Ok(fetch)
 }
 
 /// `song/detail` →「点名字进页面」要用的作者 / 专辑 ID。
@@ -504,6 +521,244 @@ async fn fetch_song_page_refs(mut api: ApiState, song_id: &str) -> SongPageRefs 
     let album_id = parse_value_as_string(song.pointer("/al/id"));
 
     SongPageRefs { artists, album_id }
+}
+
+type PlaylistFetchFuture = SharedFuture<Result<PlaylistFetch, String>>;
+/// 装箱后的任务体（`shot_and_share` 的入参类型）。
+type PlaylistFetchTask = Pin<Box<dyn Future<Output = Option<Result<PlaylistFetch, String>>>>>;
+
+/// 歌单页 / 专辑页的在途拉取：句柄旁边记下是哪种页面（成功后文案不同）。
+struct PlaylistFetchSlot {
+    kind: PlaylistPageKind,
+    future: PlaylistFetchFuture,
+}
+
+/// 打开的是歌单还是专辑：端点与文案不同，落状态是同一套。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlaylistPageKind {
+    Playlist,
+    Album,
+}
+
+impl PlaylistPageKind {
+    fn opened(self, language: Language) -> &'static str {
+        match (self, language) {
+            (Self::Playlist, Language::Zh) => "已打开歌单",
+            (Self::Playlist, Language::En) => "Opened playlist",
+            (Self::Album, Language::Zh) => "已打开专辑",
+            (Self::Album, Language::En) => "Opened album",
+        }
+    }
+
+    fn failed(self, language: Language) -> &'static str {
+        match (self, language) {
+            (Self::Playlist, Language::Zh) => "打开歌单失败",
+            (Self::Playlist, Language::En) => "Failed to open playlist",
+            (Self::Album, Language::Zh) => "打开专辑失败",
+            (Self::Album, Language::En) => "Failed to open album",
+        }
+    }
+}
+
+/// 「我喜欢的音乐」全量 id 的刷新结果（打开该歌单时顺带做一次）。
+#[derive(Clone)]
+struct LikedRefresh {
+    ids: HashSet<String>,
+    /// 只有当场取过账号档案时才有值（否则沿用已有 uid，不动档案）。
+    profile: Option<AccountProfile>,
+}
+
+/// 歌单页 / 专辑页的一次拉取结果：`PlaylistState` 里除封面句柄与视口字段外的全部字段。
+///
+/// 结果要经 `shot_and_share` 搬运，故实现 `Clone`（封面句柄是 `Shared`，克隆很廉价）。
+#[derive(Clone)]
+struct PlaylistFetch {
+    id: String,
+    title: String,
+    artist: String,
+    description: String,
+    cover_url: Option<String>,
+    tracks: Vec<PlaylistTrack>,
+    liked: Option<LikedRefresh>,
+}
+
+/// 打开的歌单是不是「我喜欢的音乐」：ID 对得上，或标题命中（中英文两种叫法）。
+fn is_liked_playlist(
+    liked_playlist_id: Option<&str>,
+    playlist_id: &str,
+    title: Option<&str>,
+) -> bool {
+    if liked_playlist_id == Some(playlist_id) {
+        return true;
+    }
+
+    let title = title.unwrap_or_default().trim();
+    !title.is_empty()
+        && (title.contains("我喜欢的音乐") || title.to_ascii_lowercase().contains("liked songs"))
+}
+
+/// 「我喜欢的音乐」全量 id：uid 已知就直接用，否则顺带取一次账号档案。
+///
+/// 任一步失败都返回 `None`（旧行为是忽略这里的错误，不影响歌单页打开）。
+async fn fetch_liked_refresh(
+    api: &mut ApiState,
+    language: Language,
+    uid_hint: Option<String>,
+) -> Option<LikedRefresh> {
+    let (uid, profile) = match uid_hint {
+        Some(uid) => (uid, None),
+        None => {
+            let profile = fetch_account_profile(api, language).await.ok()?;
+            (profile.uid.clone(), Some(profile))
+        }
+    };
+
+    let ids = fetch_liked_song_ids(api, &uid, language).await.ok()?;
+    Some(LikedRefresh { ids, profile })
+}
+
+/// 拉一次歌单页数据（不借 `&mut App`，可交给 `shot_and_share` 后台跑）。
+///
+/// `fallback_cover_url` 是搜索结果里那行的封面：接口没给封面时用它兜底。
+/// `liked_playlist_id` / `uid_hint` 只用于判断要不要顺带刷新「我喜欢的音乐」。
+async fn fetch_playlist_page(
+    mut api: ApiState,
+    language: Language,
+    playlist_id: String,
+    fallback_cover_url: Option<String>,
+    liked_playlist_id: Option<String>,
+    uid_hint: Option<String>,
+) -> Result<PlaylistFetch, String> {
+    let response = api
+        .playlist_detail(&playlist_id)
+        .await
+        .map_err(|err| err.to_string())?;
+    let code = response_code(&response);
+    if code != 200 {
+        return Err(format!(
+            "请求失败({}): {}",
+            code,
+            response_message(&response)
+        ));
+    }
+
+    let playlist = response
+        .body
+        .get("playlist")
+        .ok_or_else(|| "歌单数据缺失".to_string())?;
+
+    let title = playlist
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("未命名歌单")
+        .to_string();
+
+    let liked = if is_liked_playlist(liked_playlist_id.as_deref(), &playlist_id, Some(&title)) {
+        fetch_liked_refresh(&mut api, language, uid_hint).await
+    } else {
+        None
+    };
+
+    let artist = playlist
+        .pointer("/creator/nickname")
+        .and_then(|value| value.as_str())
+        .unwrap_or("网易云音乐")
+        .to_string();
+
+    let description = first_non_empty(
+        playlist,
+        &["/description", "/copywriter", "/creator/signature"],
+    )
+    .unwrap_or_else(|| "暂无简介".to_string());
+
+    let cover_url = first_non_empty(playlist, &["/coverImgUrl", "/picUrl"]).or(fallback_cover_url);
+
+    let tracks = playlist
+        .get("tracks")
+        .and_then(|value| value.as_array())
+        .map(|items| parse_tracks(items))
+        .unwrap_or_default();
+
+    Ok(PlaylistFetch {
+        id: playlist_id,
+        title,
+        artist,
+        description,
+        cover_url,
+        tracks,
+        liked,
+    })
+}
+
+/// 拉一次专辑页数据（歌单页样式复用同一套落状态）。
+///
+/// 专辑接口不给每首歌的封面，缺封面的曲目用专辑封面兜底。
+async fn fetch_album_page(
+    mut api: ApiState,
+    language: Language,
+    album_id: String,
+    fallback_cover_url: Option<String>,
+) -> Result<PlaylistFetch, String> {
+    let response = api.album(&album_id).await.map_err(|err| err.to_string())?;
+    let code = response_code(&response);
+    if code != 200 {
+        return Err(format!(
+            "请求失败({}): {}",
+            code,
+            response_message(&response)
+        ));
+    }
+
+    let album = response
+        .body
+        .get("album")
+        .or_else(|| response.body.pointer("/data/album"))
+        .ok_or_else(|| "专辑数据缺失".to_string())?;
+
+    let title = album
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("未命名专辑")
+        .to_string();
+
+    let artist = first_non_empty(album, &["/artist/name", "/artists/0/name"])
+        .unwrap_or_else(|| "网易云音乐".to_string());
+
+    let description = first_non_empty(album, &["/description", "/company", "/type", "/subType"])
+        .unwrap_or_else(|| lang_text(language, "暂无简介", "No description").to_string());
+
+    let cover_url = first_non_empty(album, &["/picUrl", "/blurPicUrl"]).or(fallback_cover_url);
+
+    let mut tracks = response
+        .body
+        .get("songs")
+        .or_else(|| response.body.pointer("/data/songs"))
+        .and_then(|value| value.as_array())
+        .map(|items| parse_tracks(items))
+        .unwrap_or_default();
+
+    if let Some(album_cover_url) = cover_url.as_ref() {
+        for track in &mut tracks {
+            let missing_song_cover = track
+                .cover_url
+                .as_deref()
+                .map(|value| value.trim().is_empty())
+                .unwrap_or(true);
+            if missing_song_cover {
+                track.cover_url = Some(album_cover_url.clone());
+            }
+        }
+    }
+
+    Ok(PlaylistFetch {
+        id: album_id,
+        title,
+        artist,
+        description,
+        cover_url,
+        tracks,
+        liked: None,
+    })
 }
 
 fn shot_and_share<F>(fut: F) -> Shared<F>
@@ -1822,6 +2077,19 @@ impl PlaylistState {
         self.ensure_focus_visible();
     }
 
+    /// 搜索页点歌单/专辑后先落地的占位状态：标题用结果行的名字，数据由
+    /// `App::tick_playlist_fetch` 搬进来（数据没到之前 `App::playlist_fetch` 为 `Some`，
+    /// 歌单页不响应翻页键）。
+    pub fn placeholder(title: String, description: String) -> Self {
+        Self {
+            title,
+            artist: String::new(),
+            description,
+            tracks: Vec::new(),
+            ..Self::default()
+        }
+    }
+
     pub fn focus_next(&mut self) -> bool {
         if self.tracks.is_empty() || self.focused_idx + 1 >= self.tracks.len() {
             return false;
@@ -2429,6 +2697,8 @@ pub struct App {
     home_sidebar_fetch: Option<HomeSidebarFetchFuture>,
     /// 作者页的在途拉取（全屏页点作者名：页面先落地，数据由 `tick_author_fetch` 搬进来）。
     author_fetch: Option<AuthorFetchFuture>,
+    /// 歌单页 / 专辑页的在途拉取（搜索页打开：页面先落地，数据由 `tick_playlist_fetch` 搬进来）。
+    playlist_fetch: Option<PlaylistFetchSlot>,
     /// 上次检查 stderr 日志体积的时刻。
     stderr_trim_checked_at: Option<Instant>,
     home_sidebar_anim_span_cells: u16,
@@ -2590,6 +2860,7 @@ impl App {
             home_sidebar: HomeSidebarState::default(),
             home_sidebar_fetch: None,
             author_fetch: None,
+            playlist_fetch: None,
             stderr_trim_checked_at: None,
             home_sidebar_anim_span_cells: 24,
             playlist: PlaylistState::default(),
@@ -2712,6 +2983,7 @@ impl App {
         self.tick_home_sidebar_animation();
         self.tick_home_sidebar_fetch();
         self.tick_author_fetch();
+        self.tick_playlist_fetch();
         self.tick_like_sync();
         self.tick_stderr_log_trim();
         self.tick_startup_init().await;
@@ -3178,6 +3450,10 @@ impl App {
         }
         // 作者页数据在途：结果一到就上屏，别让 1s 空闲节流把它压住。
         if self.author_fetch.is_some() {
+            return true;
+        }
+        // 歌单页 / 专辑页同理。
+        if self.playlist_fetch.is_some() {
             return true;
         }
         // 加载页全程保持高帧率：进度条本身在缓动，收尾还要等最短可见时长，
@@ -3928,6 +4204,34 @@ impl App {
                 self.set_runtime_status(format!(
                     "{}: {message}",
                     self.lang_text("打开作者页失败", "Failed to open the artist page"),
+                ));
+            }
+        }
+    }
+
+    /// 搬运歌单页 / 专辑页的在途拉取（每帧调用，结果就绪才动状态）。
+    fn tick_playlist_fetch(&mut self) {
+        let Some(slot) = self.playlist_fetch.as_ref() else {
+            return;
+        };
+        let Some(result) = peek_shared(&slot.future).cloned() else {
+            return;
+        };
+        let kind = slot.kind;
+        self.playlist_fetch = None;
+
+        match result {
+            Ok(fetch) => {
+                let title = fetch.title.clone();
+                self.apply_playlist_fetch(fetch);
+                self.set_runtime_status(format!("{} {}", kind.opened(self.config.language), title));
+            }
+            Err(message) => {
+                self.playlist.description =
+                    format!("{}: {message}", kind.failed(self.config.language));
+                self.set_runtime_status(format!(
+                    "{}: {message}",
+                    kind.failed(self.config.language)
                 ));
             }
         }
@@ -5116,7 +5420,8 @@ impl App {
         }
     }
 
-    async fn open_focused_search_author(&mut self) {
+    /// 搜索页打开作者：立即落占位作者页 + 派发后台拉取（结果由 `tick_author_fetch` 搬进来）。
+    fn open_focused_search_author(&mut self) {
         let (artist_id, title, fallback_cover_url) = {
             let Some(item) = self.search.results.get(self.search.focused_idx) else {
                 return;
@@ -5135,26 +5440,27 @@ impl App {
             (artist_id, item.left_label.clone(), item.cover_url.clone())
         };
 
-        self.search.status_line = format!("正在加载作者 {}", title);
+        self.author = AuthorState::placeholder(
+            title,
+            self.lang_text("正在加载作者…", "Loading artist…")
+                .to_string(),
+        );
+        self.playlist_section_return_snapshot = None;
+        self.author_return_page = Page::Search;
+        self.page = Page::Author;
 
-        match self.load_author_detail(&artist_id).await {
-            Ok(()) => {
-                match (&self.author.cover.image, fallback_cover_url) {
-                    (None, Some(url)) => self.author.cover.load(self.api.clone(), url),
-                    _ => (),
-                }
-                self.playlist_section_return_snapshot = None;
-                self.author_return_page = Page::Search;
-                self.page = Page::Author;
-                self.search.status_line = format!("已打开作者 {}", self.author.title);
-            }
-            Err(err) => {
-                self.search.status_line = format!("打开作者页失败: {}", err);
-            }
-        }
+        let fut = fetch_author_page_by_id(
+            self.api.clone(),
+            self.config.language,
+            artist_id,
+            fallback_cover_url,
+        );
+        let fut: AuthorFetchTask = Box::pin(async move { Some(fut.await) });
+        self.author_fetch = Some(shot_and_share(fut));
     }
 
-    async fn open_focused_search_album(&mut self) {
+    /// 搜索页打开专辑：立即落占位歌单页 + 派发后台拉取（结果由 `tick_playlist_fetch` 搬进来）。
+    fn open_focused_search_album(&mut self) {
         let (album_id, title, fallback_cover_url) = {
             let Some(item) = self.search.results.get(self.search.focused_idx) else {
                 return;
@@ -5179,35 +5485,30 @@ impl App {
             )
         };
 
-        self.search.status_line = format!(
-            "{} {}",
-            self.lang_text("正在加载专辑", "Loading album"),
-            title
+        self.playlist = PlaylistState::placeholder(
+            title,
+            self.lang_text("正在加载专辑…", "Loading album…")
+                .to_string(),
         );
+        self.playlist_section_return_snapshot = None;
+        self.playlist_return_page = Page::Search;
+        self.page = Page::Playlist;
 
-        match self.load_album_detail(&album_id).await {
-            Ok(()) => {
-                self.playlist_section_return_snapshot = None;
-                match (&self.playlist.cover.image, fallback_cover_url) {
-                    (None, Some(url)) => self.playlist.cover.load(self.api.clone(), url),
-                    _ => (),
-                }
-                self.playlist_return_page = Page::Search;
-                self.page = Page::Playlist;
-                self.search.status_line =
-                    format!("{} {}", self.lang_text("已打开专辑", "Opened album"), title);
-            }
-            Err(err) => {
-                self.search.status_line = format!(
-                    "{}: {}",
-                    self.lang_text("打开专辑失败", "Failed to open album"),
-                    err
-                );
-            }
-        }
+        let fut = fetch_album_page(
+            self.api.clone(),
+            self.config.language,
+            album_id,
+            fallback_cover_url,
+        );
+        let fut: PlaylistFetchTask = Box::pin(async move { Some(fut.await) });
+        self.playlist_fetch = Some(PlaylistFetchSlot {
+            kind: PlaylistPageKind::Album,
+            future: shot_and_share(fut),
+        });
     }
 
-    async fn open_focused_search_playlist(&mut self) {
+    /// 搜索页打开歌单：立即落占位歌单页 + 派发后台拉取（结果由 `tick_playlist_fetch` 搬进来）。
+    fn open_focused_search_playlist(&mut self) {
         let (playlist_id, title, fallback_cover_url) = {
             let Some(item) = self.search.results.get(self.search.focused_idx) else {
                 return;
@@ -5226,35 +5527,28 @@ impl App {
             (playlist_id, item.left_label.clone(), item.cover_url.clone())
         };
 
-        self.search.status_line = format!(
-            "{} {}",
-            self.lang_text("正在加载歌单", "Loading playlist"),
-            title
+        self.playlist = PlaylistState::placeholder(
+            title,
+            self.lang_text("正在加载歌单…", "Loading playlist…")
+                .to_string(),
         );
+        self.playlist_section_return_snapshot = None;
+        self.playlist_return_page = Page::Search;
+        self.page = Page::Playlist;
 
-        match self.load_playlist_detail(&playlist_id).await {
-            Ok(()) => {
-                self.playlist_section_return_snapshot = None;
-                match (&self.playlist.cover.image, fallback_cover_url) {
-                    (None, Some(url)) => self.playlist.cover.load(self.api.clone(), url),
-                    _ => (),
-                }
-                self.playlist_return_page = Page::Search;
-                self.page = Page::Playlist;
-                self.search.status_line = format!(
-                    "{} {}",
-                    self.lang_text("已打开歌单", "Opened playlist"),
-                    title
-                );
-            }
-            Err(err) => {
-                self.search.status_line = format!(
-                    "{}: {}",
-                    self.lang_text("打开歌单失败", "Failed to open playlist"),
-                    err
-                );
-            }
-        }
+        let fut = fetch_playlist_page(
+            self.api.clone(),
+            self.config.language,
+            playlist_id,
+            fallback_cover_url,
+            self.home_sidebar.liked_playlist_id.clone(),
+            self.home_sidebar.user_id.clone(),
+        );
+        let fut: PlaylistFetchTask = Box::pin(async move { Some(fut.await) });
+        self.playlist_fetch = Some(PlaylistFetchSlot {
+            kind: PlaylistPageKind::Playlist,
+            future: shot_and_share(fut),
+        });
     }
 
     async fn activate_focused_search_result(&mut self) {
@@ -5269,9 +5563,9 @@ impl App {
 
         match kind {
             SearchItemKind::Song => self.play_focused_search_track().await,
-            SearchItemKind::Album => self.open_focused_search_album().await,
-            SearchItemKind::Artist => self.open_focused_search_author().await,
-            SearchItemKind::Playlist => self.open_focused_search_playlist().await,
+            SearchItemKind::Album => self.open_focused_search_album(),
+            SearchItemKind::Artist => self.open_focused_search_author(),
+            SearchItemKind::Playlist => self.open_focused_search_playlist(),
         }
     }
 
@@ -6012,6 +6306,14 @@ impl App {
     }
 
     async fn handle_playlist_key(&mut self, key: KeyEvent) {
+        // 数据还在路上：占位页上的焦点/条目都没有意义，只留返回键。
+        if self.playlist_fetch.is_some() {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Left) {
+                self.page = self.playlist_return_page;
+            }
+            return;
+        }
+
         match key.code {
             KeyCode::Up | KeyCode::BackTab => {
                 let _ = self.playlist.focus_prev();
@@ -7339,75 +7641,45 @@ impl App {
     }
 
     fn is_liked_playlist(&self, playlist_id: &str, title: Option<&str>) -> bool {
-        if self
-            .home_sidebar
-            .liked_playlist_id
-            .as_deref()
-            .map(|id| id == playlist_id)
-            .unwrap_or(false)
-        {
-            return true;
-        }
-
-        let title = title.unwrap_or_default().trim();
-        !title.is_empty()
-            && (title.contains("我喜欢的音乐")
-                || title.to_ascii_lowercase().contains("liked songs"))
+        is_liked_playlist(
+            self.home_sidebar.liked_playlist_id.as_deref(),
+            playlist_id,
+            title,
+        )
     }
 
     async fn load_playlist_detail(&mut self, playlist_id: &str) -> Result<()> {
-        let response = self.api.playlist_detail(playlist_id).await?;
-        let code = response_code(&response);
-        if code != 200 {
-            return Err(anyhow!(
-                "请求失败({}): {}",
-                code,
-                response_message(&response)
-            ));
-        }
-
-        let playlist = response
-            .body
-            .get("playlist")
-            .ok_or_else(|| anyhow!("歌单数据缺失"))?;
-
-        let title = playlist
-            .get("name")
-            .and_then(|value| value.as_str())
-            .unwrap_or("未命名歌单")
-            .to_string();
-
-        if self.is_liked_playlist(playlist_id, Some(&title)) {
-            let _ = self.refresh_liked_song_cache().await;
-        }
-
-        let artist = playlist
-            .pointer("/creator/nickname")
-            .and_then(|value| value.as_str())
-            .unwrap_or("网易云音乐")
-            .to_string();
-
-        let description = first_non_empty(
-            playlist,
-            &["/description", "/copywriter", "/creator/signature"],
+        let fetch = fetch_playlist_page(
+            self.api.clone(),
+            self.config.language,
+            playlist_id.to_string(),
+            None,
+            self.home_sidebar.liked_playlist_id.clone(),
+            self.home_sidebar.user_id.clone(),
         )
-        .unwrap_or_else(|| "暂无简介".to_string());
-
-        let cover_url = first_non_empty(playlist, &["/coverImgUrl", "/picUrl"]);
-
-        let tracks = playlist
-            .get("tracks")
-            .and_then(|value| value.as_array())
-            .map(|items| parse_tracks(items))
-            .unwrap_or_default();
-
-        self.playlist.id = Some(playlist_id.to_string());
-        self.playlist.title = title;
-        self.playlist.artist = artist;
-        self.playlist.description = description;
-        self.playlist.set_tracks(tracks);
-        cover_url.map(|x| self.playlist.cover.load(self.api.clone(), x));
+        .await
+        .map_err(anyhow::Error::msg)?;
+        self.apply_playlist_fetch(fetch);
         Ok(())
+    }
+
+    /// 把拉到的歌单/专辑数据落到状态上（阻塞版与 `tick_playlist_fetch` 共用）。
+    fn apply_playlist_fetch(&mut self, fetch: PlaylistFetch) {
+        self.playlist.id = Some(fetch.id);
+        self.playlist.title = fetch.title;
+        self.playlist.artist = fetch.artist;
+        self.playlist.description = fetch.description;
+        self.playlist.set_tracks(fetch.tracks);
+        if let Some(url) = fetch.cover_url {
+            self.playlist.cover.load(self.api.clone(), url);
+        }
+
+        if let Some(liked) = fetch.liked {
+            if let Some(profile) = liked.profile {
+                self.apply_account_profile(profile);
+            }
+            self.apply_liked_song_ids(liked.ids);
+        }
     }
 
     async fn load_daily_recommend_playlist(&mut self) -> Result<()> {
@@ -7682,77 +7954,19 @@ impl App {
     }
 
     async fn load_album_detail(&mut self, album_id: &str) -> Result<()> {
-        let response = self.api.album(album_id).await?;
-        let code = response_code(&response);
-        if code != 200 {
-            return Err(anyhow!(
-                "请求失败({}): {}",
-                code,
-                response_message(&response)
-            ));
-        }
-
-        let album = response
-            .body
-            .get("album")
-            .or_else(|| response.body.pointer("/data/album"))
-            .ok_or_else(|| anyhow!("专辑数据缺失"))?;
-
-        let title = album
-            .get("name")
-            .and_then(|value| value.as_str())
-            .unwrap_or("未命名专辑")
-            .to_string();
-
-        let artist = first_non_empty(album, &["/artist/name", "/artists/0/name"])
-            .unwrap_or_else(|| "网易云音乐".to_string());
-
-        let description =
-            first_non_empty(album, &["/description", "/company", "/type", "/subType"])
-                .unwrap_or_else(|| self.lang_text("暂无简介", "No description").to_string());
-
-        let cover_url = first_non_empty(album, &["/picUrl", "/blurPicUrl"]);
-
-        let mut tracks = response
-            .body
-            .get("songs")
-            .or_else(|| response.body.pointer("/data/songs"))
-            .and_then(|value| value.as_array())
-            .map(|items| parse_tracks(items))
-            .unwrap_or_default();
-
-        if let Some(album_cover_url) = cover_url.as_ref() {
-            for track in &mut tracks {
-                let missing_song_cover = track
-                    .cover_url
-                    .as_deref()
-                    .map(|value| value.trim().is_empty())
-                    .unwrap_or(true);
-                if missing_song_cover {
-                    track.cover_url = Some(album_cover_url.clone());
-                }
-            }
-        }
-
-        self.playlist.id = Some(album_id.to_string());
-        self.playlist.title = title;
-        self.playlist.artist = artist;
-        self.playlist.description = description;
-        self.playlist.set_tracks(tracks);
-        cover_url.map(|x| self.playlist.cover.load(self.api.clone(), x));
+        let fetch = fetch_album_page(
+            self.api.clone(),
+            self.config.language,
+            album_id.to_string(),
+            None,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        self.apply_playlist_fetch(fetch);
         Ok(())
     }
 
-    /// 阻塞版：搜索结果里已经带了作者 ID，进入时直接拉（全屏页那条走异步填充）。
-    async fn load_author_detail(&mut self, artist_id: &str) -> Result<()> {
-        let responses = fetch_artist_responses(&self.api, artist_id).await;
-        let fetch = App::build_author_page(&self.api, self.config.language, artist_id, responses)
-            .map_err(anyhow::Error::msg)?;
-        self.apply_author_fetch(fetch);
-        Ok(())
-    }
-
-    /// 把拉到的作者页数据落到状态上（阻塞版与 `tick_author_fetch` 共用）。
+    /// 把拉到的作者页数据落到状态上（`tick_author_fetch` 搬运结果时用）。
     fn apply_author_fetch(&mut self, fetch: AuthorFetch) {
         self.author.id = Some(fetch.id);
         self.author.title = fetch.title;
@@ -8571,6 +8785,7 @@ fn lang_text<'a>(lang: Language, zh: &'a str, en: &'a str) -> &'a str {
 }
 
 /// 账号档案：uid / 昵称 /「我喜欢的音乐」歌单 id。
+#[derive(Clone)]
 struct AccountProfile {
     uid: String,
     name: Option<String>,
