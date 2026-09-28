@@ -966,7 +966,8 @@ fn render_download_settings_modal(
 
     let editing = app.download_path_edit.is_some();
     for idx in 0..3 {
-        let disabled = !enabled && idx != 1;
+        // 不可用时只灰置「音质」：路径行与「恢复默认」都留着当出口。
+        let disabled = !enabled && idx == 0;
         let selected = idx == app.download_settings_selected;
         let base_style = if selected {
             if disabled {

@@ -87,7 +87,7 @@ Artists and playlists are capped at the 5 most relevant hits and never paginate;
 - Three icon states: not downloaded (`ec74`), downloading (spinning `f1ce`), downloaded (`f00c`); pressing/clicking again cancels and removes the partial file
 - Exactly one download task exists: extra requests queue up and run in order
 - File name is `Title - Artist - Album.<mp3|flac>`, with tags written in: title, artists, album, track number, date, embedded cover and lyrics (Vorbis Comment for lossless, ID3v2 for mp3)
-- The "Download Settings" page holds the download quality (same option set as playback quality, VIP-aware) and the download path: an absolute path enables downloads, the literal `Null` disables them (the other rows grey out and no download button is drawn); typing an absolute path back re-enables
+- The "Download Settings" page holds the download quality (same option set as playback quality, VIP-aware) and the download path: an absolute path enables downloads, the literal `Null` disables them (no download button is drawn and the quality row greys out, while the path row and "Restore Defaults" stay usable); typing an absolute path back re-enables
 
 ### Visualization
 

@@ -405,8 +405,9 @@ fn draw_download_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
     };
 
     // 三行的样式先算好（后面要可变借用 `download_path_edit`，不能再借 `app`）。
+    // 不可用时只灰置「音质」：路径行与「恢复默认」都留着当出口。
     let row_styles: [Style; crate::app::SETTINGS_DOWNLOAD_ITEMS] = std::array::from_fn(|idx| {
-        let disabled = !app.download_row_selectable(idx);
+        let disabled = !app.download_settings_enabled() && idx == 0;
         if idx == selected {
             if disabled {
                 Style::default().fg(subtext)
@@ -506,24 +507,20 @@ pub(crate) fn caret_display_col(text: &str, cursor: usize) -> usize {
         .sum()
 }
 
-/// 编辑态窗口的左边界：**只在光标撞到边界时**才挪动。
+/// 编辑态窗口的左边界：**只在光标撞到边界时**挪动，且**一次只挪一个字符**。
 ///
-/// 光标在窗口内 → 不动（文本不会跟着每一次光标移动一起滑）；
-/// 撞右边界 → 往右跳半屏（光标一次性跳很远时保证它落在窗口内）；
-/// 撞左边界 → 往左跳半屏，最多对齐到光标那一列。
+/// 光标在窗口内 → 不动（文本不跟着每一次光标移动一起滑）；
+/// 撞右边界 → 窗口右移一格、光标贴回右端；撞左边界 → 窗口左移一格；
+/// 一次性跳很远（Home / End / 点击）时直接对齐，保证光标落在窗口内。
 pub(crate) fn adjust_path_window(window: usize, caret_col: usize, width: usize) -> usize {
     if width == 0 {
         return 0;
     }
 
-    let jump = (width / 2).max(1);
     if caret_col < window {
-        // 撞左边界：往左跳半屏；一次性跳到很左边（Home/点击）时保证光标在窗口内。
-        window.saturating_sub(jump).min(caret_col)
+        caret_col
     } else if caret_col >= window + width {
-        (window + jump)
-            .min(caret_col)
-            .max(caret_col.saturating_sub(width - 1))
+        (caret_col + 1).saturating_sub(width)
     } else {
         window
     }
@@ -1261,26 +1258,26 @@ fn l<'a>(app: &App, zh: &'a str, en: &'a str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    /// 编辑态横向窗口：光标在窗口内不动；撞到边界时**一次只挪一个字符**。
     #[test]
     fn path_window_only_scrolls_at_the_edges() {
         // 窗口内：不动（文本不跟着每一次光标移动一起滑）。
         assert_eq!(adjust_path_window(10, 15, 20), 10);
         assert_eq!(adjust_path_window(0, 19, 20), 0);
 
-        // 撞右边界：往右跳半屏，光标留在窗口内。
-        let window = adjust_path_window(0, 20, 20);
-        assert_eq!(window, 10);
-        assert!(agent_in_window(20, window, 20));
+        // 撞右边界：只挪一格，光标贴回右端。
+        assert_eq!(adjust_path_window(0, 20, 20), 1);
+        assert_eq!(adjust_path_window(5, 25, 20), 6);
+        assert!(agent_in_window(20, adjust_path_window(0, 20, 20), 20));
 
-        // 一次性跳很远（End/点击）：光标仍落在窗口内。
-        let window = adjust_path_window(0, 200, 20);
-        assert!(agent_in_window(200, window, 20));
+        // 撞左边界：只挪一格。
+        assert_eq!(adjust_path_window(10, 9, 20), 9);
+        assert!(agent_in_window(9, adjust_path_window(10, 9, 20), 20));
 
-        // 撞左边界：往左跳半屏，光标留在窗口内；跳到最左边时窗口回到 0。
-        assert_eq!(adjust_path_window(100, 95, 20), 90);
+        // 一次性跳很远（Home / End / 点击）：对齐到光标那一端。
         assert_eq!(adjust_path_window(100, 5, 20), 5);
-        assert_eq!(adjust_path_window(100, 0, 20), 0);
+        assert_eq!(adjust_path_window(0, 200, 20), 181);
+        assert!(agent_in_window(200, adjust_path_window(0, 200, 20), 20));
 
         // 宽度 0 时不滚动。
         assert_eq!(adjust_path_window(7, 0, 0), 0);

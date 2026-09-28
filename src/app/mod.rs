@@ -2727,6 +2727,8 @@ pub struct PlayerBarHitTargets {
     pub progress: Option<HitRect>,
     /// 收藏爱心（左列右端）。
     pub like: Option<HitRect>,
+    /// 下载按钮（爱心左侧隔一格；下载不可用时不登记）。
+    pub download: Option<HitRect>,
     /// 播放模式符号（控制串最后一个字符）。
     pub mode: Option<HitRect>,
 }
@@ -3360,6 +3362,11 @@ impl App {
     async fn dispatch_player_bar_click(&mut self, col: u16, row: u16) {
         let hits = self.player_bar_hits;
 
+        if hits.download.is_some_and(|rect| rect.contains(col, row)) {
+            // 与全屏页 Ctrl+D / 行内图标同一条路径：在途则取消。
+            self.download_current_song();
+            return;
+        }
         if hits.like.is_some_and(|rect| rect.contains(col, row)) {
             self.toggle_like_hotkey();
             return;
@@ -3401,6 +3408,7 @@ impl App {
             hits.next,
             hits.progress,
             hits.like,
+            hits.download,
             hits.mode,
         ]
         .into_iter()
@@ -6407,9 +6415,10 @@ impl App {
         self.download_root.is_some()
     }
 
-    /// 某一行是否可选中：路径行永远可选中（禁用态下唯一的自救入口）。
+    /// 某一行是否可选中：下载不可用时只有「音质」灰置——路径行是自救入口，
+    /// 「恢复默认」是把显式 `Null` / 无家目录状态拉回来的出口，两者都要能选。
     pub fn download_row_selectable(&self, row: usize) -> bool {
-        self.download_settings_enabled() || row == 1
+        self.download_settings_enabled() || row != 0
     }
 
     fn download_selectable_rows(&self) -> Vec<usize> {
@@ -6459,10 +6468,9 @@ impl App {
     }
 
     /// 「恢复默认」两段式：首次进入待确认态（文字换成警戒色），再选一次才写回默认。
+    ///
+    /// 下载不可用（显式 `Null` / 系统没有可写位置）时也允许：它就是那个出口。
     fn activate_download_reset(&mut self) {
-        if !self.download_settings_enabled() {
-            return;
-        }
         if !self.download_reset_armed {
             self.download_reset_armed = true;
             self.set_runtime_status(self.lang_text(
@@ -6497,10 +6505,6 @@ impl App {
             buffer: current,
             window_col: 0,
         });
-        self.set_runtime_status(self.lang_text(
-            "编辑下载路径：回车确认，Esc 取消（填 Null 禁用下载）",
-            "Editing download path: Enter confirms, Esc cancels (type Null to disable)",
-        ));
     }
 
     fn download_path_edit_insert(&mut self, ch: char) {

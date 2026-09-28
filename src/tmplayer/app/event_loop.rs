@@ -1595,10 +1595,11 @@ async fn apply_settings_delta(
     }
 }
 
-/// 下载设置页的可选中行：下载不可用时只有路径行（它是唯一的自救入口）。
+/// 下载设置页的可选中行：下载不可用时只灰置「音质」——路径行是自救入口，
+/// 「恢复默认」是把显式 `Null` / 无家目录状态拉回来的出口。
 fn download_selectable_rows(app: &AppState) -> Vec<usize> {
     (0..3)
-        .filter(|row| app.download_enabled() || *row == 1)
+        .filter(|row| app.download_enabled() || *row != 0)
         .collect()
 }
 
@@ -1650,13 +1651,12 @@ async fn apply_download_settings_delta(
 }
 
 /// 「恢复默认」两段式：首次进入待确认态，再选一次才写回默认值。
+///
+/// 下载不可用（显式 `Null` / 宿主没有可写位置）时也允许：它就是那个出口。
 async fn activate_download_reset(
     app: &mut AppState,
     host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
 ) {
-    if !app.download_enabled() {
-        return;
-    }
     if !app.download_reset_armed {
         app.download_reset_armed = true;
         app.set_toast(crate::tmplayer::ui::tui::lang_text(
@@ -1693,11 +1693,6 @@ fn begin_download_path_edit(app: &mut AppState) {
         window_col: 0,
     });
     app.overlay = Overlay::DownloadPathEditModal;
-    app.set_toast(crate::tmplayer::ui::tui::lang_text(
-        app,
-        "编辑下载路径：回车确认，Esc 取消（填 Null 禁用下载）",
-        "Editing download path: Enter confirms, Esc cancels (type Null to disable)",
-    ));
 }
 
 fn char_to_byte_index(text: &str, char_index: usize) -> usize {
