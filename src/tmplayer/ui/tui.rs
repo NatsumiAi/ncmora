@@ -1892,14 +1892,14 @@ fn render_eq_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
     );
 }
 
-/// 下载图标格：爱心左侧那一格。只在标题行画得下两格（含图标）时存在——
-/// 1 格宽的 meta 行留给爱心，下载图标整格不画、不可点。
+/// 下载图标格：爱心左侧隔一格（再左一位，与爱心之间留一个空格）。
+/// 只在标题行画得下三格（图标 + 空格 + 爱心）时存在；更窄时整格不画、不可点。
 pub(crate) fn download_cell(meta: Rect) -> Option<(u16, u16)> {
     let (heart_x, heart_y) = heart_cell(meta)?;
-    if meta.width < 2 {
+    if meta.width < 3 {
         return None;
     }
-    Some((heart_x.saturating_sub(1), heart_y))
+    Some((heart_x.saturating_sub(2), heart_y))
 }
 
 /// 标题行爱心所在的单元格（`compose_left_right_line` 把爱心右对齐到该行最后一格）。
@@ -2309,16 +2309,43 @@ mod tests {
         );
     }
 
-    /// 下载图标格在爱心左侧；1 格宽的 meta 行留给爱心，不画也不可点。
+    /// 标题行右端实际渲染出来的三格：下载图标、空格、爱心（与命中格同源）。
+    #[test]
+    fn info_title_row_renders_download_then_gap_then_heart() {
+        let mut app = state(Overlay::None);
+        app.player.track.title = "Title".to_string();
+        app.download_state = crate::tmplayer::DownloadIconState::NotDownloaded;
+
+        let (_, buf) = render_to_buffer_sized(120, 40, &mut app, |f, app, _rows| {
+            let area = f.area();
+            info_panel::render(f, area, area.width, app);
+        });
+
+        let left = ratatui::layout::Rect::new(0, 0, 120, 40);
+        let layout = info_panel::layout(left, 120);
+        let (download_x, y) = download_cell(layout.meta).expect("下载格");
+        let (heart_x, _) = heart_cell(layout.meta).expect("爱心格");
+
+        assert_eq!(heart_x, download_x + 2, "下载图标与爱心之间隔一格");
+        assert_eq!(
+            buf[(download_x, y)].symbol(),
+            crate::app::download::ICON_DOWNLOAD.to_string()
+        );
+        assert_eq!(buf[(download_x + 1, y)].symbol(), " ");
+        assert_eq!(buf[(heart_x, y)].symbol(), "\u{f08a}");
+    }
+
+    /// 下载图标格在爱心左侧隔一格；画不下三格时留给爱心，不画也不可点。
     #[test]
     fn download_cell_sits_left_of_the_heart() {
         let meta = rect(10, 4, 26, 3);
-        assert_eq!(download_cell(meta), Some((10 + 26 - 2, 4)));
+        assert_eq!(download_cell(meta), Some((10 + 26 - 3, 4)));
+        assert_eq!(download_cell(rect(0, 0, 2, 1)), None);
         assert_eq!(download_cell(rect(0, 0, 1, 1)), None);
         assert_eq!(download_cell(Rect::default()), None);
     }
 
-    /// 下载可用时，爱心左边那一格是下载按钮；下载不可用（Hidden）时整格不命中。
+    /// 下载可用时，爱心左边隔一格是下载按钮；下载不可用（Hidden）时整格不命中。
     #[test]
     fn clicking_the_download_cell_toggles_download_only_when_visible() {
         let layout = UiLayout {
@@ -2329,8 +2356,13 @@ mod tests {
         let mut app = state(Overlay::None);
         app.download_state = crate::tmplayer::DownloadIconState::NotDownloaded;
         assert_eq!(
-            hit_test(&layout, &app, 2 + 20 - 2, 5),
+            hit_test(&layout, &app, 2 + 20 - 3, 5),
             Some(Action::ToggleDownload)
+        );
+        assert_eq!(
+            hit_test(&layout, &app, 2 + 20 - 2, 5),
+            None,
+            "图标与爱心之间是空格"
         );
         assert_eq!(
             hit_test(&layout, &app, 2 + 20 - 1, 5),
@@ -2343,7 +2375,7 @@ mod tests {
             hidden.download_state,
             crate::tmplayer::DownloadIconState::Hidden
         );
-        assert_eq!(hit_test(&layout, &hidden, 2 + 20 - 2, 5), None);
+        assert_eq!(hit_test(&layout, &hidden, 2 + 20 - 3, 5), None);
     }
 
     /// 作者名贴 meta 块第 2 行左端：只有名字画出来的那几格可点，行尾空白不算。

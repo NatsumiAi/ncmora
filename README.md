@@ -79,6 +79,17 @@ Artists and playlists are capped at the 5 most relevant hits and never paginate;
 - Repeat modes: sequence → shuffle → loop all → loop one
 - Linux media control (MPRIS, player name `cnmplayer`) with metadata and cover art
 
+### Downloads
+
+- Songs are saved to `cnmplayer/` inside the system music directory (`download_path` overrides it; falls back to `~/Music/cnmplayer/`)
+- Host: single-song rows on playlist / album / search pages carry a download button left of the duration (click it), and `Ctrl+Alt+D` downloads the focused song
+- Fullscreen: the button left of the heart on the title row, or `Ctrl+D`, downloads the current song
+- Three icon states: not downloaded (`ec74`), downloading (spinning `f1ce`), downloaded (`f00c`); pressing/clicking again cancels and removes the partial file
+- Exactly one download task exists: extra requests queue up and run in order
+- File name is `Title - Artist - Album.<mp3|flac>`, with tags written in: title, artists, album, track number, date, embedded cover and lyrics (Vorbis Comment for lossless, ID3v2 for mp3)
+- Downloads started on an album page go into a subfolder named after the album, which also gets the album cover as `cover.jpg`
+- The "Download Settings" page in the settings modal holds the download quality (same option set as playback quality, VIP-aware) and an absolute download path (Enter to confirm); "Restore Defaults" needs a second confirmation
+
 ### Visualization
 
 - `hidden` (shown as "Off" in settings) — the whole right-hand side of the fullscreen page is collapsed: neither a visualizer nor the lyrics are drawn, and the song info panel stretches across the full terminal width (its border spans the full width, while the content inside is capped at 1/3 of the window and centred).
@@ -216,6 +227,8 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 | `home_more_recommend` | `false` | Expand the home page beyond the three pinned tiles |
 | `default_opening_title` | `""` | Replaces the ASCII banner on the login and loading pages; supports `\n` |
 | `audio_quality` | `exhigh` | `standard`, `higher`, `exhigh`, `lossless`, `hires`, `jyeffect`, `sky`, `dolby`, `jymaster`; clamped to `exhigh` without VIP |
+| `download_audio_quality` | `exhigh` | Download quality: same option set as `audio_quality`, VIP-aware as well |
+| `download_path` | unset | Download directory (absolute; defaults to `<music dir>/cnmplayer/`, falling back to `~/Music/cnmplayer/`) |
 | `playback_memory` | `false` | Persist and restore the queue, index and repeat mode |
 | `eq_bands_db` | 10 × `0.0` | EQ gains in dB, edited from the fullscreen EQ modal |
 | `bar_number` | `auto` | `auto`, `16`, `32`, `48`, `64`, `80`, `96` (fullscreen spectrum) |
@@ -235,7 +248,7 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 | `cache.max_size_mb` | `500` | Size ceiling for the LRU pass |
 | `cache.max_age_days` | `7` | Age limit for the TTL pass |
 | `cache.clean_on_startup` | `true` | Run the cleanup while starting |
-| `keybind_*` | see below | 20 rebindable shortcuts |
+| `keybind_*` | see below | 22 rebindable shortcuts |
 
 Cleanup runs as an age pass followed by a size LRU pass, and only looks at files directly inside the directory.
 
@@ -268,6 +281,8 @@ A binding that collides with another slot is rejected, and `Ctrl+Alt+R` inside t
 | `keybind_toggle_like_fullscreen` | `L` | Like / unlike (fullscreen page only) |
 | `keybind_toggle_like_collapsed` | `Alt+L` | Like / unlike from the collapsed player bar |
 | `keybind_small_window_toggle` | `Alt+X` | Switch between the flat small-window panels |
+| `keybind_download` | `Ctrl+Alt+D` | Download the focused song (press again to cancel) |
+| `keybind_download_fullscreen` | `Ctrl+D` | Download the current song (fullscreen page only; press again to cancel) |
 
 The fullscreen-only slots are inert in the host: there they fall through to page navigation instead.
 

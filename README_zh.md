@@ -79,6 +79,17 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 - 循环模式：顺序 → 随机 → 列表循环 → 单曲循环
 - Linux 媒体控制（MPRIS，播放器名 `cnmplayer`），包含元数据与封面
 
+### 下载
+
+- 下载到系统音乐目录下的 `cnmplayer/`（`download_path` 可改；系统没有音乐目录时回退 `~/Music/cnmplayer/`）
+- 主应用里：歌单页 / 专辑页 / 搜索页的单曲行在时长左侧有下载按钮，单击即下载；`Ctrl+Alt+D` 下载当前聚焦的单曲
+- 全屏页里：标题行爱心左侧的下载按钮，或 `Ctrl+D`，下载当前播放的歌曲
+- 图标三态：未下载（`ec74`）、下载中（`f1ce` 旋转）、已下载（`f00c`）；下载中再点一次即取消，半成品文件会被删掉
+- 下载任务全局只有一个：多次触发会排队，先来后到依次下载
+- 文件名 `标题 - 作者 - 专辑.<mp3|flac>`，并写入标签：标题、作者、专辑、曲目号、日期、内嵌封面与歌词（无损写 Vorbis Comment，mp3 写 ID3v2）
+- 在专辑页触发的下载会落到以专辑名命名的子文件夹，并把专辑封面存成同目录的 `cover.jpg`
+- 设置弹窗的「下载设置」可调下载音质（可选值与播放音质一致，按 VIP 权限放开）与下载路径（绝对路径，回车确认）；「恢复默认」两段式确认后把这两项恢复为默认值
+
 ### 可视化
 
 - `hidden`（设置弹窗里显示「关闭」）——全屏页右侧整块收起：可视化与歌词都不画，歌曲信息区撑满整个终端宽度（边框铺满整宽，内容宽度上限为窗口的 1/3 并居中）
@@ -215,7 +226,9 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 | `small_window_display` | `true` | 终端过小时启用紧凑布局 |
 | `home_more_recommend` | `false` | 首页在三块固定磁贴之外展开更多推荐 |
 | `default_opening_title` | `""` | 替换登录页与加载页的 ASCII 标题，支持 `\n` |
-| `audio_quality` | `exhigh` | `standard`、`higher`、`exhigh`、`lossless`、`hires`、`jyeffect`、`sky`、`dolby`、`jymaster`；非 VIP 会限制到 `exhigh` |
+| `audio_quality` | `exhigh` | `standard`、`higher`、`exhigh`、`lossless`、`hires`、`jyeffect`、`sky`、`dolby`、`jymaster`；非 VIP 账号会被限制到 `exhigh` |
+| `download_audio_quality` | `exhigh` | 下载音质：与 `audio_quality` 同一套可选值，同样按 VIP 权限放开 |
+| `download_path` | 未设置 | 下载目录（绝对路径，默认 `<系统音乐目录>/cnmplayer/`，没有音乐目录时回退 `~/Music/cnmplayer/`） |
 | `playback_memory` | `false` | 持久化并恢复队列、索引与循环模式 |
 | `eq_bands_db` | 10 个 `0.0` | 均衡器各段增益（dB），在全屏 EQ 弹窗中调整 |
 | `bar_number` | `auto` | `auto`、`16`、`32`、`48`、`64`、`80`、`96`（全屏频谱） |
@@ -235,7 +248,7 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 | `cache.max_size_mb` | `500` | LRU 阶段的容量上限 |
 | `cache.max_age_days` | `7` | 按时间清理阶段的有效期 |
 | `cache.clean_on_startup` | `true` | 启动时执行清理 |
-| `keybind_*` | 见下文 | 20 个可重绑快捷键 |
+| `keybind_*` | 见下文 | 22 个可重绑快捷键 |
 
 清理按「先按时间、再按容量 LRU」两遍执行，且只统计目录下直属的文件。
 
@@ -268,6 +281,8 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 | `keybind_toggle_like_fullscreen` | `L` | 收藏 / 取消收藏（仅全屏页） |
 | `keybind_toggle_like_collapsed` | `Alt+L` | 折叠播放栏的收藏 / 取消收藏 |
 | `keybind_small_window_toggle` | `Alt+X` | 在扁窗的两个面板之间切换 |
+| `keybind_download` | `Ctrl+Alt+D` | 下载当前聚焦的单曲（再按一次取消） |
+| `keybind_download_fullscreen` | `Ctrl+D` | 下载当前播放的歌曲（仅全屏页，再按一次取消） |
 
 仅全屏页生效的槽位在主程序里是空操作：那些按键会继续按页面导航处理。
 

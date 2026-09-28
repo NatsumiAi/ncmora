@@ -469,20 +469,24 @@ pub fn render(f: &mut Frame, area: Rect, window_width: u16, app: &mut AppState) 
         };
 
         let right = match download_glyph {
-            Some(glyph) => format!("{glyph}{heart}"),
+            // 下载图标与爱心之间留一个空格（图标整体再左一位）。
+            Some(glyph) => format!("{glyph} {heart}"),
             None => heart.to_string(),
         };
         let title_line = compose_left_right_line(title, &right, meta_rect.width as usize);
 
+        // 从右往左剥出图标段：爱心 → 分隔空格 → 下载图标（行太窄被裁掉时 tail 为空）。
         let mut tail: Vec<(String, Style)> = Vec::new();
         let mut head = title_line.as_str();
         if let Some(stripped) = head.strip_suffix(heart) {
             head = stripped;
-            if let Some(glyph) = download_glyph {
-                if let Some(stripped) = head.strip_suffix(glyph) {
-                    head = stripped;
-                    tail.push((glyph.to_string(), download_style));
-                }
+            if let Some(glyph) = download_glyph
+                && let Some(stripped) = head.strip_suffix(glyph)
+                && let Some(stripped) = stripped.strip_suffix(' ')
+            {
+                head = stripped;
+                tail.push((glyph.to_string(), download_style));
+                tail.push((" ".to_string(), text_style));
             }
             tail.push((heart.to_string(), heart_style));
         }

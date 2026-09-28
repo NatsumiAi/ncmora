@@ -30,8 +30,8 @@ pub const AUDIO_EXTENSIONS: [&str; 2] = ["mp3", "flac"];
 /// 取消标志的轮询间隔（读取流时的超时切片）。
 const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// 未下载（Nerd Font `f03f`）。
-pub const ICON_DOWNLOAD: char = '\u{f03f}';
+/// 未下载（Nerd Font `ec74`）。
+pub const ICON_DOWNLOAD: char = '\u{ec74}';
 /// 已下载（Nerd Font `f00c`）。
 pub const ICON_DONE: char = '\u{f00c}';
 /// 下载中的旋转帧（Nerd Font 的旋转系字符；终端不能真的旋转单个字形，用四帧循环表达）。
