@@ -393,6 +393,119 @@ async fn fetch_home_sidebar_playlists(
 type CoverFuture = SharedFuture<Arc<DynamicImage>>;
 type AsciiFuture = SharedFuture<String>;
 
+type AuthorFetchFuture = SharedFuture<Result<AuthorFetch, String>>;
+/// 装箱后的任务体（`shot_and_share` 的入参类型）。
+type AuthorFetchTask = Pin<Box<dyn Future<Output = Option<Result<AuthorFetch, String>>>>>;
+
+/// 作者页四个接口的原始回包（`None` = 该请求失败）；解析见 `App::build_author_page`。
+struct AuthorResponses {
+    detail: Option<ApiResponse>,
+    desc: Option<ApiResponse>,
+    top_song: Option<ApiResponse>,
+    album: Option<ApiResponse>,
+}
+
+/// 作者页的一次拉取结果：`AuthorState` 里除封面句柄与视口字段外的全部字段。
+///
+/// 结果要经 `shot_and_share` 搬运，故实现 `Clone`（封面句柄是 `Shared`，克隆很廉价）。
+#[derive(Clone)]
+struct AuthorFetch {
+    id: String,
+    title: String,
+    artist: String,
+    description: String,
+    cover_url: Option<String>,
+    tiles: Vec<AuthorTile>,
+    hot_songs: Vec<PlaylistTrack>,
+    albums: Vec<PlaylistTrack>,
+    eps: Vec<PlaylistTrack>,
+    singles: Vec<PlaylistTrack>,
+}
+
+/// 四个 `artist/*` 接口一次并发拉取。
+///
+/// 它们彼此独立，按仓库既有做法用 `futures::join!`：`cyper::Client` 是 `!Send`，
+/// 只能同一个 runtime 里并发，不能各自 spawn。
+async fn fetch_artist_responses(api: &ApiState, artist_id: &str) -> AuthorResponses {
+    let mut detail_api = api.clone();
+    let mut desc_api = api.clone();
+    let mut top_song_api = api.clone();
+    let mut album_api = api.clone();
+    let (detail, desc, top_song, album) = futures::join!(
+        detail_api.artist_detail(artist_id),
+        desc_api.artist_desc(artist_id),
+        top_song_api.artist_top_song(artist_id),
+        album_api.artist_album(artist_id, 60, 0),
+    );
+
+    AuthorResponses {
+        detail: detail.ok(),
+        desc: desc.ok(),
+        top_song: top_song.ok(),
+        album: album.ok(),
+    }
+}
+
+/// 全屏页点作者名要拉的东西：先 `song/detail` 解析出段对应的作者 ID，再拉作者页数据。
+///
+/// 整段不借 `&mut App`，交给 `shot_and_share` 后台跑，宿主循环照常重绘。
+async fn fetch_author_page(
+    api: ApiState,
+    language: Language,
+    song_id: String,
+    index: usize,
+    artist_line: String,
+) -> Result<AuthorFetch, String> {
+    let refs = fetch_song_page_refs(api.clone(), &song_id).await;
+    let artist_id = pick_artist_id(&refs.artists, &artist_line, index).ok_or_else(|| {
+        lang_text(
+            language,
+            "无法解析当前歌曲的作者",
+            "Failed to resolve the artist of the current song",
+        )
+        .to_string()
+    })?;
+
+    let responses = fetch_artist_responses(&api, &artist_id).await;
+    App::build_author_page(&api, language, &artist_id, responses)
+}
+
+/// `song/detail` →「点名字进页面」要用的作者 / 专辑 ID。
+///
+/// 队列与搜索结果只带歌曲 ID 与拼好的显示名（曲目行没有 `ar`/`al` 的 ID），
+/// 所以按需解析一次。
+async fn fetch_song_page_refs(mut api: ApiState, song_id: &str) -> SongPageRefs {
+    let Ok(detail) = api.song_detail(song_id).await else {
+        return SongPageRefs::default();
+    };
+
+    let Some(song) = detail
+        .body
+        .get("songs")
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.first())
+    else {
+        return SongPageRefs::default();
+    };
+
+    let artists = song
+        .get("ar")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let name = item.get("name").and_then(|value| value.as_str())?;
+                    Some((name.to_string(), parse_value_as_string(item.get("id"))))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let album_id = parse_value_as_string(song.pointer("/al/id"));
+
+    SongPageRefs { artists, album_id }
+}
+
 fn shot_and_share<F>(fut: F) -> Shared<F>
 where
     F: Future + Sized + 'static,
@@ -1753,6 +1866,7 @@ pub enum AuthorTileKind {
     Single,
 }
 
+#[derive(Clone)]
 pub struct AuthorTile {
     pub kind: AuthorTileKind,
     pub title: String,
@@ -1827,6 +1941,18 @@ impl Default for AuthorState {
 }
 
 impl AuthorState {
+    /// 点作者名后先落地的占位状态：标题就是点中的那段名字，数据由 `App::tick_author_fetch`
+    /// 搬进来（数据没到之前 `App::author_fetch` 为 `Some`，作者页不响应翻页键）。
+    pub fn placeholder(title: String, description: String) -> Self {
+        Self {
+            title,
+            artist: String::new(),
+            description,
+            tiles: Vec::new(),
+            ..Self::default()
+        }
+    }
+
     fn total_rows(&self) -> usize {
         if self.tiles.is_empty() {
             0
@@ -2301,6 +2427,8 @@ pub struct App {
     pub home_sidebar: HomeSidebarState,
     /// 侧边栏歌单的在途拉取（异步填充，不阻塞展开动画）。
     home_sidebar_fetch: Option<HomeSidebarFetchFuture>,
+    /// 作者页的在途拉取（全屏页点作者名：页面先落地，数据由 `tick_author_fetch` 搬进来）。
+    author_fetch: Option<AuthorFetchFuture>,
     /// 上次检查 stderr 日志体积的时刻。
     stderr_trim_checked_at: Option<Instant>,
     home_sidebar_anim_span_cells: u16,
@@ -2461,6 +2589,7 @@ impl App {
             home: HomeState::default(),
             home_sidebar: HomeSidebarState::default(),
             home_sidebar_fetch: None,
+            author_fetch: None,
             stderr_trim_checked_at: None,
             home_sidebar_anim_span_cells: 24,
             playlist: PlaylistState::default(),
@@ -2582,6 +2711,7 @@ impl App {
         self.tick_search_box_animation();
         self.tick_home_sidebar_animation();
         self.tick_home_sidebar_fetch();
+        self.tick_author_fetch();
         self.tick_like_sync();
         self.tick_stderr_log_trim();
         self.tick_startup_init().await;
@@ -3044,6 +3174,10 @@ impl App {
             }
         }
         if self.home_sidebar.anim_started_at.is_some() {
+            return true;
+        }
+        // 作者页数据在途：结果一到就上屏，别让 1s 空闲节流把它压住。
+        if self.author_fetch.is_some() {
             return true;
         }
         // 加载页全程保持高帧率：进度条本身在缓动，收尾还要等最短可见时长，
@@ -3764,6 +3898,37 @@ impl App {
                 );
                 self.home_sidebar.status_line = text.clone();
                 self.home.status_line = text;
+            }
+        }
+    }
+
+    /// 搬运作者页的在途拉取（每帧调用，结果就绪才动状态）。
+    fn tick_author_fetch(&mut self) {
+        let Some(result) = peek_shared_future(&self.author_fetch).cloned() else {
+            return;
+        };
+        self.author_fetch = None;
+
+        match result {
+            Ok(fetch) => {
+                self.playlist_section_return_snapshot = None;
+                let title = fetch.title.clone();
+                self.apply_author_fetch(fetch);
+                self.set_runtime_status(format!(
+                    "{} {}",
+                    self.lang_text("已打开作者", "Opened artist"),
+                    title
+                ));
+            }
+            Err(message) => {
+                self.author.description = format!(
+                    "{}: {message}",
+                    self.lang_text("作者页加载失败", "Failed to load the artist page")
+                );
+                self.set_runtime_status(format!(
+                    "{}: {message}",
+                    self.lang_text("打开作者页失败", "Failed to open the artist page"),
+                ));
             }
         }
     }
@@ -5871,6 +6036,14 @@ impl App {
     }
 
     async fn handle_author_key(&mut self, key: KeyEvent) {
+        // 数据还在路上：占位页上的焦点/条目都没有意义，只留返回键。
+        if self.author_fetch.is_some() {
+            if key.code == KeyCode::Esc {
+                self.page = self.author_return_page;
+            }
+            return;
+        }
+
         match key.code {
             KeyCode::Tab => {
                 let _ = self.author.focus_next();
@@ -6242,13 +6415,14 @@ impl App {
         }
     }
 
-    /// 全屏页点了作者名：宿主按当前播放歌曲解析出作者并打开作者页。
+    /// 全屏页点了作者名：立即落占位作者页 + 派发后台拉取，结果由 `App::tick_author_fetch`
+    /// 搬进来（宿主循环在这期间照常重绘、照常响应输入）。
     ///
     /// `index` 是显示串（`now_playing.artist`，形如 "A / B"）里的段序号：
     /// 全屏页信息区按字符位置分段命中，点谁的名字就传谁的序号。
     /// 全屏页只有显示名（ID 要靠 `song/detail` 的 `ar` 补），
     /// 本机音频 / 无播放时解析不出来，只在状态行里说明，不换页。
-    pub async fn open_author_page_from_fullscreen(&mut self, index: usize) {
+    pub fn open_author_page_from_fullscreen(&mut self, index: usize) {
         let Some(song_id) = self.current_song_id() else {
             self.set_runtime_status(
                 self.lang_text("当前没有正在播放的歌曲", "Nothing is playing right now"),
@@ -6256,39 +6430,44 @@ impl App {
             return;
         };
 
-        let refs = self.song_page_refs(&song_id).await;
-        let line = self
+        let artist_line = self
             .now_playing
             .as_ref()
             .map(|track| track.artist.clone())
             .unwrap_or_default();
-        let Some(artist_id) = pick_artist_id(&refs.artists, &line, index) else {
-            self.set_runtime_status(self.lang_text(
-                "无法解析当前歌曲的作者",
-                "Failed to resolve the artist of the current song",
-            ));
-            return;
+        // 标题先显示点中的那段名字；作者 ID 解析失败时也只是把错误写进简介。
+        let title = {
+            let line = artist_line.trim();
+            let clicked = artist_name_segments(&artist_line)
+                .get(index)
+                .map(|name| name.trim())
+                .filter(|name| !name.is_empty())
+                .unwrap_or(line);
+            if clicked.is_empty() {
+                self.lang_text("作者页", "Artist Page").to_string()
+            } else {
+                clicked.to_string()
+            }
         };
 
-        match self.load_author_detail(&artist_id).await {
-            Ok(()) => {
-                self.playlist_section_return_snapshot = None;
-                // 从全屏页进来：Esc 回首页，而不是回搜索页（那里可能不是用户来时的页面）。
-                self.author_return_page = Page::Home;
-                self.page = Page::Author;
-                self.set_runtime_status(format!(
-                    "{} {}",
-                    self.lang_text("已打开作者", "Opened artist"),
-                    self.author.title
-                ));
-            }
-            Err(err) => {
-                self.set_runtime_status(format!(
-                    "{}: {err}",
-                    self.lang_text("打开作者页失败", "Failed to open the artist page"),
-                ));
-            }
-        }
+        self.author = AuthorState::placeholder(
+            title,
+            self.lang_text("正在加载作者…", "Loading artist…")
+                .to_string(),
+        );
+        // 从全屏页进来：Esc 回首页，而不是回搜索页（那里可能不是用户来时的页面）。
+        self.author_return_page = Page::Home;
+        self.page = Page::Author;
+
+        let fut = fetch_author_page(
+            self.api.clone(),
+            self.config.language,
+            song_id,
+            index,
+            artist_line,
+        );
+        let fut: AuthorFetchTask = Box::pin(async move { Some(fut.await) });
+        self.author_fetch = Some(shot_and_share(fut));
     }
 
     /// 全屏页点了专辑名：宿主按当前播放歌曲解析出专辑并打开专辑页（Esc 回首页）。
@@ -6337,35 +6516,7 @@ impl App {
     /// 队列/搜索结果只带歌曲 ID 与拼好的显示名（曲目行没有 `ar`/`al` 的 ID），
     /// 所以从全屏页点名字进页面时按需解析一次。
     async fn song_page_refs(&mut self, song_id: &str) -> SongPageRefs {
-        let Ok(detail) = self.api.song_detail(song_id).await else {
-            return SongPageRefs::default();
-        };
-
-        let Some(song) = detail
-            .body
-            .get("songs")
-            .and_then(|value| value.as_array())
-            .and_then(|items| items.first())
-        else {
-            return SongPageRefs::default();
-        };
-
-        let artists = song
-            .get("ar")
-            .and_then(|value| value.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| {
-                        let name = item.get("name").and_then(|value| value.as_str())?;
-                        Some((name.to_string(), parse_value_as_string(item.get("id"))))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let album_id = parse_value_as_string(song.pointer("/al/id"));
-
-        SongPageRefs { artists, album_id }
+        fetch_song_page_refs(self.api.clone(), song_id).await
     }
 
     pub fn fullscreen_config_snapshot(&self) -> crate::tmplayer::HostConfigSync {
@@ -7592,14 +7743,52 @@ impl App {
         Ok(())
     }
 
+    /// 阻塞版：搜索结果里已经带了作者 ID，进入时直接拉（全屏页那条走异步填充）。
     async fn load_author_detail(&mut self, artist_id: &str) -> Result<()> {
-        let detail = self.api.artist_detail(artist_id).await.ok();
-        let desc = self.api.artist_desc(artist_id).await.ok();
-        let top_song = self.api.artist_top_song(artist_id).await.ok();
-        let album = self.api.artist_album(artist_id, 60, 0).await.ok();
+        let responses = fetch_artist_responses(&self.api, artist_id).await;
+        let fetch = App::build_author_page(&self.api, self.config.language, artist_id, responses)
+            .map_err(anyhow::Error::msg)?;
+        self.apply_author_fetch(fetch);
+        Ok(())
+    }
+
+    /// 把拉到的作者页数据落到状态上（阻塞版与 `tick_author_fetch` 共用）。
+    fn apply_author_fetch(&mut self, fetch: AuthorFetch) {
+        self.author.id = Some(fetch.id);
+        self.author.title = fetch.title;
+        self.author.artist = fetch.artist;
+        self.author.description = fetch.description;
+        if let Some(url) = fetch.cover_url {
+            self.author.cover.load(self.api.clone(), url);
+        }
+        self.author.set_tiles(fetch.tiles);
+        self.author.hot_songs = fetch.hot_songs;
+        self.author.albums = fetch.albums;
+        self.author.eps = fetch.eps;
+        self.author.singles = fetch.singles;
+        self.author.focused_idx = 0;
+    }
+
+    /// 解析 `artist/*` 的回包（网络部分见 `fetch_artist_responses`）。
+    ///
+    /// 不借 `&mut self`：全屏页那条把整段解析连同请求一起丢给 `shot_and_share` 后台跑。
+    fn build_author_page(
+        api: &ApiState,
+        language: Language,
+        artist_id: &str,
+        responses: AuthorResponses,
+    ) -> Result<AuthorFetch, String> {
+        let AuthorResponses {
+            detail,
+            desc,
+            top_song,
+            album,
+        } = responses;
 
         if detail.is_none() && desc.is_none() && top_song.is_none() && album.is_none() {
-            return Err(anyhow!("作者数据获取失败"));
+            return Err(
+                lang_text(language, "作者数据获取失败", "Failed to fetch artist data").to_string(),
+            );
         }
 
         let mut title = String::new();
@@ -7663,13 +7852,12 @@ impl App {
         }
 
         if title.trim().is_empty() {
-            title = self.lang_text("未知作者", "Unknown Author").to_string();
+            title = lang_text(language, "未知作者", "Unknown Author").to_string();
         }
 
         if description.trim().is_empty() {
-            description = self
-                .lang_text("暂无作者简介", "No author description yet")
-                .to_string();
+            description =
+                lang_text(language, "暂无作者简介", "No author description yet").to_string();
         }
 
         let mut hot_songs = Vec::new();
@@ -7729,7 +7917,7 @@ impl App {
                             album: name.to_string(),
                             cover_url,
                             duration_ms: 0,
-                            duration: format!("{} {}", size, self.lang_text("首", "tracks")),
+                            duration: format!("{} {}", size, lang_text(language, "首", "tracks")),
                         };
 
                         match kind {
@@ -7747,11 +7935,11 @@ impl App {
         let ep_count = eps.len();
         let single_count = singles.len();
 
-        let mut tiles = vec![
+        let tiles = vec![
             AuthorTile::from_album(
-                &self.api,
-                self.lang_text("热门歌曲", "Hot Songs").to_string(),
-                format!("{} {}", hot_count, self.lang_text("首", "tracks")),
+                api,
+                lang_text(language, "热门歌曲", "Hot Songs").to_string(),
+                format!("{} {}", hot_count, lang_text(language, "首", "tracks")),
                 hot_songs
                     .first()
                     .and_then(|track| track.cover_url.clone())
@@ -7759,9 +7947,9 @@ impl App {
                 AuthorTileKind::HotSong,
             ),
             AuthorTile::from_album(
-                &self.api,
-                self.lang_text("专辑", "Albums").to_string(),
-                format!("{} {}", album_count, self.lang_text("张", "items")),
+                api,
+                lang_text(language, "专辑", "Albums").to_string(),
+                format!("{} {}", album_count, lang_text(language, "张", "items")),
                 albums
                     .first()
                     .and_then(|track| track.cover_url.clone())
@@ -7769,18 +7957,18 @@ impl App {
                 AuthorTileKind::Album,
             ),
             AuthorTile::from_album(
-                &self.api,
+                api,
                 "EP".to_string(),
-                format!("{} {}", ep_count, self.lang_text("张", "items")),
+                format!("{} {}", ep_count, lang_text(language, "张", "items")),
                 eps.first()
                     .and_then(|track| track.cover_url.clone())
                     .or_else(|| cover_url.clone()),
                 AuthorTileKind::Ep,
             ),
             AuthorTile::from_album(
-                &self.api,
+                api,
                 "Single".to_string(),
-                format!("{} {}", single_count, self.lang_text("张", "items")),
+                format!("{} {}", single_count, lang_text(language, "张", "items")),
                 singles
                     .first()
                     .and_then(|track| track.cover_url.clone())
@@ -7789,13 +7977,7 @@ impl App {
             ),
         ];
 
-        if tiles.is_empty() {
-            tiles.push(AuthorTile::placeholder());
-        }
-
-        self.author.id = Some(artist_id.to_string());
-        self.author.title = title;
-        self.author.artist = match self.config.language {
+        let artist = match language {
             Language::Zh => format!(
                 "热门 {} · 专辑 {} · EP {} · Single {}",
                 hot_count, album_count, ep_count, single_count
@@ -7805,16 +7987,19 @@ impl App {
                 hot_count, album_count, ep_count, single_count
             ),
         };
-        self.author.description = description;
-        cover_url.map(|x| self.author.cover.load(self.api.clone(), x));
-        self.author.set_tiles(tiles);
-        self.author.hot_songs = hot_songs;
-        self.author.albums = albums;
-        self.author.eps = eps;
-        self.author.singles = singles;
-        self.author.focused_idx = 0;
 
-        Ok(())
+        Ok(AuthorFetch {
+            id: artist_id.to_string(),
+            title,
+            artist,
+            description,
+            cover_url,
+            tiles,
+            hot_songs,
+            albums,
+            eps,
+            singles,
+        })
     }
 
     async fn execute_search(&mut self) -> Result<()> {
