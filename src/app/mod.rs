@@ -1282,8 +1282,8 @@ impl SearchItemKind {
     /// 行右侧的类型标签（与 `SearchScope` 的后缀同源，避免两处字面量）。
     /// 单曲行的右侧位让给时长，故为 None。
     pub fn tag(self) -> Option<&'static str> {
-        let suffix = self.scope().suffix();
-        (!suffix.is_empty()).then_some(suffix)
+        let scope = self.scope();
+        (scope != SearchScope::Single).then(|| scope.suffix())
     }
 
     fn scope(self) -> SearchScope {
@@ -7625,8 +7625,7 @@ impl App {
         let mut artists_api = self.api.clone();
         let mut playlists_api = self.api.clone();
         let (songs, artists, playlists) = futures::join!(
-            self.api
-                .search(keywords, 1, SEARCH_RESULT_PAGE_SIZE, 0),
+            self.api.search(keywords, 1, SEARCH_RESULT_PAGE_SIZE, 0),
             artists_api.search(keywords, 100, MIXED_AUX_RESULT_LIMIT, 0),
             playlists_api.search(keywords, 1000, MIXED_AUX_RESULT_LIMIT, 0),
         );
@@ -7649,11 +7648,8 @@ impl App {
 
         self.load_search_item_covers(&mut items);
         let total = items.len();
-        self.search.set_results(
-            items,
-            song_count,
-            song_count >= SEARCH_RESULT_PAGE_SIZE,
-        );
+        self.search
+            .set_results(items, song_count, song_count >= SEARCH_RESULT_PAGE_SIZE);
         self.search.status_line = format!("搜索完成，共 {} 条", total);
         Ok(())
     }
@@ -8908,9 +8904,7 @@ fn parse_optional_search_section(
     scope: SearchScope,
 ) -> Vec<SearchItem> {
     match response {
-        Ok(response) if response_code(&response) == 200 => {
-            parse_search_items(&response, scope)
-        }
+        Ok(response) if response_code(&response) == 200 => parse_search_items(&response, scope),
         Ok(response) => {
             log::warn!(
                 "{} 分区搜索失败({}): {}",
@@ -8927,13 +8921,16 @@ fn parse_optional_search_section(
     }
 }
 
+/// 分区解析器：把 `result.<key>` 的数组转成条目。
+type SearchSectionParser = fn(&[Value]) -> Vec<SearchItem>;
+
 /// 按 scope 取对应分区并解析。`Mixed` 没有单一条目种类（由 `execute_mixed_search` 合并三段）。
 fn parse_search_items(response: &ApiResponse, scope: SearchScope) -> Vec<SearchItem> {
     let Some(result) = response.body.get("result") else {
         return Vec::new();
     };
 
-    let (key, parse): (&str, fn(&[Value]) -> Vec<SearchItem>) = match scope {
+    let (key, parse): (&str, SearchSectionParser) = match scope {
         SearchScope::Mixed => return Vec::new(),
         SearchScope::Single => ("songs", parse_song_items),
         SearchScope::Album => ("albums", parse_album_items),
@@ -9430,6 +9427,27 @@ fn placeholder_cover_ascii(width: u16, height: u16, ch: char) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 无后缀默认走混合搜索；后缀命中时只搜该类型（`@artist` 与 `@author` 同义）。
+    #[test]
+    fn parse_search_input_resolves_scope() {
+        assert_eq!(
+            parse_search_input("test"),
+            ("test".to_string(), SearchScope::Mixed)
+        );
+        assert_eq!(
+            parse_search_input("test @list"),
+            ("test".to_string(), SearchScope::Playlist)
+        );
+        assert_eq!(
+            parse_search_input("test @artist"),
+            ("test".to_string(), SearchScope::Author)
+        );
+        assert_eq!(
+            parse_search_input("@author"),
+            (String::new(), SearchScope::Author)
+        );
+    }
 
     fn track(id: &str) -> PlaylistTrack {
         PlaylistTrack {
