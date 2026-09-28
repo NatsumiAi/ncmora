@@ -88,6 +88,12 @@ impl Tui {
             self.should_quit = true;
         }
 
+        // 点击作者名/专辑名这类"退出后交给宿主"的请求：请求一旦写下就退出。
+        // 退出判定只在 draw 里做一次，避免每条事件分支各自记一遍。
+        if app.exit_request.is_some() {
+            self.should_quit = true;
+        }
+
         let mut layout_out = UiLayout::default();
 
         // 小窗口显示开启时，全屏页过小不再显示提示，而是直接请求退出回主程序。
@@ -1835,6 +1841,16 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
         }
     }
 
+    // 作者名贴 meta 块第 2 行左端，只有名字画出来的那几格可点（行尾空白不算）：
+    // 点了就退出全屏页，由宿主打开该作者页。
+    if contains(
+        info_panel::artist_row_rect(layout.info_meta, &app.player.track.artist),
+        col,
+        row,
+    ) {
+        return Some(Action::OpenAuthorPage);
+    }
+
     if let Some(volume) = volume_at(layout, col, row) {
         return Some(Action::SetVolume(volume));
     }
@@ -2074,6 +2090,73 @@ mod tests {
             hit_test(&layout, &app, 2 + 20 - 1, 6),
             None,
             "专辑行没有爱心"
+        );
+    }
+
+    /// 作者名贴 meta 块第 2 行左端：只有名字画出来的那几格可点，行尾空白不算。
+    #[test]
+    fn clicking_the_artist_row_opens_the_author_page() {
+        let layout = UiLayout {
+            info_meta: rect(2, 5, 20, 3),
+            ..UiLayout::default()
+        };
+        let mut app = state(Overlay::None);
+        app.player.track.artist = "Jay".to_string();
+
+        assert_eq!(hit_test(&layout, &app, 2, 6), Some(Action::OpenAuthorPage));
+        assert_eq!(hit_test(&layout, &app, 4, 6), Some(Action::OpenAuthorPage));
+        assert_eq!(hit_test(&layout, &app, 5, 6), None, "作者行行尾空白不算");
+        assert_eq!(hit_test(&layout, &app, 2, 5), None, "标题行不是作者行");
+        assert_eq!(hit_test(&layout, &app, 2, 7), None, "专辑行不打开作者页");
+    }
+
+    /// 命中宽度按显示宽度算：中日韩名字一个字占两格。
+    #[test]
+    fn artist_hit_region_uses_display_width() {
+        let layout = UiLayout {
+            info_meta: rect(0, 0, 10, 3),
+            ..UiLayout::default()
+        };
+        let mut app = state(Overlay::None);
+        app.player.track.artist = "周杰伦".to_string();
+
+        assert_eq!(hit_test(&layout, &app, 5, 1), Some(Action::OpenAuthorPage));
+        assert_eq!(hit_test(&layout, &app, 6, 1), None, "名字只有 6 格宽");
+    }
+
+    /// 作者行没画出来（meta 不够高 / 名字为空）时不登记命中区。
+    #[test]
+    fn artist_hit_region_is_absent_when_the_row_is_not_drawn() {
+        let mut app = state(Overlay::None);
+        app.player.track.artist = "Jay".to_string();
+
+        let one_row = UiLayout {
+            info_meta: rect(2, 5, 20, 1),
+            ..UiLayout::default()
+        };
+        assert_eq!(hit_test(&one_row, &app, 2, 6), None, "只有标题行");
+
+        let three_rows = UiLayout {
+            info_meta: rect(2, 5, 20, 3),
+            ..UiLayout::default()
+        };
+        assert_eq!(
+            hit_test(&three_rows, &app, 2, 6),
+            Some(Action::OpenAuthorPage)
+        );
+
+        app.player.track.artist.clear();
+        assert_eq!(
+            hit_test(&three_rows, &app, 2, 6),
+            None,
+            "空名字不登记命中区"
+        );
+
+        app.player.track.artist = "Jay".to_string();
+        assert_eq!(
+            hit_test(&UiLayout::default(), &app, 0, 1),
+            None,
+            "整个信息区没画时零矩形不命中"
         );
     }
 

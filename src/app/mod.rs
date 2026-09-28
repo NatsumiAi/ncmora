@@ -2383,6 +2383,8 @@ pub struct App {
     pub vip_audio_unlocked: bool,
     search_return_page: Page,
     playlist_return_page: Page,
+    /// 作者页的上一级：从搜索页进是搜索页，从全屏页点作者名进是首页。
+    author_return_page: Page,
     playlist_section_return_snapshot: Option<PlaylistState>,
     qr_last_poll_at: Option<Instant>,
     startup_loading_started_at: Option<Instant>,
@@ -2517,6 +2519,7 @@ impl App {
             vip_audio_unlocked: false,
             search_return_page: Page::Home,
             playlist_return_page: Page::Home,
+            author_return_page: Page::Home,
             playlist_section_return_snapshot: None,
             qr_last_poll_at: None,
             startup_loading_started_at: None,
@@ -4976,6 +4979,7 @@ impl App {
                     _ => (),
                 }
                 self.playlist_section_return_snapshot = None;
+                self.author_return_page = Page::Search;
                 self.page = Page::Author;
                 self.search.status_line = format!("已打开作者 {}", self.author.title);
             }
@@ -5884,7 +5888,7 @@ impl App {
             }
             KeyCode::Enter => self.play_focused_author_tile().await,
             KeyCode::Esc => {
-                self.page = Page::Search;
+                self.page = self.author_return_page;
             }
             _ => {}
         }
@@ -6236,6 +6240,81 @@ impl App {
         if self.page != Page::Login {
             self.open_settings();
         }
+    }
+
+    /// 全屏页点了作者名：宿主按当前播放歌曲解析出作者并打开作者页。
+    ///
+    /// 全屏页只有显示名（且可能是 "A / B / C" 的拼接），ID 只能由宿主补：
+    /// 取 `song/detail` 里 `ar` 的第一个（即列表里排在最前的那位作者）。
+    /// 本机音频 / 无播放时解析不出来，只在状态行里说明，不换页。
+    pub async fn open_author_page_from_fullscreen(&mut self) {
+        let Some(song_id) = self.current_song_id() else {
+            self.set_runtime_status(
+                self.lang_text("当前没有正在播放的歌曲", "Nothing is playing right now"),
+            );
+            return;
+        };
+
+        self.set_runtime_status(
+            self.lang_text("正在解析作者", "Resolving the artist")
+                .to_string(),
+        );
+
+        let (artist_id, _) = self.song_artist_album_ids(&song_id).await;
+        let Some(artist_id) = artist_id else {
+            self.set_runtime_status(self.lang_text(
+                "无法解析当前歌曲的作者",
+                "Failed to resolve the artist of the current song",
+            ));
+            return;
+        };
+
+        match self.load_author_detail(&artist_id).await {
+            Ok(()) => {
+                self.playlist_section_return_snapshot = None;
+                // 从全屏页进来：Esc 回首页，而不是回搜索页（那里可能不是用户来时的页面）。
+                self.author_return_page = Page::Home;
+                self.page = Page::Author;
+                self.set_runtime_status(format!(
+                    "{} {}",
+                    self.lang_text("已打开作者", "Opened artist"),
+                    self.author.title
+                ));
+            }
+            Err(err) => {
+                self.set_runtime_status(format!(
+                    "{}: {err}",
+                    self.lang_text("打开作者页失败", "Failed to open the artist page"),
+                ));
+            }
+        }
+    }
+
+    /// 当前歌曲在 `song/detail` 里的主作者 ID 与专辑 ID。
+    ///
+    /// 队列/搜索结果只带歌曲 ID（曲目行没有 `ar[0].id`、`al.id`），
+    /// 所以从全屏页点名字进页面时按需解析一次。
+    async fn song_artist_album_ids(&mut self, song_id: &str) -> (Option<String>, Option<String>) {
+        let Ok(detail) = self.api.song_detail(song_id).await else {
+            return (None, None);
+        };
+
+        let Some(song) = detail
+            .body
+            .get("songs")
+            .and_then(|value| value.as_array())
+            .and_then(|items| items.first())
+        else {
+            return (None, None);
+        };
+
+        let artist_id = song
+            .get("ar")
+            .and_then(|value| value.as_array())
+            .and_then(|artists| artists.first())
+            .and_then(|artist| parse_value_as_string(artist.get("id")));
+        let album_id = parse_value_as_string(song.pointer("/al/id"));
+        (artist_id, album_id)
     }
 
     pub fn fullscreen_config_snapshot(&self) -> crate::tmplayer::HostConfigSync {

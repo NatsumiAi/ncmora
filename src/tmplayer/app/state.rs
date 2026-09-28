@@ -436,6 +436,9 @@ pub struct AppState {
 
     // Ask host CNMPlayer to open its settings after exiting fullscreen.
     pub request_host_settings_open: bool,
+    /// 全屏页里点了作者名/专辑名这类"交给宿主接着做"的请求：
+    /// `Some` 即请求退出，落点由 `FullscreenExit` 说明（`Tui::draw` 据此置 `should_quit`）。
+    pub exit_request: Option<crate::tmplayer::FullscreenExit>,
 
     pub last_mouse_click: Option<(Instant, u16, u16)>,
     /// 播放列表上一次点击的条目序号（双击切歌判定）。
@@ -553,6 +556,7 @@ impl AppState {
             pending_system_cover_anim: None,
             toast: None,
             request_host_settings_open: false,
+            exit_request: None,
             last_mouse_click: None,
             last_playlist_click: None,
             playlist_list_scroll: 0,

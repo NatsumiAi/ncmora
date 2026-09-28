@@ -33,6 +33,41 @@ pub fn core_rows_visible(l: &InfoPanelLayout) -> bool {
     l.meta.height >= 1 && l.progress.height >= 1 && l.volume.height >= 1 && l.controls.height >= 1
 }
 
+/// meta 块内的行号：0 标题（含爱心），1 作者，2 专辑。
+const META_TITLE_ROW: u16 = 0;
+const META_ARTIST_ROW: u16 = 1;
+const META_ALBUM_ROW: u16 = 2;
+
+/// meta 块某一行文字（作者/专辑）的命中矩形。
+///
+/// 只覆盖**画出来的字符**：宽度取按显示宽度裁剪后的结果，名字短时右侧的空白不算命中；
+/// 该行没画（meta 不够高）或文字为空时返回零矩形 —— 零矩形在 `hit_test` 里天然不命中，
+/// 于是不会留下"看不见却可点"的区域。
+///
+/// 与渲染同源：行号与裁剪函数都从这里取，改 meta 版式不会让命中区漂移。
+fn meta_text_rect(meta: Rect, row: u16, text: &str) -> Rect {
+    if meta.width == 0 || meta.height <= row {
+        return Rect::default();
+    }
+
+    let width = clip_to_display_width(text, meta.width as usize).width() as u16;
+    if width == 0 {
+        return Rect::default();
+    }
+
+    Rect {
+        x: meta.x,
+        y: meta.y + row,
+        width,
+        height: 1,
+    }
+}
+
+/// 作者行的命中矩形（meta 块第 2 行画出来的字符范围）。
+pub fn artist_row_rect(meta: Rect, artist: &str) -> Rect {
+    meta_text_rect(meta, META_ARTIST_ROW, artist)
+}
+
 /// 内容（封面、标题、进度、音量、控制）的宽度上限 = 窗口宽度的 1/3。
 ///
 /// 边框不受影响：它仍按 `area` 铺满（「关闭」档位下 `area` 就是整个终端）。
@@ -351,7 +386,7 @@ pub fn render(f: &mut Frame, area: Rect, window_width: u16, app: &mut AppState) 
 
         let meta_rect = Rect {
             x: l.meta.x,
-            y: l.meta.y,
+            y: l.meta.y + META_TITLE_ROW,
             width: l.meta.width,
             height: 1,
         };
@@ -374,12 +409,12 @@ pub fn render(f: &mut Frame, area: Rect, window_width: u16, app: &mut AppState) 
         let a = Paragraph::new(clip_to_display_width(artist, meta_rect.width as usize))
             .style(sub_style)
             .alignment(Alignment::Left);
-        if l.meta.height >= 2 {
+        if l.meta.height > META_ARTIST_ROW {
             f.render_widget(
                 a,
                 Rect {
                     x: meta_rect.x,
-                    y: l.meta.y + 1,
+                    y: l.meta.y + META_ARTIST_ROW,
                     width: meta_rect.width,
                     height: 1,
                 },
@@ -388,12 +423,12 @@ pub fn render(f: &mut Frame, area: Rect, window_width: u16, app: &mut AppState) 
         let al = Paragraph::new(clip_to_display_width(album, meta_rect.width as usize))
             .style(sub_style)
             .alignment(Alignment::Left);
-        if l.meta.height >= 3 {
+        if l.meta.height > META_ALBUM_ROW {
             f.render_widget(
                 al,
                 Rect {
                     x: meta_rect.x,
-                    y: l.meta.y + 2,
+                    y: l.meta.y + META_ALBUM_ROW,
                     width: meta_rect.width,
                     height: 1,
                 },

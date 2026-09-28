@@ -13,6 +13,8 @@ pub enum Action {
     SetVolume(f32),
     ToggleRepeatMode,
     ToggleFavorite,
+    /// 信息区里点了作者名：退出全屏页，由宿主打开该作者页。
+    OpenAuthorPage,
     /// 弹窗条目行被点击（序号）；单击聚焦，双击等同 Enter。
     ModalSelect(usize),
     TogglePlaylist,

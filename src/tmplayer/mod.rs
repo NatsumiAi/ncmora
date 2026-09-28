@@ -52,6 +52,8 @@ pub struct FullscreenBootstrap {
 pub enum FullscreenExit {
     BackToHost,
     BackToHostOpenSettings,
+    /// 全屏页里点了作者名：宿主退出后打开该作者页。
+    BackToHostOpenAuthor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
