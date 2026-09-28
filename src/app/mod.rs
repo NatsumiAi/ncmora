@@ -29,8 +29,9 @@ use cyper::Client;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::{FutureExt, future::Shared};
 use http::header;
-use image::{DynamicImage, GenericImageView};
+use image::DynamicImage;
 use ncm_api::ApiResponse;
+use parking_lot::Mutex;
 use ratatui::Frame;
 use ratatui::layout::{Rect, Size};
 use ratatui::style::Style;
@@ -43,10 +44,10 @@ use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::ops::Range;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthChar;
@@ -635,6 +636,9 @@ pub struct CoverFetchState {
     ascii: Option<AsciiFuture>,
     size: Size,
     protocol: Option<Arc<Mutex<StatefulProtocol>>>,
+    /// 协议缓存键：整块图尺寸 + 可见行区间。部分可见时按可见比例裁源图，
+    /// 键包含可见区间，避免缩放时复用错切片。
+    protocol_key: Option<(Size, u16, u16)>,
 }
 
 impl CoverFetchState {
@@ -653,6 +657,7 @@ impl CoverFetchState {
         self.url = Some(url);
         self.size = Size::ZERO;
         self.protocol = None;
+        self.protocol_key = None;
     }
 
     pub fn render(
@@ -664,42 +669,115 @@ impl CoverFetchState {
         bg_style: Option<Style>,
         draw_ascii: bool,
     ) {
+        self.render_rows(
+            frame,
+            picker,
+            area,
+            area.height,
+            0..area.height,
+            text_style,
+            bg_style,
+            draw_ascii,
+        );
+    }
+
+    /// 只渲染 `visible` 行（行号相对整块图，`area` 是这些行的落点），其余行不写入。
+    ///
+    /// 部分可见时**按可见比例裁源图**：ASCII 路径取对应的文本行，图形路径先把
+    /// 可见比例换算成 `cover_viewport` 结果里的行切片再生成协议——所以是"裁"而不是
+    /// "压进子矩形"，也不需要画完整块图再擦除。
+    // 参数各管一件事（落点/整块行数/可见区间/三种绘制开关），打包成结构体反而更难读。
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_rows(
+        &mut self,
+        frame: &mut Frame,
+        picker: &mut Picker,
+        area: Rect,
+        full_rows: u16,
+        visible: Range<u16>,
+        text_style: Style,
+        bg_style: Option<Style>,
+        draw_ascii: bool,
+    ) {
+        let visible_rows = visible
+            .end
+            .min(full_rows)
+            .saturating_sub(visible.start.min(full_rows));
+        if area.is_empty() || full_rows == 0 || visible_rows == 0 {
+            return;
+        }
+        let area = Rect {
+            height: area.height.min(visible_rows),
+            ..area
+        };
+        if area.is_empty() {
+            return;
+        }
+
         if let Some(bg) = bg_style {
             frame.render_widget(Block::default().style(bg), area);
         }
 
-        let (w, h) = (area.width, area.height);
+        // 缓存按**整块图**尺寸键控：部分可见时不会每帧重建。
+        let size = Size::new(area.width, full_rows);
         if draw_ascii {
-            let placeholder = move || placeholder_cover_ascii(w, h, '░');
-            if self.ascii.is_none() || self.size != area.as_size() {
-                if let Some(bytes) = peek_shared_future(&self.image) {
-                    self.ascii = Some(make_ascii_future(bytes.clone(), w, h));
-                    self.size = area.as_size();
-                }
+            if (self.ascii.is_none() || self.size != size)
+                && let Some(bytes) = peek_shared_future(&self.image)
+            {
+                self.ascii = Some(make_ascii_future(bytes.clone(), area.width, full_rows));
+                self.size = size;
             }
             let ascii = match peek_shared_future(&self.ascii) {
                 Some(x) => x.clone(),
-                None => placeholder(),
+                None => placeholder_cover_ascii(area.width, full_rows, '░'),
             };
-            frame.render_widget(Paragraph::new(ascii).style(text_style), area);
-        } else {
-            let Some(img) = peek_shared_future(&self.image) else {
-                return;
-            };
-            if self.protocol.is_none() || self.size != area.as_size() {
-                let (img_w, img_h) = img.dimensions();
-                let (x, y, w, h) = cover_viewport(img_w, img_h, w, h);
-                let img = img.crop_imm(x, y, w, h);
-                self.protocol = Some(Arc::new(Mutex::new(picker.new_resize_protocol(img))));
-                self.size = area.as_size();
-            }
-            if let Some(proto) = &self.protocol {
-                let mut proto = proto.lock().unwrap();
-                let widget = StatefulImage::<StatefulProtocol>::default();
-                frame.render_stateful_widget(widget, area, &mut proto);
-            }
+            frame.render_widget(
+                Paragraph::new(ascii)
+                    .style(text_style)
+                    .scroll((visible.start, 0)),
+                area,
+            );
+            return;
+        }
+
+        let Some(img) = peek_shared_future(&self.image) else {
+            return;
+        };
+
+        let key = (size, visible.start, area.height);
+        if self.protocol_key.as_ref() != Some(&key) {
+            let (crop_x, crop_y, view_w, view_h) =
+                cover_viewport(img.width(), img.height(), area.width, full_rows);
+            let (slice_y, slice_h) =
+                source_rows_for_visible(view_h, full_rows, visible.start, area.height);
+            let slice = img.crop_imm(crop_x, crop_y + slice_y, view_w, slice_h);
+            self.protocol = Some(Arc::new(Mutex::new(picker.new_resize_protocol(slice))));
+            self.protocol_key = Some(key);
+        }
+
+        if let Some(proto) = &self.protocol {
+            let mut proto = proto.lock();
+            let widget = StatefulImage::<StatefulProtocol>::default();
+            frame.render_stateful_widget(widget, area, &mut proto);
         }
     }
+}
+
+/// 可见行区间对应的源图行区间（相对 viewport 顶部），按比例取，保证是裁切而非压缩。
+fn source_rows_for_visible(
+    view_h: u32,
+    full_rows: u16,
+    skip: u16,
+    visible_rows: u16,
+) -> (u32, u32) {
+    if view_h == 0 || full_rows == 0 || visible_rows == 0 {
+        return (0, view_h.max(1));
+    }
+
+    let full = u32::from(full_rows);
+    let start = (view_h * u32::from(skip) / full).min(view_h - 1);
+    let end = (view_h * (u32::from(skip) + u32::from(visible_rows)) / full).max(start + 1);
+    (start, end.min(view_h) - start)
 }
 
 fn make_ascii_future(bytes: Arc<DynamicImage>, width: u16, height: u16) -> AsciiFuture {
@@ -9490,6 +9568,22 @@ mod tests {
             parse_search_input("@author"),
             (String::new(), SearchScope::Author)
         );
+    }
+
+    /// 可见行按比例映射到源图行：整体可见取整段，只露下半就只取下半，绝不压缩。
+    #[test]
+    fn source_rows_follow_visible_proportion() {
+        // 全部可见：整段 viewport。
+        assert_eq!(source_rows_for_visible(8, 4, 0, 4), (0, 8));
+        // 只露第 2 行（占四分之一）：取第二段四分之一。
+        assert_eq!(source_rows_for_visible(8, 4, 1, 1), (2, 2));
+        // 头像形状（2 行）：只露下半 → 取源图下半。
+        assert_eq!(source_rows_for_visible(8, 2, 1, 1), (4, 4));
+        // 最后一个四分之一，且不越界。
+        let (start, len) = source_rows_for_visible(8, 4, 3, 1);
+        assert_eq!((start, len), (6, 2));
+        // 源图比行数还小（退化）：至少 1 行且不越界。
+        assert_eq!(source_rows_for_visible(1, 4, 2, 1), (0, 1));
     }
 
     fn search_item(kind: SearchItemKind, label: &str) -> SearchItem {

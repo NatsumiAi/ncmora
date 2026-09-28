@@ -5,10 +5,15 @@ use crate::ui::player_bar;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
+use ratatui::symbols::border::PLAIN;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
+use std::ops::Range;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/// 卡片内布局：行 0 上边框、行 1 名字 + 头像上半、行 2 标签 + 头像下半、最后一行下边框。
+const ARTIST_CARD_NAME_ROW: u16 = 1;
+const ARTIST_CARD_TAG_ROW: u16 = 2;
 /// 卡片头像区：2 行高、4 列宽，约等于方形。
 const ARTIST_CARD_AVATAR_HEIGHT: u16 = 2;
 const ARTIST_CARD_AVATAR_WIDTH: u16 = 4;
@@ -145,12 +150,12 @@ fn draw_result_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         );
 
         if card && kind == SearchItemKind::Artist {
-            render_clipped_artist_card(
+            // 只画与视口相交的那几行：卡内行号 = 列表行 − 该条目首行。
+            render_artist_card(
                 frame,
                 app,
-                list_area,
-                top_row,
-                item_top_row,
+                visible_rect,
+                (visible_top - item_top_row) as u16..(visible_bottom - item_top_row) as u16,
                 item_idx,
                 focused,
             );
@@ -176,53 +181,142 @@ fn draw_result_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// 按真实行位置画作者卡片，再把越出列表区（上/下边界）的那几行还原成页面底色：
-/// 卡片因此可以被裁掉顶部若干行，滚多少行就裁多少行（ratatui 不支持按区域裁剪）。
-fn render_clipped_artist_card(
+/// 绘制作者卡片：只写卡内 `visible` 行（`row` 是可见部分在屏幕上的矩形，
+/// `row.y` 对应卡内行 `visible.start`），被裁掉的行完全不写入——
+/// 于是顶部/底部各滚 1 行就只裁 1 行，且不需要事后擦除。
+fn render_artist_card(
     frame: &mut Frame,
     app: &mut App,
-    list_area: Rect,
-    top_row: usize,
-    item_top_row: usize,
+    row: Rect,
+    visible: Range<u16>,
     item_idx: usize,
     focused: bool,
 ) {
-    // 卡片在行空间里的真实位置可能落在列表区外，用有符号数算，便于做越界裁剪。
-    let true_y = i32::from(list_area.y) + item_top_row as i32 - top_row as i32;
-    if true_y < 0 {
-        // 卡片顶端越出终端（极小窗口）：直接跳过，避免把内容画到错位的行上。
+    if row.is_empty() || visible.is_empty() {
         return;
     }
 
-    let card = Rect {
-        x: list_area.x,
-        y: true_y as u16,
-        width: list_area.width,
-        height: ARTIST_CARD_ROWS as u16,
+    let name = app.search.results[item_idx].left_label.clone();
+    let tag = app.search.results[item_idx]
+        .kind
+        .tag()
+        .unwrap_or_default()
+        .to_string();
+    let border_style = if focused {
+        Style::default()
+            .fg(app.theme.color_accent())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(app.theme.color_surface())
     };
-    render_artist_card(frame, app, card, item_idx, focused);
+    let card_style = base_bg_style(app);
+    let name_style = if focused {
+        Style::default()
+            .fg(app.theme.color_accent2())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(app.theme.color_text())
+    };
+    let tag_style = if focused {
+        Style::default().fg(app.theme.color_accent())
+    } else {
+        Style::default().fg(app.theme.color_subtext())
+    };
 
-    let list_bottom = list_area.y.saturating_add(list_area.height);
-    let card_bottom = card.y.saturating_add(card.height);
-    let clear = |frame: &mut Frame, y: u16, height: u16| {
-        if height == 0 {
-            return;
-        }
-        let region = Rect {
-            x: card.x,
-            y,
-            width: card.width,
-            height,
+    frame.render_widget(Block::default().style(card_style), row);
+
+    // 边框按行画：上/下边框只在真上/真下那一行，内容行只画左右竖边。
+    // Block 仅在相邻两条边同时设置时才画角，所以角另外补。
+    let last_row = ARTIST_CARD_ROWS as u16 - 1;
+    for (offset, card_row) in visible.clone().enumerate() {
+        let line = Rect {
+            x: row.x,
+            y: row.y + offset as u16,
+            width: row.width,
+            height: 1,
         };
-        frame.render_widget(Clear, region);
-        frame.render_widget(Block::default().style(base_bg_style(app)), region);
-    };
-
-    if card.y < list_area.y {
-        clear(frame, card.y, list_area.y - card.y);
+        let (borders, corners) = match card_row {
+            0 => (Borders::TOP, Some((PLAIN.top_left, PLAIN.top_right))),
+            r if r == last_row => (
+                Borders::BOTTOM,
+                Some((PLAIN.bottom_left, PLAIN.bottom_right)),
+            ),
+            _ => (Borders::LEFT | Borders::RIGHT, None),
+        };
+        frame.render_widget(
+            Block::default()
+                .borders(borders)
+                .border_style(border_style)
+                .style(card_style),
+            line,
+        );
+        if let Some((left, right)) = corners {
+            let buf = frame.buffer_mut();
+            if let Some(cell) = buf.cell_mut((line.x, line.y)) {
+                cell.set_symbol(left);
+                cell.set_style(border_style);
+            }
+            if line.width > 1
+                && let Some(cell) = buf.cell_mut((line.x + line.width - 1, line.y))
+            {
+                cell.set_symbol(right);
+                cell.set_style(border_style);
+            }
+        }
     }
-    if card_bottom > list_bottom {
-        clear(frame, list_bottom, card_bottom - list_bottom);
+
+    let text_width = row
+        .width
+        .saturating_sub(ARTIST_CARD_TEXT_X.saturating_add(2));
+    if text_width > 0 {
+        let text_x = row.x.saturating_add(ARTIST_CARD_TEXT_X);
+        let text_line = |card_row: u16| Rect {
+            x: text_x,
+            y: row.y + (card_row - visible.start),
+            width: text_width,
+            height: 1,
+        };
+        if visible.contains(&ARTIST_CARD_NAME_ROW) {
+            frame.render_widget(
+                Paragraph::new(clip_to_display_width(&name, usize::from(text_width)))
+                    .style(name_style),
+                text_line(ARTIST_CARD_NAME_ROW),
+            );
+        }
+        if visible.contains(&ARTIST_CARD_TAG_ROW) {
+            frame.render_widget(
+                Paragraph::new(tag)
+                    .style(tag_style)
+                    .alignment(Alignment::Right),
+                text_line(ARTIST_CARD_TAG_ROW),
+            );
+        }
+    }
+
+    // 头像：只渲染可见那几行，源图按可见比例裁（不是把整图压进子矩形）。
+    let avatar_first = ARTIST_CARD_NAME_ROW;
+    let avatar_last = avatar_first + ARTIST_CARD_AVATAR_HEIGHT;
+    let visible_start = visible.start.max(avatar_first);
+    let visible_end = visible.end.min(avatar_last);
+    if visible_start < visible_end {
+        let avatar_area = Rect {
+            x: row.x.saturating_add(ARTIST_CARD_AVATAR_X),
+            y: row.y + (visible_start - visible.start),
+            width: ARTIST_CARD_AVATAR_WIDTH.min(row.width),
+            height: visible_end - visible_start,
+        };
+        let draw_ascii = app.draw_ascii();
+        let text_style = Style::default().fg(app.theme.color_text());
+        app.search.results[item_idx].cover.render_rows(
+            frame,
+            &mut app.graphics_picker,
+            avatar_area,
+            ARTIST_CARD_AVATAR_HEIGHT,
+            (visible_start - avatar_first)..(visible_end - avatar_first),
+            text_style,
+            None,
+            draw_ascii,
+        );
     }
 }
 
@@ -245,91 +339,6 @@ fn draw_search_divider(frame: &mut Frame, app: &App, row: Rect) {
         Paragraph::new("─".repeat(usize::from(row.width)))
             .style(Style::default().fg(app.theme.color_subtext())),
         row,
-    );
-}
-
-/// 作者条目：整行宽的卡片，左侧头像走封面管线，名字与类型标签分列两行。
-fn render_artist_card(frame: &mut Frame, app: &mut App, row: Rect, item_idx: usize, focused: bool) {
-    let name = app.search.results[item_idx].left_label.clone();
-    let tag = app.search.results[item_idx]
-        .kind
-        .tag()
-        .unwrap_or_default()
-        .to_string();
-
-    let border_style = if focused {
-        Style::default()
-            .fg(app.theme.color_accent())
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(app.theme.color_surface())
-    };
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .style(base_bg_style(app)),
-        row,
-    );
-
-    let avatar = Rect {
-        x: row.x.saturating_add(ARTIST_CARD_AVATAR_X),
-        y: row.y.saturating_add(1),
-        width: ARTIST_CARD_AVATAR_WIDTH.min(row.width),
-        height: ARTIST_CARD_AVATAR_HEIGHT.min(row.height),
-    };
-    if !avatar.is_empty() {
-        let draw_ascii = app.draw_ascii();
-        let text_style = Style::default().fg(app.theme.color_text());
-        app.search.results[item_idx].cover.render(
-            frame,
-            &mut app.graphics_picker,
-            avatar,
-            text_style,
-            None,
-            draw_ascii,
-        );
-    }
-
-    let text_width = row
-        .width
-        .saturating_sub(ARTIST_CARD_TEXT_X.saturating_add(2));
-    if text_width == 0 {
-        return;
-    }
-
-    let name_style = if focused {
-        Style::default()
-            .fg(app.theme.color_accent2())
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(app.theme.color_text())
-    };
-    frame.render_widget(
-        Paragraph::new(clip_to_display_width(&name, usize::from(text_width))).style(name_style),
-        Rect {
-            x: row.x.saturating_add(ARTIST_CARD_TEXT_X),
-            y: row.y.saturating_add(1),
-            width: text_width,
-            height: 1,
-        },
-    );
-
-    let tag_style = if focused {
-        Style::default().fg(app.theme.color_accent())
-    } else {
-        Style::default().fg(app.theme.color_subtext())
-    };
-    frame.render_widget(
-        Paragraph::new(tag)
-            .style(tag_style)
-            .alignment(Alignment::Right),
-        Rect {
-            x: row.x.saturating_add(ARTIST_CARD_TEXT_X),
-            y: row.y.saturating_add(2),
-            width: text_width,
-            height: 1,
-        },
     );
 }
 
