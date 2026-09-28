@@ -59,6 +59,8 @@ use streaming::StreamingReader;
 
 const MAX_INPUT_LEN: usize = 64;
 const SEARCH_RESULT_PAGE_SIZE: usize = 50;
+/// 无后缀（混合）搜索里作者 / 歌单分区只取最相关的少量条目，不参与分页。
+const MIXED_AUX_RESULT_LIMIT: usize = 5;
 const SEARCH_BOX_TARGET_HEIGHT: u16 = 3;
 /// 搜索框滑出动画时长（time-based，与帧率解耦）
 const SEARCH_BOX_ANIM_DURATION: Duration = Duration::from_millis(180);
@@ -1267,10 +1269,37 @@ pub struct PrivateRoamState {
     pub last_refresh_day: Option<i64>,
 }
 
+/// 搜索结果条目的种类。带后缀的搜索只产出单一种类；无后缀搜索混合作者 / 歌单 / 单曲。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchItemKind {
+    Song,
+    Album,
+    Artist,
+    Playlist,
+}
+
+impl SearchItemKind {
+    /// 行右侧的类型标签（与 `SearchScope` 的后缀同源，避免两处字面量）。
+    /// 单曲行的右侧位让给时长，故为 None。
+    pub fn tag(self) -> Option<&'static str> {
+        let suffix = self.scope().suffix();
+        (!suffix.is_empty()).then_some(suffix)
+    }
+
+    fn scope(self) -> SearchScope {
+        match self {
+            Self::Song => SearchScope::Single,
+            Self::Album => SearchScope::Album,
+            Self::Artist => SearchScope::Author,
+            Self::Playlist => SearchScope::Playlist,
+        }
+    }
+}
+
 pub struct SearchItem {
+    pub kind: SearchItemKind,
     pub left_label: String,
     pub right_label: String,
-    pub type_tag: Option<String>,
     pub song_id: Option<String>,
     pub album_id: Option<String>,
     pub playlist_id: Option<String>,
@@ -1280,28 +1309,48 @@ pub struct SearchItem {
     pub album: Option<String>,
     pub cover_url: Option<String>,
     pub duration_ms: Option<i64>,
+    /// 作者条目的头像，复用封面管线。
+    pub cover: CoverFetchState,
 }
 
+/// 搜索请求的作用域。`Mixed` 对应无后缀搜索（作者 + 歌单 + 单曲并发拉取后合并）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SearchFilter {
+pub enum SearchScope {
+    Mixed,
     Single,
     Album,
     Author,
     Playlist,
 }
 
-impl SearchFilter {
-    fn search_type(self) -> i32 {
+impl SearchScope {
+    /// 带后缀的类型；`Mixed` 无后缀，不在此表。
+    const SUFFIXED: [SearchScope; 4] = [Self::Single, Self::Album, Self::Author, Self::Playlist];
+
+    fn suffix(self) -> &'static str {
         match self {
-            Self::Single => 1,
-            Self::Album => 10,
-            Self::Author => 100,
-            Self::Playlist => 1000,
+            Self::Mixed => "",
+            Self::Single => "@single",
+            Self::Album => "@album",
+            Self::Author => "@author",
+            Self::Playlist => "@list",
+        }
+    }
+
+    /// NCM cloudsearch 的 `type`；`Mixed` 由 `execute_search` 拆成多请求，没有单一 id。
+    fn search_type(self) -> Option<i32> {
+        match self {
+            Self::Mixed => None,
+            Self::Single => Some(1),
+            Self::Album => Some(10),
+            Self::Author => Some(100),
+            Self::Playlist => Some(1000),
         }
     }
 
     fn display_name(self) -> &'static str {
         match self {
+            Self::Mixed => "综合",
             Self::Single => "单曲",
             Self::Album => "专辑",
             Self::Author => "作者",
@@ -1315,7 +1364,7 @@ pub struct SearchState {
     pub focused_idx: usize,
     pub results: Vec<SearchItem>,
     pub status_line: String,
-    pub filter: SearchFilter,
+    pub scope: SearchScope,
     pub next_offset: usize,
     pub has_more: bool,
     pub scroll_offset: usize,
@@ -1329,7 +1378,7 @@ impl Default for SearchState {
             focused_idx: 0,
             results: Vec::new(),
             status_line: "输入关键词后按 Enter 搜索".to_string(),
-            filter: SearchFilter::Single,
+            scope: SearchScope::Mixed,
             next_offset: 0,
             has_more: false,
             scroll_offset: 0,
@@ -1427,20 +1476,21 @@ impl SearchState {
         true
     }
 
-    pub fn set_results(&mut self, results: Vec<SearchItem>) {
+    /// 整体替换结果。`next_offset` / `has_more` 只描述**可继续分页的分区**
+    /// （混合搜索下即单曲分区，混合列表只有它在末尾追加）。
+    pub fn set_results(&mut self, results: Vec<SearchItem>, next_offset: usize, has_more: bool) {
         self.results = results;
         self.focused_idx = 0;
-        self.next_offset = self.results.len();
-        self.has_more = self.results.len() >= SEARCH_RESULT_PAGE_SIZE;
+        self.next_offset = next_offset;
+        self.has_more = has_more;
         self.scroll_offset = 0;
         self.ensure_focus_visible();
     }
 
+    /// 追加分区分页结果。游标与 `has_more` 由调用方按分区语义推进。
     pub fn append_results(&mut self, mut results: Vec<SearchItem>) -> usize {
         let added = results.len();
         self.results.append(&mut results);
-        self.next_offset = self.results.len();
-        self.has_more = added >= SEARCH_RESULT_PAGE_SIZE;
         self.clamp_scroll_offset();
         added
     }
@@ -4638,14 +4688,6 @@ impl App {
     }
 
     async fn play_focused_search_track(&mut self) {
-        if self.search.filter != SearchFilter::Single {
-            self.set_runtime_status(self.lang_text(
-                "仅“单曲”搜索结果支持直接播放",
-                "Only 'Single' search results support direct playback",
-            ));
-            return;
-        }
-
         let (queue, target) = self.build_queue_from_search();
         // 搜索结果没有"所属列表"，交给首歌封面兜底。
         self.replace_queue_and_play(queue, target, None).await;
@@ -4780,10 +4822,6 @@ impl App {
     }
 
     async fn open_focused_search_author(&mut self) {
-        if self.search.filter != SearchFilter::Author {
-            return;
-        }
-
         let (artist_id, title, fallback_cover_url) = {
             let Some(item) = self.search.results.get(self.search.focused_idx) else {
                 return;
@@ -4821,10 +4859,6 @@ impl App {
     }
 
     async fn open_focused_search_album(&mut self) {
-        if self.search.filter != SearchFilter::Album {
-            return;
-        }
-
         let (album_id, title, fallback_cover_url) = {
             let Some(item) = self.search.results.get(self.search.focused_idx) else {
                 return;
@@ -4878,10 +4912,6 @@ impl App {
     }
 
     async fn open_focused_search_playlist(&mut self) {
-        if self.search.filter != SearchFilter::Playlist {
-            return;
-        }
-
         let (playlist_id, title, fallback_cover_url) = {
             let Some(item) = self.search.results.get(self.search.focused_idx) else {
                 return;
@@ -4932,11 +4962,20 @@ impl App {
     }
 
     async fn activate_focused_search_result(&mut self) {
-        match self.search.filter {
-            SearchFilter::Single => self.play_focused_search_track().await,
-            SearchFilter::Album => self.open_focused_search_album().await,
-            SearchFilter::Author => self.open_focused_search_author().await,
-            SearchFilter::Playlist => self.open_focused_search_playlist().await,
+        let Some(kind) = self
+            .search
+            .results
+            .get(self.search.focused_idx)
+            .map(|item| item.kind)
+        else {
+            return;
+        };
+
+        match kind {
+            SearchItemKind::Song => self.play_focused_search_track().await,
+            SearchItemKind::Album => self.open_focused_search_album().await,
+            SearchItemKind::Artist => self.open_focused_search_author().await,
+            SearchItemKind::Playlist => self.open_focused_search_playlist().await,
         }
     }
 
@@ -6055,7 +6094,7 @@ impl App {
         self.search.query = raw_query;
         if let Err(err) = self.execute_search().await {
             self.search.status_line = format!("搜索失败: {}", err);
-            self.search.set_results(Vec::new());
+            self.search.set_results(Vec::new(), 0, false);
         }
         self.playlist_section_return_snapshot = None;
         self.page = Page::Search;
@@ -7526,23 +7565,28 @@ impl App {
     }
 
     async fn execute_search(&mut self) -> Result<()> {
-        let (keywords, filter) = parse_search_input(&self.search.query);
-        let followed_author_query = is_followed_author_query(&keywords, filter);
+        let (keywords, scope) = parse_search_input(&self.search.query);
+        let followed_author_query = is_followed_author_query(&keywords, scope);
         if keywords.is_empty() && !followed_author_query {
             self.search.status_line = "请输入搜索关键词".to_string();
-            self.search.set_results(Vec::new());
+            self.search.set_results(Vec::new(), 0, false);
             return Ok(());
         }
 
-        self.search.filter = filter;
+        self.search.scope = scope;
         self.search.next_offset = 0;
         self.search.has_more = true;
+
+        if scope == SearchScope::Mixed {
+            return self.execute_mixed_search(&keywords).await;
+        }
 
         let response = if followed_author_query {
             self.api.artist_sublist(SEARCH_RESULT_PAGE_SIZE, 0).await?
         } else {
+            let search_type = scope.search_type().unwrap_or(1);
             self.api
-                .search(&keywords, filter.search_type(), SEARCH_RESULT_PAGE_SIZE, 0)
+                .search(&keywords, search_type, SEARCH_RESULT_PAGE_SIZE, 0)
                 .await?
         };
         let code = response_code(&response);
@@ -7554,24 +7598,76 @@ impl App {
             ));
         }
 
-        let items = if followed_author_query {
+        if followed_author_query {
             let page = parse_followed_author_page(&response);
             let count = page.items.len();
             let next_offset = page.fetched_count;
             let has_more = followed_author_has_more(&page, next_offset);
-            self.search.set_results(page.items);
-            self.search.next_offset = next_offset;
-            self.search.has_more = has_more;
-            self.search.status_line =
-                format!("{} 搜索完成，共 {} 条", filter.display_name(), count);
+            let mut items = page.items;
+            self.load_search_item_covers(&mut items);
+            self.search.set_results(items, next_offset, has_more);
+            self.search.status_line = format!("{} 搜索完成，共 {} 条", scope.display_name(), count);
             return Ok(());
-        } else {
-            parse_search_items(&response, filter)
-        };
+        }
+
+        let mut items = parse_search_items(&response, scope);
         let count = items.len();
-        self.search.set_results(items);
-        self.search.status_line = format!("{} 搜索完成，共 {} 条", filter.display_name(), count);
+        self.load_search_item_covers(&mut items);
+        self.search
+            .set_results(items, count, count >= SEARCH_RESULT_PAGE_SIZE);
+        self.search.status_line = format!("{} 搜索完成，共 {} 条", scope.display_name(), count);
         Ok(())
+    }
+
+    /// 无后缀搜索：并发拉取作者 / 歌单 / 单曲，按 作者 → 歌单 → 单曲 拼接。
+    /// 辅助分区（作者 / 歌单）失败只让该分区为空，不影响单曲结果；只有分页游标跟着单曲走。
+    async fn execute_mixed_search(&mut self, keywords: &str) -> Result<()> {
+        let mut artists_api = self.api.clone();
+        let mut playlists_api = self.api.clone();
+        let (songs, artists, playlists) = futures::join!(
+            self.api
+                .search(keywords, 1, SEARCH_RESULT_PAGE_SIZE, 0),
+            artists_api.search(keywords, 100, MIXED_AUX_RESULT_LIMIT, 0),
+            playlists_api.search(keywords, 1000, MIXED_AUX_RESULT_LIMIT, 0),
+        );
+
+        let songs = songs?;
+        let code = response_code(&songs);
+        if code != 200 {
+            let message = response_message(&songs);
+            return Err(anyhow!("请求失败({}): {}", code, message));
+        }
+
+        let mut items = parse_optional_search_section(artists, SearchScope::Author);
+        items.extend(parse_optional_search_section(
+            playlists,
+            SearchScope::Playlist,
+        ));
+        let song_items = parse_search_items(&songs, SearchScope::Single);
+        let song_count = song_items.len();
+        items.extend(song_items);
+
+        self.load_search_item_covers(&mut items);
+        let total = items.len();
+        self.search.set_results(
+            items,
+            song_count,
+            song_count >= SEARCH_RESULT_PAGE_SIZE,
+        );
+        self.search.status_line = format!("搜索完成，共 {} 条", total);
+        Ok(())
+    }
+
+    /// 作者条目要渲染头像：结果落定时一次性发起封面请求（复用封面管线）。
+    fn load_search_item_covers(&self, items: &mut [SearchItem]) {
+        for item in items.iter_mut() {
+            if item.kind != SearchItemKind::Artist || item.cover.url.is_some() {
+                continue;
+            }
+            if let Some(url) = item.cover_url.clone() {
+                item.cover.load(self.api.clone(), url);
+            }
+        }
     }
 
     async fn load_more_search_results(&mut self) -> Result<usize> {
@@ -7579,12 +7675,18 @@ impl App {
             return Ok(0);
         }
 
-        let (keywords, filter) = parse_search_input(&self.search.query);
-        let followed_author_query = is_followed_author_query(&keywords, filter);
+        let (keywords, scope) = parse_search_input(&self.search.query);
+        let followed_author_query = is_followed_author_query(&keywords, scope);
         if keywords.is_empty() && !followed_author_query {
             return Ok(0);
         }
 
+        // 混合搜索只有末尾的单曲分区可继续分页；辅助分区固定取最相关若干条。
+        let search_type = if scope == SearchScope::Mixed {
+            1
+        } else {
+            scope.search_type().unwrap_or(1)
+        };
         let response = if followed_author_query {
             self.api
                 .artist_sublist(SEARCH_RESULT_PAGE_SIZE, self.search.next_offset)
@@ -7593,7 +7695,7 @@ impl App {
             self.api
                 .search(
                     &keywords,
-                    filter.search_type(),
+                    search_type,
                     SEARCH_RESULT_PAGE_SIZE,
                     self.search.next_offset,
                 )
@@ -7620,13 +7722,13 @@ impl App {
                 if self.search.has_more {
                     self.search.status_line = format!(
                         "{} 已加载 {} 条",
-                        filter.display_name(),
+                        scope.display_name(),
                         self.search.results.len()
                     );
                 } else {
                     self.search.status_line = format!(
                         "{} 搜索结果已全部加载，共 {} 条",
-                        filter.display_name(),
+                        scope.display_name(),
                         self.search.results.len()
                     );
                 }
@@ -7635,20 +7737,28 @@ impl App {
 
             self.search.status_line = format!(
                 "{} 已加载 {} 条",
-                filter.display_name(),
+                scope.display_name(),
                 self.search.results.len()
             );
             return Ok(added);
         }
 
-        let items = parse_search_items(&response, filter);
+        // 混合搜索的分页页就是单曲分区。
+        let page_scope = match scope {
+            SearchScope::Mixed => SearchScope::Single,
+            other => other,
+        };
+        let mut items = parse_search_items(&response, page_scope);
+        self.load_search_item_covers(&mut items);
         let added = self.search.append_results(items);
+        self.search.next_offset = self.search.next_offset.saturating_add(added);
+        self.search.has_more = added >= SEARCH_RESULT_PAGE_SIZE;
 
         if added == 0 {
             self.search.has_more = false;
             self.search.status_line = format!(
                 "{} 搜索结果已全部加载，共 {} 条",
-                filter.display_name(),
+                scope.display_name(),
                 self.search.results.len()
             );
             return Ok(0);
@@ -7656,7 +7766,7 @@ impl App {
 
         self.search.status_line = format!(
             "{} 已加载 {} 条",
-            filter.display_name(),
+            scope.display_name(),
             self.search.results.len()
         );
         Ok(added)
@@ -8681,33 +8791,32 @@ fn artist_album_kind(item: &Value) -> AuthorTileKind {
     AuthorTileKind::Album
 }
 
-fn parse_search_input(raw: &str) -> (String, SearchFilter) {
+fn parse_search_input(raw: &str) -> (String, SearchScope) {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return (String::new(), SearchFilter::Single);
+        return (String::new(), SearchScope::Mixed);
     }
 
     let lower = trimmed.to_ascii_lowercase();
 
-    for (suffix, filter) in [
-        ("@single", SearchFilter::Single),
-        ("@album", SearchFilter::Album),
-        ("@author", SearchFilter::Author),
-        ("@artist", SearchFilter::Author),
-        ("@list", SearchFilter::Playlist),
-    ] {
+    // 后缀表来自 `SearchScope::SUFFIXED`（单一来源）；`@artist` 是同义别名。
+    let suffixes = SearchScope::SUFFIXED
+        .into_iter()
+        .map(|scope| (scope.suffix(), scope))
+        .chain([("@artist", SearchScope::Author)]);
+    for (suffix, scope) in suffixes {
         if lower.ends_with(suffix) {
             let cut = trimmed.len().saturating_sub(suffix.len());
             let stripped = &trimmed[..cut];
-            return (stripped.trim().to_string(), filter);
+            return (stripped.trim().to_string(), scope);
         }
     }
 
-    (trimmed.to_string(), SearchFilter::Single)
+    (trimmed.to_string(), SearchScope::Mixed)
 }
 
-fn is_followed_author_query(keywords: &str, filter: SearchFilter) -> bool {
-    filter == SearchFilter::Author && keywords.trim().is_empty()
+fn is_followed_author_query(keywords: &str, scope: SearchScope) -> bool {
+    scope == SearchScope::Author && keywords.trim().is_empty()
 }
 
 struct FollowedAuthorPage {
@@ -8792,33 +8901,51 @@ fn parse_usize_value(value: Option<&Value>) -> Option<usize> {
     None
 }
 
-fn parse_search_items(response: &ApiResponse, filter: SearchFilter) -> Vec<SearchItem> {
+/// 混合搜索的辅助分区：请求失败或非 200 时退化为空分区（该分区不显示），
+/// 不影响单曲分区，也不把整次搜索判为失败。
+fn parse_optional_search_section(
+    response: Result<ApiResponse>,
+    scope: SearchScope,
+) -> Vec<SearchItem> {
+    match response {
+        Ok(response) if response_code(&response) == 200 => {
+            parse_search_items(&response, scope)
+        }
+        Ok(response) => {
+            log::warn!(
+                "{} 分区搜索失败({}): {}",
+                scope.display_name(),
+                response_code(&response),
+                response_message(&response)
+            );
+            Vec::new()
+        }
+        Err(err) => {
+            log::warn!("{} 分区搜索失败: {}", scope.display_name(), err);
+            Vec::new()
+        }
+    }
+}
+
+/// 按 scope 取对应分区并解析。`Mixed` 没有单一条目种类（由 `execute_mixed_search` 合并三段）。
+fn parse_search_items(response: &ApiResponse, scope: SearchScope) -> Vec<SearchItem> {
     let Some(result) = response.body.get("result") else {
         return Vec::new();
     };
 
-    match filter {
-        SearchFilter::Single => result
-            .get("songs")
-            .and_then(|value| value.as_array())
-            .map(|items| parse_song_items(items))
-            .unwrap_or_default(),
-        SearchFilter::Album => result
-            .get("albums")
-            .and_then(|value| value.as_array())
-            .map(|items| parse_album_items(items))
-            .unwrap_or_default(),
-        SearchFilter::Author => result
-            .get("artists")
-            .and_then(|value| value.as_array())
-            .map(|items| parse_author_items(items))
-            .unwrap_or_default(),
-        SearchFilter::Playlist => result
-            .get("playlists")
-            .and_then(|value| value.as_array())
-            .map(|items| parse_playlist_items(items))
-            .unwrap_or_default(),
-    }
+    let (key, parse): (&str, fn(&[Value]) -> Vec<SearchItem>) = match scope {
+        SearchScope::Mixed => return Vec::new(),
+        SearchScope::Single => ("songs", parse_song_items),
+        SearchScope::Album => ("albums", parse_album_items),
+        SearchScope::Author => ("artists", parse_author_items),
+        SearchScope::Playlist => ("playlists", parse_playlist_items),
+    };
+
+    result
+        .get(key)
+        .and_then(|value| value.as_array())
+        .map(|items| parse(items))
+        .unwrap_or_default()
 }
 
 fn parse_song_items(items: &[Value]) -> Vec<SearchItem> {
@@ -8836,9 +8963,9 @@ fn parse_song_items(items: &[Value]) -> Vec<SearchItem> {
             .unwrap_or(0);
 
         out.push(SearchItem {
+            kind: SearchItemKind::Song,
             left_label: format!("{} - {}", name, artist),
             right_label: format_duration(duration),
-            type_tag: None,
             song_id: parse_value_as_string(item.get("id")),
             album_id: None,
             playlist_id: None,
@@ -8851,6 +8978,7 @@ fn parse_song_items(items: &[Value]) -> Vec<SearchItem> {
                 .map(|value| value.to_string()),
             cover_url: first_non_empty(item, &["/al/picUrl", "/album/picUrl"]),
             duration_ms: Some(duration),
+            cover: CoverFetchState::default(),
         });
     }
 
@@ -8875,9 +9003,9 @@ fn parse_album_items(items: &[Value]) -> Vec<SearchItem> {
             .unwrap_or_default();
 
         out.push(SearchItem {
+            kind: SearchItemKind::Album,
             left_label: format!("{} - {}", name, artist),
             right_label: format!("{} 首", size),
-            type_tag: Some("@album".to_string()),
             song_id: None,
             album_id: parse_value_as_string(item.get("id")),
             playlist_id: None,
@@ -8887,6 +9015,7 @@ fn parse_album_items(items: &[Value]) -> Vec<SearchItem> {
             album: Some(name.to_string()),
             cover_url: first_non_empty(item, &["/picUrl", "/blurPicUrl"]),
             duration_ms: None,
+            cover: CoverFetchState::default(),
         });
     }
 
@@ -8907,9 +9036,9 @@ fn parse_author_items(items: &[Value]) -> Vec<SearchItem> {
             .unwrap_or_default();
 
         out.push(SearchItem {
+            kind: SearchItemKind::Artist,
             left_label: name.to_string(),
             right_label: format!("{} 张专辑", album_size),
-            type_tag: Some("@author".to_string()),
             song_id: None,
             album_id: None,
             playlist_id: None,
@@ -8919,6 +9048,7 @@ fn parse_author_items(items: &[Value]) -> Vec<SearchItem> {
             album: None,
             cover_url: first_non_empty(item, &["/picUrl", "/img1v1Url", "/avatarUrl"]),
             duration_ms: None,
+            cover: CoverFetchState::default(),
         });
     }
 
@@ -8943,9 +9073,9 @@ fn parse_playlist_items(items: &[Value]) -> Vec<SearchItem> {
             .unwrap_or_default();
 
         out.push(SearchItem {
+            kind: SearchItemKind::Playlist,
             left_label: format!("{} - {}", name, creator),
             right_label: format!("{} 首", count),
-            type_tag: Some("@list".to_string()),
             song_id: None,
             album_id: None,
             playlist_id: parse_value_as_string(item.get("id")),
@@ -8955,6 +9085,7 @@ fn parse_playlist_items(items: &[Value]) -> Vec<SearchItem> {
             album: None,
             cover_url: first_non_empty(item, &["/coverImgUrl", "/picUrl"]),
             duration_ms: None,
+            cover: CoverFetchState::default(),
         });
     }
 

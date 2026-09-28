@@ -157,9 +157,9 @@ fn render_search_row(
     };
 
     let right = item
-        .type_tag
-        .clone()
-        .filter(|tag| !tag.trim().is_empty())
+        .kind
+        .tag()
+        .map(str::to_string)
         .unwrap_or_else(|| item.right_label.clone());
 
     let left = format!("{:02}. {}", item_idx + 1, item.left_label);
