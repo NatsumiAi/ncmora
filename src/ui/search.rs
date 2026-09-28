@@ -1,4 +1,4 @@
-use crate::app::{App, SearchItemKind, SearchState};
+use crate::app::{ARTIST_CARD_ROWS, App, SearchItemKind, SearchState};
 use crate::data::config::Language;
 use crate::ui::page_lyrics;
 use crate::ui::player_bar;
@@ -6,11 +6,9 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// 作者卡片：上边框 + 两行内容（头像跨两行）+ 下边框。
-const ARTIST_CARD_HEIGHT: u16 = 4;
 /// 卡片头像区：2 行高、4 列宽，约等于方形。
 const ARTIST_CARD_AVATAR_HEIGHT: u16 = 2;
 const ARTIST_CARD_AVATAR_WIDTH: u16 = 4;
@@ -86,61 +84,80 @@ fn draw_result_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         height: 1,
     };
 
-    let card = list_area.width >= ARTIST_CARD_MIN_WIDTH && list_area.height >= ARTIST_CARD_HEIGHT;
+    let card = list_area.width >= ARTIST_CARD_MIN_WIDTH
+        && usize::from(list_area.height) >= ARTIST_CARD_ROWS;
+    app.search.set_viewport(usize::from(list_area.height), card);
 
-    // 条目高度不一（作者卡片 4 行），可见条目数按实际高度累计；先按上一帧的滚动起点
-    // 估算一次，交给状态机修正焦距后再算最终窗口，与 `ensure_focus_visible` 口径一致。
-    let first = app.search.effective_scroll_offset();
-    let end = visible_search_end(&app.search, first, list_area.height, card);
-    app.search
-        .set_visible_rows(end.saturating_sub(first).max(1));
-    let first = app.search.effective_scroll_offset();
-    let end = visible_search_end(&app.search, first, list_area.height, card);
+    // 视口按行定位：条目高度不一，行滚动才能让顶部与底部同步移动。
+    let top_row = app.search.effective_scroll_rows();
+    let bottom_row = top_row.saturating_add(usize::from(list_area.height));
 
-    let mut y = list_area.y;
-    for item_idx in first..end {
+    for item_idx in 0..app.search.results.len() {
+        let start_row = app.search.item_start_row(item_idx);
+        if start_row >= bottom_row {
+            break;
+        }
+        let end_row = app.search.item_end_row(item_idx);
+        if end_row <= top_row {
+            continue;
+        }
+
         let kind = app.search.results[item_idx].kind;
-        // 分隔线只做视觉区分，不切分滚动区域：跨分区滚动与旧版一致。
-        if item_idx > 0 && app.search.results[item_idx - 1].kind != kind {
+        let divider = app.search.divider_rows(item_idx);
+        let item_top_row = start_row + divider;
+
+        // 分区线：单行，整行落在视口内才画（它不产生命中区）。
+        if divider == 1 && start_row >= top_row {
             draw_search_divider(
                 frame,
                 app,
                 Rect {
                     x: list_area.x,
-                    y,
+                    y: list_area.y + (start_row - top_row) as u16,
                     width: list_area.width,
                     height: 1,
                 },
             );
-            y += 1;
         }
 
-        let height = item_height(kind, card);
-        let row = Rect {
-            x: list_area.x,
-            y,
-            width: list_area.width,
-            height,
-        };
+        let visible_top = item_top_row.max(top_row);
+        let visible_bottom = end_row.min(bottom_row);
+        if visible_top >= visible_bottom {
+            continue;
+        }
 
+        let focused = item_idx == app.search.focused_idx;
+        let visible_rect = Rect {
+            x: list_area.x,
+            y: list_area.y + (visible_top - top_row) as u16,
+            width: list_area.width,
+            height: (visible_bottom - visible_top) as u16,
+        };
+        // 命中区覆盖条目可见部分：被裁切的卡片仍能点到露出来的那几行。
         app.push_search_item_hit(
             crate::app::HitRect {
-                x: row.x,
-                y: row.y,
-                width: row.width,
-                height: row.height,
+                x: visible_rect.x,
+                y: visible_rect.y,
+                width: visible_rect.width,
+                height: visible_rect.height,
             },
             item_idx,
         );
 
-        let focused = item_idx == app.search.focused_idx;
         if card && kind == SearchItemKind::Artist {
-            render_artist_card(frame, app, row, item_idx, focused);
+            render_clipped_artist_card(
+                frame,
+                app,
+                list_area,
+                top_row,
+                item_top_row,
+                item_idx,
+                focused,
+            );
         } else {
             let ordinal = search_item_ordinal(&app.search, item_idx);
-            render_search_row(frame, app, row, item_idx, ordinal, focused);
+            render_search_row(frame, app, visible_rect, item_idx, ordinal, focused);
         }
-        y += height;
     }
 
     if app.config.show_hints && list_height < inner.height {
@@ -159,40 +176,54 @@ fn draw_result_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// 条目占用的行数（不含它前面的分隔线）。
-fn item_height(kind: SearchItemKind, card: bool) -> u16 {
-    if card && kind == SearchItemKind::Artist {
-        ARTIST_CARD_HEIGHT
-    } else {
-        1
+/// 按真实行位置画作者卡片，再把越出列表区（上/下边界）的那几行还原成页面底色：
+/// 卡片因此可以被裁掉顶部若干行，滚多少行就裁多少行（ratatui 不支持按区域裁剪）。
+fn render_clipped_artist_card(
+    frame: &mut Frame,
+    app: &mut App,
+    list_area: Rect,
+    top_row: usize,
+    item_top_row: usize,
+    item_idx: usize,
+    focused: bool,
+) {
+    // 卡片在行空间里的真实位置可能落在列表区外，用有符号数算，便于做越界裁剪。
+    let true_y = i32::from(list_area.y) + item_top_row as i32 - top_row as i32;
+    if true_y < 0 {
+        // 卡片顶端越出终端（极小窗口）：直接跳过，避免把内容画到错位的行上。
+        return;
     }
-}
 
-/// 条目自身 + 它前面的分区线占用的行数。
-fn search_row_height(state: &SearchState, index: usize, card: bool) -> u16 {
-    let divider =
-        u16::from(index > 0 && state.results[index - 1].kind != state.results[index].kind);
-    divider + item_height(state.results[index].kind, card)
-}
+    let card = Rect {
+        x: list_area.x,
+        y: true_y as u16,
+        width: list_area.width,
+        height: ARTIST_CARD_ROWS as u16,
+    };
+    render_artist_card(frame, app, card, item_idx, focused);
 
-/// 从 `first` 起、在 `height` 行内**完整**放得下的条目区间上界（不含）。
-/// 极矮面板至少保留一条，避免焦点落在看不见的位置。
-fn visible_search_end(state: &SearchState, first: usize, height: u16, card: bool) -> usize {
-    let mut used = 0u16;
-    let mut end = first;
-    while end < state.results.len() {
-        let needed = search_row_height(state, end, card);
-        if used.saturating_add(needed) > height {
-            break;
+    let list_bottom = list_area.y.saturating_add(list_area.height);
+    let card_bottom = card.y.saturating_add(card.height);
+    let clear = |frame: &mut Frame, y: u16, height: u16| {
+        if height == 0 {
+            return;
         }
-        used += needed;
-        end += 1;
-    }
+        let region = Rect {
+            x: card.x,
+            y,
+            width: card.width,
+            height,
+        };
+        frame.render_widget(Clear, region);
+        frame.render_widget(Block::default().style(base_bg_style(app)), region);
+    };
 
-    if end == first && first < state.results.len() {
-        end = first + 1;
+    if card.y < list_area.y {
+        clear(frame, card.y, list_area.y - card.y);
     }
-    end
+    if card_bottom > list_bottom {
+        clear(frame, list_bottom, card_bottom - list_bottom);
+    }
 }
 
 /// 分区内序号（同一 kind 内的第几条）。带后缀搜索只有一种 kind，等价于旧版的行号。
@@ -397,9 +428,10 @@ fn clip_to_display_width(text: &str, max_width: usize) -> String {
 mod tests {
     use super::*;
     use crate::app::CoverFetchState;
+    use crate::app::SearchItem;
 
-    fn item(kind: SearchItemKind, label: &str) -> crate::app::SearchItem {
-        crate::app::SearchItem {
+    fn item(kind: SearchItemKind, label: &str) -> SearchItem {
+        SearchItem {
             kind,
             left_label: label.to_string(),
             right_label: String::new(),
@@ -416,48 +448,22 @@ mod tests {
         }
     }
 
-    fn mixed_state() -> SearchState {
-        SearchState {
-            results: vec![
+    /// 序号按分区重新开始（同 kind 计数），跨窗口滚动时也不受影响。
+    #[test]
+    fn ordinal_restarts_per_section() {
+        let mut state = SearchState::default();
+        state.set_results(
+            vec![
                 item(SearchItemKind::Artist, "artist-1"),
                 item(SearchItemKind::Artist, "artist-2"),
                 item(SearchItemKind::Playlist, "playlist-1"),
                 item(SearchItemKind::Song, "song-1"),
                 item(SearchItemKind::Song, "song-2"),
             ],
-            ..SearchState::default()
-        }
-    }
+            0,
+            false,
+        );
 
-    /// 分区线的行数必须计入预算，否则最后一条会被挤出可见区。
-    #[test]
-    fn visible_end_accounts_for_divider_rows() {
-        let state = SearchState {
-            results: vec![
-                item(SearchItemKind::Artist, "artist-1"),
-                item(SearchItemKind::Playlist, "playlist-1"),
-                item(SearchItemKind::Song, "song-1"),
-            ],
-            ..SearchState::default()
-        };
-
-        // 卡片 4 行 + 分区线 1 + 歌单 1 = 6：装不下第二段的分区线 + 单曲。
-        assert_eq!(visible_search_end(&state, 0, 6, true), 2);
-        // 关掉卡片后全部 1 行：3 条 + 2 条分区线 = 5 ≤ 6。
-        assert_eq!(visible_search_end(&state, 0, 6, false), 3);
-    }
-
-    /// 极矮面板至少渲染一条，避免焦点落在看不见的条目上。
-    #[test]
-    fn visible_end_keeps_one_item_in_tiny_panel() {
-        let state = mixed_state();
-        assert_eq!(visible_search_end(&state, 0, 1, true), 1);
-    }
-
-    /// 序号按分区重新开始（同 kind 计数），跨窗口滚动时也不受影响。
-    #[test]
-    fn ordinal_restarts_per_section() {
-        let state = mixed_state();
         assert_eq!(search_item_ordinal(&state, 1), 2);
         assert_eq!(search_item_ordinal(&state, 2), 1);
         assert_eq!(search_item_ordinal(&state, 4), 2);

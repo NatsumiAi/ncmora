@@ -1278,12 +1278,24 @@ pub enum SearchItemKind {
     Playlist,
 }
 
+/// 作者卡片的行数：上边框 + 头像两行 + 下边框。
+pub const ARTIST_CARD_ROWS: usize = 4;
+
 impl SearchItemKind {
     /// 行右侧的类型标签（与 `SearchScope` 的后缀同源，避免两处字面量）。
     /// 单曲行的右侧位让给时长，故为 None。
     pub fn tag(self) -> Option<&'static str> {
         let scope = self.scope();
         (scope != SearchScope::Single).then(|| scope.suffix())
+    }
+
+    /// 条目占用的行数：作者卡片 4 行，其余 1 行。
+    pub fn rows(self, card: bool) -> usize {
+        if card && self == Self::Artist {
+            ARTIST_CARD_ROWS
+        } else {
+            1
+        }
     }
 
     fn scope(self) -> SearchScope {
@@ -1367,8 +1379,13 @@ pub struct SearchState {
     pub scope: SearchScope,
     pub next_offset: usize,
     pub has_more: bool,
-    pub scroll_offset: usize,
-    pub visible_rows: usize,
+    /// 视口顶部距列表起点的**行数**。条目高度不一（作者卡片 4 行），按行滚动
+    /// 才能让顶部与底部同步移动，而不是整条整条地跳。
+    pub scroll_rows: usize,
+    /// 视口高度（行），渲染侧每帧写入。
+    view_rows: usize,
+    /// 作者条目是否按卡片渲染（面板够宽够高），渲染侧每帧写入。
+    card_mode: bool,
 }
 
 impl Default for SearchState {
@@ -1381,59 +1398,102 @@ impl Default for SearchState {
             scope: SearchScope::Mixed,
             next_offset: 0,
             has_more: false,
-            scroll_offset: 0,
-            visible_rows: 1,
+            scroll_rows: 0,
+            view_rows: 1,
+            card_mode: false,
         }
     }
 }
 
 impl SearchState {
-    fn max_scroll_offset(&self) -> usize {
-        self.results.len().saturating_sub(self.visible_rows.max(1))
+    /// 条目的行跨度：分区线（若有）+ 条目自身高度。
+    fn row_span(&self, index: usize) -> usize {
+        let kind = self.results[index].kind;
+        let divider = usize::from(index > 0 && self.results[index - 1].kind != kind);
+        divider + kind.rows(self.card_mode)
     }
 
-    fn clamp_scroll_offset(&mut self) {
-        self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+    /// 条目（不含其分区线）首行在列表行空间中的位置。
+    pub fn item_start_row(&self, index: usize) -> usize {
+        (0..index.min(self.results.len()))
+            .map(|i| self.row_span(i))
+            .sum()
     }
 
+    pub fn item_end_row(&self, index: usize) -> usize {
+        self.item_start_row(index) + self.row_span(index)
+    }
+
+    /// 条目前的分区线占用的行数（0 或 1）。
+    pub fn divider_rows(&self, index: usize) -> usize {
+        usize::from(index > 0 && self.results[index - 1].kind != self.results[index].kind)
+    }
+
+    fn total_rows(&self) -> usize {
+        (0..self.results.len()).map(|i| self.row_span(i)).sum()
+    }
+
+    fn max_scroll_rows(&self) -> usize {
+        self.total_rows().saturating_sub(self.view_rows.max(1))
+    }
+
+    fn clamp_scroll(&mut self) {
+        self.scroll_rows = self.scroll_rows.min(self.max_scroll_rows());
+    }
+
+    /// 聚焦条目必须完整可见：底边对齐就按**该条目推进的行数**下移视口，
+    /// 于是顶部也退同样多的行（卡片被裁切而不是整块移出，底部不会跳变）。
     fn ensure_focus_visible(&mut self) {
         if self.results.is_empty() {
             self.focused_idx = 0;
-            self.scroll_offset = 0;
+            self.scroll_rows = 0;
             return;
         }
 
         self.focused_idx = self.focused_idx.min(self.results.len() - 1);
-        if self.focused_idx < self.scroll_offset {
-            self.scroll_offset = self.focused_idx;
-        } else {
-            let bottom = self
-                .scroll_offset
-                .saturating_add(self.visible_rows.max(1).saturating_sub(1));
-            if self.focused_idx > bottom {
-                self.scroll_offset = self
-                    .focused_idx
-                    .saturating_add(1)
-                    .saturating_sub(self.visible_rows.max(1));
-            }
+        let view = self.view_rows.max(1);
+        let start = self.item_start_row(self.focused_idx);
+        let end = self.item_end_row(self.focused_idx);
+        if end > self.scroll_rows.saturating_add(view) {
+            self.scroll_rows = end - view;
         }
-
-        self.clamp_scroll_offset();
+        if start < self.scroll_rows {
+            self.scroll_rows = start;
+        }
+        self.clamp_scroll();
     }
 
-    pub fn set_visible_rows(&mut self, visible_rows: usize) {
-        self.visible_rows = visible_rows.max(1);
+    /// 渲染侧每帧写入视口行数与卡片模式。
+    pub fn set_viewport(&mut self, view_rows: usize, card_mode: bool) {
+        self.view_rows = view_rows.max(1);
+        self.card_mode = card_mode;
         self.ensure_focus_visible();
     }
 
-    pub fn effective_scroll_offset(&self) -> usize {
-        self.scroll_offset.min(self.max_scroll_offset())
+    pub fn effective_scroll_rows(&self) -> usize {
+        self.scroll_rows.min(self.max_scroll_rows())
+    }
+
+    /// 视口内可见的条目数（翻页步长）；卡片只算一条。
+    pub fn page_items(&self) -> usize {
+        let top = self.effective_scroll_rows();
+        let bottom = top.saturating_add(self.view_rows.max(1));
+        let mut row = 0usize;
+        let mut count = 0usize;
+        for index in 0..self.results.len() {
+            let span = self.row_span(index);
+            if row.saturating_add(span) > top && row < bottom {
+                count += 1;
+            }
+            row = row.saturating_add(span);
+        }
+        count.max(1)
     }
 
     pub fn set_focus(&mut self, index: usize) {
         if self.results.is_empty() {
             self.focused_idx = 0;
-            self.scroll_offset = 0;
+            self.scroll_rows = 0;
             return;
         }
 
@@ -1446,18 +1506,7 @@ impl SearchState {
             return false;
         }
 
-        let bottom = self
-            .scroll_offset
-            .saturating_add(self.visible_rows.max(1).saturating_sub(1));
-        let is_bottom_edge = self.focused_idx >= bottom;
-
         self.focused_idx += 1;
-        if is_bottom_edge {
-            self.scroll_offset = self
-                .scroll_offset
-                .saturating_add(1)
-                .min(self.max_scroll_offset());
-        }
         self.ensure_focus_visible();
         true
     }
@@ -1467,11 +1516,7 @@ impl SearchState {
             return false;
         }
 
-        let is_top_edge = self.focused_idx == self.scroll_offset;
         self.focused_idx -= 1;
-        if is_top_edge && self.scroll_offset > 0 {
-            self.scroll_offset -= 1;
-        }
         self.ensure_focus_visible();
         true
     }
@@ -1483,7 +1528,7 @@ impl SearchState {
         self.focused_idx = 0;
         self.next_offset = next_offset;
         self.has_more = has_more;
-        self.scroll_offset = 0;
+        self.scroll_rows = 0;
         self.ensure_focus_visible();
     }
 
@@ -1491,7 +1536,7 @@ impl SearchState {
     pub fn append_results(&mut self, mut results: Vec<SearchItem>) -> usize {
         let added = results.len();
         self.results.append(&mut results);
-        self.clamp_scroll_offset();
+        self.clamp_scroll();
         added
     }
 }
@@ -3987,7 +4032,7 @@ impl App {
     async fn quick_page_up_hotkey(&mut self) {
         match self.page {
             Page::Search => {
-                let step = self.search.visible_rows.max(1);
+                let step = self.search.page_items();
                 for _ in 0..step {
                     if !self.search.focus_prev() {
                         break;
@@ -4009,7 +4054,7 @@ impl App {
     async fn quick_page_down_hotkey(&mut self) {
         match self.page {
             Page::Search => {
-                let step = self.search.visible_rows.max(1);
+                let step = self.search.page_items();
                 for _ in 0..step {
                     let before_idx = self.search.focused_idx;
                     let before_len = self.search.results.len();
@@ -6905,11 +6950,7 @@ impl App {
 
         let profile = fetch_account_profile(&mut self.api, self.config.language).await?;
         self.apply_account_profile(profile);
-        Ok(self
-            .home_sidebar
-            .user_id
-            .clone()
-            .unwrap_or_default())
+        Ok(self.home_sidebar.user_id.clone().unwrap_or_default())
     }
 
     /// 应用账号档案（侧边栏用户名 / uid / 我喜欢歌单 id）。
@@ -8292,9 +8333,10 @@ struct QrLoginCode {
 }
 
 async fn fetch_qr_login_code(api: &mut ApiState, lang: Language) -> Result<QrLoginCode> {
-    let key_resp = api.login_qr_key().await.with_context(|| {
-        lang_text(lang, "二维码 key 获取失败", "Failed to fetch QR login key")
-    })?;
+    let key_resp = api
+        .login_qr_key()
+        .await
+        .with_context(|| lang_text(lang, "二维码 key 获取失败", "Failed to fetch QR login key"))?;
 
     let key = extract_qr_key(&key_resp);
     if key.is_empty() {
@@ -8305,9 +8347,10 @@ async fn fetch_qr_login_code(api: &mut ApiState, lang: Language) -> Result<QrLog
         ));
     }
 
-    let qr_resp = api.login_qr_create(&key).await.with_context(|| {
-        lang_text(lang, "二维码创建失败", "Failed to create QR login code")
-    })?;
+    let qr_resp = api
+        .login_qr_create(&key)
+        .await
+        .with_context(|| lang_text(lang, "二维码创建失败", "Failed to create QR login code"))?;
 
     Ok(QrLoginCode {
         key,
@@ -9447,6 +9490,97 @@ mod tests {
             parse_search_input("@author"),
             (String::new(), SearchScope::Author)
         );
+    }
+
+    fn search_item(kind: SearchItemKind, label: &str) -> SearchItem {
+        SearchItem {
+            kind,
+            left_label: label.to_string(),
+            right_label: String::new(),
+            song_id: None,
+            album_id: None,
+            playlist_id: None,
+            artist_id: None,
+            title: None,
+            artist: None,
+            album: None,
+            cover_url: None,
+            duration_ms: None,
+            cover: CoverFetchState::default(),
+        }
+    }
+
+    /// 视口按行滚动：底部推进多少行，顶部就退多少行（作者卡片被裁切而不是整块移出）。
+    #[test]
+    fn search_scroll_moves_by_rows() {
+        let mut state = SearchState {
+            results: vec![
+                search_item(SearchItemKind::Artist, "artist-1"), // 行 0..4（卡片）
+                search_item(SearchItemKind::Artist, "artist-2"), // 行 4..8
+                search_item(SearchItemKind::Song, "song-1"),     // 行 8..10（分区线 1 + 单曲 1）
+                search_item(SearchItemKind::Song, "song-2"),     // 行 10..11
+                search_item(SearchItemKind::Song, "song-3"),     // 行 11..12
+            ],
+            ..SearchState::default()
+        };
+        state.set_viewport(6, true);
+
+        // 进入第二张卡片：底边对齐 8，顶部退 2 行（底边前进 2 行）。
+        state.set_focus(1);
+        assert_eq!(state.effective_scroll_rows(), 2);
+
+        // 进入带分区线的单曲：底边 8 → 10，顶部同样只退 2 行。
+        assert!(state.focus_next());
+        assert_eq!(state.effective_scroll_rows(), 4);
+
+        // 纯单曲：底部只推进 1 行，顶部也只退 1 行（卡片只被裁掉 1 行）。
+        assert!(state.focus_next());
+        assert_eq!(state.effective_scroll_rows(), 5);
+
+        // 回退：目标条目仍完整可见时不滚动。
+        assert!(state.focus_prev());
+        assert_eq!(state.effective_scroll_rows(), 5);
+
+        // 继续回退到被裁掉的那张卡片（起点 4 已在视口上方）：顶部只回退 1 行。
+        assert!(state.focus_prev());
+        assert_eq!(state.effective_scroll_rows(), 4);
+    }
+
+    /// 列表全是卡片时，一次推进就是一个卡片高度，顶部也退一个卡片高度。
+    #[test]
+    fn search_scroll_moves_by_card_height_on_author_list() {
+        let mut state = SearchState {
+            results: vec![
+                search_item(SearchItemKind::Artist, "artist-1"),
+                search_item(SearchItemKind::Artist, "artist-2"),
+                search_item(SearchItemKind::Artist, "artist-3"),
+            ],
+            ..SearchState::default()
+        };
+        state.set_viewport(6, true);
+
+        state.set_focus(1);
+        assert_eq!(state.effective_scroll_rows(), 2);
+        assert!(state.focus_next());
+        assert_eq!(state.effective_scroll_rows(), 6);
+    }
+
+    /// 视口行数变化后聚焦条目仍然完整可见（窗口缩放 / 小窗模式）。
+    #[test]
+    fn search_viewport_resize_keeps_focus_visible() {
+        let mut state = SearchState {
+            results: (0..20)
+                .map(|i| search_item(SearchItemKind::Song, &format!("song-{i}")))
+                .collect(),
+            ..SearchState::default()
+        };
+        state.set_viewport(5, true);
+        state.set_focus(9);
+        assert_eq!(state.effective_scroll_rows(), 5);
+
+        state.set_viewport(3, true);
+        assert_eq!(state.effective_scroll_rows(), 7);
+        assert_eq!(state.page_items(), 3);
     }
 
     fn track(id: &str) -> PlaylistTrack {
