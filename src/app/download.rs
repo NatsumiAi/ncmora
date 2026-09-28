@@ -27,6 +27,9 @@ pub const DOWNLOAD_PATH_NULL: &str = "Null";
 /// 认识这两种载荷（`type` 字段只会有这两个值；网易云的九个档位都落在这两容器里）。
 pub const AUDIO_EXTENSIONS: [&str; 2] = ["mp3", "flac"];
 
+/// 取消标志的轮询间隔（读取流时的超时切片）。
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
 /// 未下载（Nerd Font `f03f`）。
 pub const ICON_DOWNLOAD: char = '\u{f03f}';
 /// 已下载（Nerd Font `f00c`）。
@@ -654,14 +657,17 @@ async fn stream_to_file(
             return Err(TaskError::Cancelled);
         }
 
-        let chunk = match stream.next().await {
-            Some(Ok(chunk)) if !chunk.is_empty() => chunk,
-            Some(Ok(_)) => continue,
-            Some(Err(err)) => {
+        // 用超时切片等数据：网速再慢也能在 ~500ms 内响应取消，
+        // 并且不会因为"长时间无数据"误判失败（超时只回到循环头再查一次标志）。
+        let chunk = match compio::time::timeout(CANCEL_POLL_INTERVAL, stream.next()).await {
+            Ok(Some(Ok(chunk))) if !chunk.is_empty() => chunk,
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(err))) => {
                 let _ = file.close().await;
                 return Err(TaskError::Failed(err.to_string()));
             }
-            None => break,
+            Ok(None) => break,
+            Err(_) => continue,
         };
 
         if let Err(err) = cursor.write_all(chunk).await.0 {

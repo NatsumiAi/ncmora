@@ -577,6 +577,20 @@ mod tests {
         KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
     }
 
+    /// 全屏页 Ctrl+D 必须映射成下载动作（且不能被下面"与修饰键无关"的
+    /// `match ev.code` 分支吃掉）。
+    #[test]
+    fn ctrl_d_maps_to_toggle_download() {
+        let config = crate::tmplayer::data::config::Config::default();
+        assert_eq!(
+            config.keybind_download_fullscreen, "Ctrl+D",
+            "默认键位变了？"
+        );
+
+        let ev = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(map_key(ev, Overlay::None, &config), Action::ToggleDownload);
+    }
+
     /// 设置类弹窗里的 Esc 必须走"关闭弹窗"而不是退出全屏页。
     ///
     /// 曾经漏了 LyricsSettingsModal 的分支，Esc 于是落到默认的 Action::Quit，
