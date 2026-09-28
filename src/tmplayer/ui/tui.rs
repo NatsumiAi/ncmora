@@ -1841,9 +1841,23 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
         }
     }
 
+    // 歌单浮层（含滑出动画）画在信息区之上：它盖住的那几行不再是"看得见的名字"，
+    // 命中区按空名字处理（空名字本就不返回命中区），以免点在可见的歌单行上被判成
+    // "点作者名/专辑名"而退出全屏页。浮层自己的行命中在下面按绘制顺序判定。
+    let covered_by_playlist_panel =
+        !layout.playlist_rect.is_empty() && contains(layout.playlist_rect, col, row);
+    let (artist_hit, album_hit) = if covered_by_playlist_panel {
+        ("", "")
+    } else {
+        (
+            app.player.track.artist.as_str(),
+            app.player.track.album.as_str(),
+        )
+    };
+
     // 作者名贴 meta 块第 2 行左端，多作者按字符位置分段（"A / B" 点谁的名字进谁）：
     // 只有名字画出来的那几格可点，连接符与行尾空白都不算。
-    for (index, rect) in info_panel::artist_row_hits(layout.info_meta, &app.player.track.artist) {
+    for (index, rect) in info_panel::artist_row_hits(layout.info_meta, artist_hit) {
         if contains(rect, col, row) {
             return Some(Action::OpenAuthorPage(index));
         }
@@ -1851,7 +1865,7 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
 
     // 专辑名贴 meta 块第 3 行左端，同样只算画出来的字符：点了打开专辑页。
     if contains(
-        info_panel::album_row_rect(layout.info_meta, &app.player.track.album),
+        info_panel::album_row_rect(layout.info_meta, album_hit),
         col,
         row,
     ) {
@@ -2198,6 +2212,46 @@ mod tests {
             hit_test(&two_rows, &app, 2, 7),
             None,
             "meta 只有两行时专辑行没画"
+        );
+    }
+
+    #[test]
+    fn playlist_panel_takes_the_clicks_over_the_names_it_covers() {
+        // 浮层整块盖住左栏（无封面时列表内区就是整条左栏）：它的行命中排在最后，
+        // 但被它盖住的作者名/专辑名必须让位，否则点在可见的歌单行上会退出全屏页。
+        let mut app = state(Overlay::Playlist);
+        app.player.track.artist = "Jay".to_string();
+        app.player.track.album = "Fantasy".to_string();
+        app.playlist_list_scroll = 0;
+        app.playlist_list_rows = 10;
+        let layout = UiLayout {
+            info_meta: rect(2, 5, 20, 3),
+            playlist_rect: rect(0, 4, 24, 12),
+            playlist_list_inner: rect(1, 5, 22, 10),
+            ..UiLayout::default()
+        };
+
+        assert_eq!(
+            hit_test(&layout, &app, 2, 6),
+            Some(Action::PlaylistSelect(1))
+        );
+        assert_eq!(
+            hit_test(&layout, &app, 2, 7),
+            Some(Action::PlaylistSelect(2))
+        );
+
+        // 浮层收起（滑出动画结束）后名字重新可点：命中区只看实际绘制的那块矩形。
+        let uncovered = UiLayout {
+            info_meta: rect(2, 5, 20, 3),
+            ..UiLayout::default()
+        };
+        assert_eq!(
+            hit_test(&uncovered, &app, 2, 6),
+            Some(Action::OpenAuthorPage(0))
+        );
+        assert_eq!(
+            hit_test(&uncovered, &app, 2, 7),
+            Some(Action::OpenAlbumPage)
         );
     }
 
