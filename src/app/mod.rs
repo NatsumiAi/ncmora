@@ -46,7 +46,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -2922,6 +2922,8 @@ impl App {
         launch(worker);
 
         let api = ApiState::new(saved_cookie.clone(), http_client.clone())?;
+        // 下载任务全局只有一个：管理器起一次常驻 worker，之后只往队列里塞请求。
+        let download_manager = DownloadManager::new(api.clone());
 
         let (lyric_fetch_tx, lyric_fetch_req_rx) = unbounded();
         let (lyric_fetch_res_tx, lyric_fetch_rx) = mpsc::channel::<LyricFetchResult>();
@@ -3026,7 +3028,7 @@ impl App {
             mpris_last_playback: PlaybackRuntimeState::Stopped,
             api,
             audio_player,
-            download_manager: DownloadManager::default(),
+            download_manager,
             download_spinner_start: Instant::now(),
             now_playing_download_state: DownloadState::NotDownloaded,
             download_root,
@@ -4982,13 +4984,26 @@ impl App {
             album_cover_url: candidate.album_cover_url.clone(),
         };
 
+        let queued = self.download_manager.is_active();
         match self.download_manager.enqueue(&self.api, request) {
-            Ok(()) => self.set_runtime_status(format!(
-                "{}: {} ({})",
-                self.lang_text("开始下载", "Downloading"),
-                candidate.title,
-                level.as_api_level()
-            )),
+            Ok(()) => {
+                let status = if queued {
+                    format!(
+                        "{}: {} ({})",
+                        self.lang_text("已加入下载队列", "Queued for download"),
+                        candidate.title,
+                        level.as_api_level()
+                    )
+                } else {
+                    format!(
+                        "{}: {} ({})",
+                        self.lang_text("开始下载", "Downloading"),
+                        candidate.title,
+                        level.as_api_level()
+                    )
+                };
+                self.set_runtime_status(status);
+            }
             Err(message) => self.set_runtime_status(message),
         }
     }
@@ -4998,6 +5013,13 @@ impl App {
         self.refresh_current_download_state();
         for event in self.download_manager.poll() {
             match event {
+                DownloadEvent::Started { title, level } => {
+                    self.set_runtime_status(format!(
+                        "{}: {title} ({})",
+                        self.lang_text("开始下载", "Downloading"),
+                        level.as_api_level()
+                    ));
+                }
                 DownloadEvent::Finished {
                     title,
                     path,

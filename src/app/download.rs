@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use compio::io::{AsyncWrite, AsyncWriteExt};
 use directories::{BaseDirs, UserDirs};
 use futures::StreamExt;
+use futures::channel::mpsc::{TryRecvError, UnboundedReceiver, UnboundedSender, unbounded};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -198,6 +199,11 @@ pub struct DownloadRequest {
 /// 任务结束的通知（由 `DownloadManager::poll` 交给 UI 写状态行）。
 #[derive(Debug, Clone)]
 pub enum DownloadEvent {
+    /// 排队中的任务真正开始写盘（先来后到，队列里可能有多个）。
+    Started {
+        title: String,
+        level: AudioQuality,
+    },
     Finished {
         title: String,
         path: PathBuf,
@@ -230,27 +236,56 @@ enum TaskError {
     Failed(String),
 }
 
+#[derive(Default)]
 struct JobShared {
     cancelled: AtomicBool,
+    /// 队列里的任务真正轮到自己（开始写盘）时置位。
+    started: AtomicBool,
     outcome: Mutex<Option<Result<DownloadOutcome, TaskError>>>,
 }
 
 struct JobHandle {
     title: String,
+    level: AudioQuality,
     cancelling: bool,
+    start_reported: bool,
+    shared: Arc<JobShared>,
+}
+
+/// 队列消息：一次下载请求 + 它的结果槽。
+#[derive(Clone)]
+struct DownloadMessage {
+    request: DownloadRequest,
     shared: Arc<JobShared>,
 }
 
 /// 下载任务表 + 落盘状态缓存。
-#[derive(Default)]
+///
+/// 全局只有一个下载任务（`loop_downloads`）：`enqueue` 只把请求塞进队列，
+/// 队列按先来后到顺序执行——同一时刻最多一个在写盘，取消在途任务后下一个
+/// 立刻顶上。队列排空后任务自己退出（空闲不留常驻 async 任务），
+/// 下一次 `enqueue` 再起一个。进度与结果通过每个任务自己的 `JobShared` 回传。
 pub struct DownloadManager {
+    /// 当前在途的下载任务；`None` 或已关闭 = 没有任务占着（下次按需现起）。
+    worker_tx: Option<UnboundedSender<DownloadMessage>>,
+    /// 起新任务时用的 API 句柄（`enqueue` 时刷新，保证带最新 cookie）。
+    api: ApiState,
     jobs: HashMap<String, JobHandle>,
     /// `目标前缀 -> 是否已落盘`：避免每帧对每一行都 stat 磁盘。
     disk_cache: HashMap<String, bool>,
 }
 
 impl DownloadManager {
-    /// 发起下载；同一首歌已有任务时返回错误文案（由 UI 提示）。
+    pub fn new(api: ApiState) -> Self {
+        Self {
+            worker_tx: None,
+            api,
+            jobs: HashMap::new(),
+            disk_cache: HashMap::new(),
+        }
+    }
+
+    /// 发起下载（进队列）；同一首歌已在队列 / 下载中时返回错误文案。
     pub fn enqueue(&mut self, api: &ApiState, request: DownloadRequest) -> Result<(), String> {
         if let Some(job) = self.jobs.get(&request.song_id) {
             return Err(if job.cancelling {
@@ -260,15 +295,15 @@ impl DownloadManager {
             });
         }
 
-        let shared = Arc::new(JobShared {
-            cancelled: AtomicBool::new(false),
-            outcome: Mutex::new(None),
-        });
+        self.api = api.clone();
+        let shared = Arc::new(JobShared::default());
         self.jobs.insert(
             request.song_id.clone(),
             JobHandle {
                 title: request.title.clone(),
+                level: request.level,
                 cancelling: false,
+                start_reported: false,
                 shared: shared.clone(),
             },
         );
@@ -281,13 +316,42 @@ impl DownloadManager {
                 .to_string(),
         );
 
-        let api = api.clone();
-        launch(async move {
-            let result = download_task(api, request, shared.clone()).await;
-            *shared.outcome.lock() = Some(result);
-        });
+        self.dispatch(DownloadMessage { request, shared })
+    }
 
-        Ok(())
+    /// 把消息送进队列；没有活着的任务就现起一个。
+    ///
+    /// 任务在队列排空后会自行退出（接收端随之 drop）：这里在建/发之前先看
+    /// `is_closed`，发送失败再重建一次——同一条线程内两者都不含 await，
+    /// 不存在"消息已入队但接收端恰好退出"的交错。
+    fn dispatch(&mut self, message: DownloadMessage) -> Result<(), String> {
+        self.ensure_worker();
+        let retry = message.clone();
+        if let Some(mut tx) = self.worker_tx.clone()
+            && tx.start_send(message).is_ok()
+        {
+            return Ok(());
+        }
+
+        // 任务刚好退出（极罕见）：换一个任务把同一条消息再投一次。
+        self.worker_tx = None;
+        self.ensure_worker();
+        if let Some(mut tx) = self.worker_tx.clone()
+            && tx.start_send(retry).is_ok()
+        {
+            return Ok(());
+        }
+        Err("下载任务未能启动".to_string())
+    }
+
+    /// 确保有一个活着的下载任务（`None` 或已关闭时现起一个）。
+    fn ensure_worker(&mut self) {
+        if self.worker_tx.as_ref().is_some_and(|tx| !tx.is_closed()) {
+            return;
+        }
+        let (tx, rx) = unbounded();
+        launch(loop_downloads(rx, self.api.clone()));
+        self.worker_tx = Some(tx);
     }
 
     /// 请求取消：立刻把图标恢复成"未下载"，任务退出前不允许对同一首歌再发起下载。
@@ -318,6 +382,18 @@ impl DownloadManager {
     /// 每帧搬运完成的任务。
     pub fn poll(&mut self) -> Vec<DownloadEvent> {
         let mut events = Vec::new();
+
+        // 队列里轮到自己开始写盘的任务：报一次"开始下载"（先来后到）。
+        for job in self.jobs.values_mut() {
+            if !job.start_reported && job.shared.started.load(Ordering::SeqCst) {
+                job.start_reported = true;
+                events.push(DownloadEvent::Started {
+                    title: job.title.clone(),
+                    level: job.level,
+                });
+            }
+        }
+
         let finished: Vec<String> = self
             .jobs
             .iter()
@@ -403,11 +479,36 @@ impl DownloadManager {
     }
 }
 
+/// 唯一的下载任务：顺序消费队列，队列排空即退出（空闲不占 async 任务）。
+///
+/// 一次只跑一个下载；队列里的任务在轮到自己时先看取消标志（排队期间被取消的
+/// 就不再发起），随后写盘并回填结果。取消在途任务会立刻中断当前写盘，
+/// 队列里的下一个紧接着开始。
+async fn loop_downloads(mut rx: UnboundedReceiver<DownloadMessage>, mut api: ApiState) {
+    loop {
+        // 队列空（或发送端已关）就释放这个任务；下次 enqueue 会另起一个。
+        let message = match rx.try_recv() {
+            Ok(message) => message,
+            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
+        };
+
+        let DownloadMessage { request, shared } = message;
+        if shared.cancelled.load(Ordering::SeqCst) {
+            *shared.outcome.lock() = Some(Err(TaskError::Cancelled));
+            continue;
+        }
+
+        shared.started.store(true, Ordering::SeqCst);
+        let result = download_task(&mut api, request, &shared).await;
+        *shared.outcome.lock() = Some(result);
+    }
+}
+
 /// 任务主体：取链 → 边下边写 `.part` → 改名 → 标签/封面 → 专辑封面。
 async fn download_task(
-    mut api: ApiState,
+    api: &mut ApiState,
     request: DownloadRequest,
-    shared: Arc<JobShared>,
+    shared: &JobShared,
 ) -> Result<DownloadOutcome, TaskError> {
     let cancelled = || shared.cancelled.load(Ordering::SeqCst);
 
@@ -431,7 +532,7 @@ async fn download_task(
     let final_path = request.target.file_path(ext);
     let part_path = request.target.part_path(ext);
 
-    match stream_to_file(&api, &source.url, &part_path, &shared).await {
+    match stream_to_file(api, &source.url, &part_path, shared).await {
         Ok(()) => {}
         Err(TaskError::Cancelled) => {
             let _ = std::fs::remove_file(&part_path);
@@ -463,7 +564,7 @@ async fn download_task(
         }
     }
 
-    let tag_error = write_metadata(&api, &request, &final_path, cancelled())
+    let tag_error = write_metadata(api, &request, &final_path, cancelled())
         .await
         .err()
         .map(|err| err.to_string());
@@ -473,7 +574,7 @@ async fn download_task(
     }
 
     if let Some(url) = request.album_cover_url.as_deref() {
-        if let Err(err) = write_album_cover(&api, url, &request.target.dir).await {
+        if let Err(err) = write_album_cover(api, url, &request.target.dir).await {
             // 专辑封面失败只影响这一张图，不影响刚下好的音频。
             log::warn!("album cover download failed: {err}");
         }
@@ -492,7 +593,7 @@ async fn stream_to_file(
     api: &ApiState,
     url: &str,
     part_path: &Path,
-    shared: &Arc<JobShared>,
+    shared: &JobShared,
 ) -> Result<(), TaskError> {
     let mut request = match api.http_client().get(url) {
         Ok(request) => request,
