@@ -419,6 +419,10 @@ impl VectorState {
         let radius = (HOMING_START_RADIUS as f32
             + self.gather_elapsed.as_secs_f32() * HOMING_EXPAND_DPS) as i32;
         let (w, h) = (self.w_cells, self.h_cells);
+        // 本帧有没有可见轨迹（低电平时 rasterize 提前返回，trace_grid 为空）：
+        // 没有时直接不做锚定搜索——空网格上把半径逐环搜到上限是 O(R³)，
+        // 足以把单线程运行时的界面冻结数十秒，粒子等超时释放即可。
+        let has_trace = self.last_drawn;
 
         let VectorState {
             particles,
@@ -436,14 +440,19 @@ impl VectorState {
                 i += 1;
                 continue;
             }
-            if let Some((tx, ty)) = nearest_lit_dot(
-                trace_grid,
-                w,
-                h,
-                p.x.round() as i32,
-                p.y.round() as i32,
-                radius,
-            ) {
+            let anchor = if has_trace {
+                nearest_lit_dot(
+                    trace_grid,
+                    w,
+                    h,
+                    p.x.round() as i32,
+                    p.y.round() as i32,
+                    radius,
+                )
+            } else {
+                None
+            };
+            if let Some((tx, ty)) = anchor {
                 let (dx, dy) = (tx - p.x, ty - p.y);
                 let d = dx.hypot(dy);
                 if d <= ABSORB_DIST {
@@ -905,6 +914,10 @@ fn draw_segment(grid: &mut [u8], w_cells: usize, h_cells: usize, from: (f32, f32
 }
 
 /// 就近锚定：从 (x0, y0) 由内向外逐环找最近的轨迹点（Chebyshev 环序）。
+///
+/// 每环只探测周界（约 8r 个点）。曾经对每环遍历完整 (2r+1)² 方阵再跳过
+/// 非环点：锚点很远或不存在时半径会一路扩到数百，O(R³) 的总代价足以
+/// 把单线程运行时的界面冻结数十秒。
 fn nearest_lit_dot(
     grid: &[u8],
     w_cells: usize,
@@ -913,21 +926,37 @@ fn nearest_lit_dot(
     y0: i32,
     max_radius: i32,
 ) -> Option<(f32, f32)> {
-    for r in 0..=max_radius {
-        for dy in -r..=r {
-            for dx in -r..=r {
-                if dx.abs() != r && dy.abs() != r {
-                    continue; // 只走第 r 环
-                }
-                let (x, y) = (x0 + dx, y0 + dy);
-                if x < 0 || y < 0 || x >= w_cells as i32 * 2 || y >= h_cells as i32 * 4 {
-                    continue;
-                }
-                let (ux, uy) = (x as usize, y as usize);
-                let bits = grid[(uy / 4) * w_cells + ux / 2];
-                if bits & braille_bit(ux % 2, uy % 4) != 0 {
-                    return Some((x as f32, y as f32));
-                }
+    fn lit_at(grid: &[u8], w_cells: usize, h_cells: usize, x: i32, y: i32) -> Option<(f32, f32)> {
+        if x < 0 || y < 0 || x >= w_cells as i32 * 2 || y >= h_cells as i32 * 4 {
+            return None;
+        }
+        let (ux, uy) = (x as usize, y as usize);
+        let bits = grid[(uy / 4) * w_cells + ux / 2];
+        (bits & braille_bit(ux % 2, uy % 4) != 0).then_some((x as f32, y as f32))
+    }
+
+    if let Some(hit) = lit_at(grid, w_cells, h_cells, x0, y0) {
+        return Some(hit);
+    }
+    for r in 1..=max_radius {
+        // 上、下边（含四角）。
+        for dx in -r..=r {
+            if let Some(hit) = lit_at(grid, w_cells, h_cells, x0 + dx, y0 - r) {
+                return Some(hit);
+            }
+        }
+        for dx in -r..=r {
+            if let Some(hit) = lit_at(grid, w_cells, h_cells, x0 + dx, y0 + r) {
+                return Some(hit);
+            }
+        }
+        // 左、右边（不含四角）。
+        for dy in (-r + 1)..=(r - 1) {
+            if let Some(hit) = lit_at(grid, w_cells, h_cells, x0 - r, y0 + dy) {
+                return Some(hit);
+            }
+            if let Some(hit) = lit_at(grid, w_cells, h_cells, x0 + r, y0 + dy) {
+                return Some(hit);
             }
         }
     }
@@ -1323,6 +1352,89 @@ mod tests {
         assert!(found_different, "同一盲文格的两个像素应有不同亮灭曲线");
     }
 
+    /// 回归：粒子 alpha 必须落在它自己的盲文位槽上。曾经用线性序
+    /// `dy*2+dx` 写槽，(1,0)/(0,1)/(0,2)/(1,1) 四个子像素写错位置，
+    /// paint_with_alpha 读到 0 就把盲文位清掉——约半数尘埃点不显示。
+    #[test]
+    fn particle_alpha_lands_on_its_braille_dot_slot() {
+        let mut st = VectorState {
+            phase: Phase::Floating,
+            w_cells: 1,
+            h_cells: 1,
+            ..Default::default()
+        };
+        st.particles = vec![Particle {
+            x: 1.0,
+            y: 0.0,
+            twinkle: Twinkle::Solid,
+            ..new_scatter_particle((1, 0), 1, 2.0, 4.0)
+        }];
+
+        let mut checked = 0;
+        for f in 0..=800 {
+            let t = f as f32 * 0.05;
+            st.float_elapsed = Duration::from_secs_f32(t);
+            st.rasterize();
+            let expect = sparkle_brightness(star_hash(1, 0), t);
+            if expect > 0.05 {
+                checked += 1;
+                assert!(
+                    (st.pixel_alpha[3] - expect).abs() < 1e-5,
+                    "t={t}：槽 3（0x08 位）应等于公式值 {expect}，实得 {}",
+                    st.pixel_alpha[3]
+                );
+            }
+            assert_eq!(st.pixel_alpha[1], 0.0, "t={t}：槽 1（0x02 位）不应被占用");
+            assert_ne!(st.grid[0] & braille_bit(1, 0), 0);
+        }
+        assert!(checked > 0, "40 s 内应观测到可见相位");
+    }
+
+    /// 回归：就近锚定按 Chebyshev 环序找**最近**的点（周界扫描重写后
+    /// 语义不变），且越界点被忽略。
+    #[test]
+    fn nearest_lit_dot_walks_ring_perimeter_in_order() {
+        let (w, h) = (10, 6); // 20×24 点阵
+        let mut grid = vec![0u8; w * h];
+        // 两个亮点：(4,4)（与查询点同格）与 (9,9)（第 5 环）。
+        set_pixel(&mut grid, w, h, 4, 4);
+        set_pixel(&mut grid, w, h, 9, 9);
+        assert_eq!(nearest_lit_dot(&grid, w, h, 4, 4, 16), Some((4.0, 4.0)));
+        assert_eq!(nearest_lit_dot(&grid, w, h, 8, 8, 16), Some((9.0, 9.0)));
+        // 半径收不进任何点时返回 None；越界方向不 panic。
+        assert_eq!(nearest_lit_dot(&grid, w, h, 19, 23, 4), None);
+        assert_eq!(nearest_lit_dot(&grid, w, h, 0, 0, 1), None);
+    }
+
+    /// 回归：恢复期没有可见轨迹（恢复进静音段）时不做锚定搜索，
+    /// 粒子在聚集超时后释放，不冻结界面。
+    #[test]
+    fn recovering_without_trace_releases_particles_on_timeout() {
+        let mut st = VectorState {
+            phase: Phase::Recovering,
+            w_cells: 40,
+            h_cells: 20,
+            ..Default::default()
+        };
+        st.particles = vec![Particle {
+            x: 5.0,
+            y: 5.0,
+            twinkle: Twinkle::Solid,
+            ..new_scatter_particle((2, 2), 1, 80.0, 80.0)
+        }];
+        st.last_drawn = false;
+        st.gather_elapsed = Duration::ZERO;
+
+        // 动画时钟每 tick 最多推进 100 ms：7 次推进 700 ms 仍滞留。
+        for _ in 0..7 {
+            st.tick(true, true, Duration::from_secs(1));
+        }
+        assert_eq!(st.particles.len(), 1, "超时前粒子应滞留");
+        // 第 8 次到达 800 ms 超时：无处可归，释放并回到 Active。
+        st.tick(true, true, Duration::from_secs(1));
+        assert!(st.particles.is_empty(), "超时后粒子应释放");
+        assert_eq!(st.phase, Phase::Active);
+    }
     #[test]
     fn active_trace_populates_pixel_alpha_for_rendering() {
         let st = circle_state(0.8);
