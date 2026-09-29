@@ -840,7 +840,11 @@ impl VectorState {
             set_pixel(grid, w, h, x, y);
             if x >= 0 && y >= 0 && x < w_px && y < h_px {
                 let cell_idx = (y as usize / 4) * w + x as usize / 2;
-                let dot_idx = (y as usize % 4) * 2 + x as usize % 2;
+                // alpha 的槽位必须与盲文位号一致（paint_with_alpha 按
+                // `braille_bit` 的位序读）：曾用线性序 dy*2+dx，8 个子像素
+                // 里有 4 个写错槽，读到 0 的盲文位会被当成熄灭直接清掉。
+                let dot = braille_bit(x as usize % 2, y as usize % 4);
+                let dot_idx = dot.trailing_zeros() as usize;
                 let pixel_idx = cell_idx * 8 + dot_idx;
                 pixel_alpha[pixel_idx] = pixel_alpha[pixel_idx].max(a);
                 cell_alpha[cell_idx] = cell_alpha[cell_idx].max(a);
@@ -1307,7 +1311,8 @@ mod tests {
             st.float_elapsed = Duration::from_secs_f32(time);
             st.rasterize();
             let left = st.pixel_alpha[0];
-            let right = st.pixel_alpha[1];
+            // (x=1,y=0) 的盲文位是 0x08 → 槽 3；槽 1 属于 (x=1,y=1)。
+            let right = st.pixel_alpha[3];
             if (left - right).abs() > 1.0e-4 {
                 found_different = true;
                 assert_ne!(st.grid[0] & braille_bit(0, 0), 0);
