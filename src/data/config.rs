@@ -134,6 +134,16 @@ pub struct Config {
     #[serde(default = "default_audio_quality")]
     pub audio_quality: AudioQuality,
 
+    /// 下载音频的档位：可选值与「播放设置 / 音质」同一套（按会员放开），
+    /// 默认写死为与播放默认档一致的 `exhigh`。
+    #[serde(default = "default_download_audio_quality")]
+    pub download_audio_quality: AudioQuality,
+
+    /// 下载目录（绝对路径，含末尾的 `cnmplayer/`）。`None` = 未自定义，
+    /// 用系统音乐目录下的 `cnmplayer/`；系统没有音乐目录时回退 `~/Music/`。
+    #[serde(default)]
+    pub download_path: Option<String>,
+
     #[serde(default)]
     pub playback_memory: bool,
 
@@ -208,6 +218,14 @@ pub struct Config {
 
     #[serde(default = "default_keybind_small_window_toggle")]
     pub keybind_small_window_toggle: String,
+
+    /// 主应用：下载当前聚焦的单曲（再按一次取消在途下载）。
+    #[serde(default = "default_keybind_download")]
+    pub keybind_download: String,
+
+    /// 全屏页：下载当前播放的单曲（再按一次取消在途下载）。
+    #[serde(default = "default_keybind_download_fullscreen")]
+    pub keybind_download_fullscreen: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +278,8 @@ pub enum VisualizeMode {
     Hidden,
     Bars,
     Oscilloscope,
+    /// 左右声道作 X/Y 的李萨如图（矢量模式）。与示波器同样读 PCM 抽头，不需要 cava。
+    Vector,
 }
 
 impl VisualizeMode {
@@ -278,11 +298,12 @@ impl VisualizeMode {
     /// 数组按「显示内容由少到多」排列；`unwrap_or(1)` 兜到 `Lyrics`，
     /// 免得理论上找不到自身时把右侧区整个收掉。
     pub fn cycle(self, delta: i32) -> Self {
-        const MODES: [VisualizeMode; 4] = [
+        const MODES: [VisualizeMode; 5] = [
             VisualizeMode::Hidden,
             VisualizeMode::Lyrics,
             VisualizeMode::Bars,
             VisualizeMode::Oscilloscope,
+            VisualizeMode::Vector,
         ];
 
         let len = MODES.len() as i32;
@@ -462,6 +483,11 @@ fn default_audio_quality() -> AudioQuality {
     AudioQuality::Exhigh
 }
 
+/// 下载音质的默认档与播放默认档同源：两处只留一个真值来源。
+pub fn default_download_audio_quality() -> AudioQuality {
+    default_audio_quality()
+}
+
 fn default_show_hints() -> bool {
     true
 }
@@ -567,6 +593,14 @@ fn default_keybind_small_window_toggle() -> String {
     "Alt+X".to_string()
 }
 
+fn default_keybind_download() -> String {
+    "Ctrl+Alt+D".to_string()
+}
+
+fn default_keybind_download_fullscreen() -> String {
+    "Ctrl+D".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -598,6 +632,8 @@ impl Default for Config {
             page_lyrics_pos_x: default_page_lyrics_pos_x(),
             page_lyrics_pos_y: default_page_lyrics_pos_y(),
             audio_quality: default_audio_quality(),
+            download_audio_quality: default_download_audio_quality(),
+            download_path: None,
             playback_memory: false,
             show_hints: default_show_hints(),
             small_window_display: default_small_window_display(),
@@ -623,6 +659,8 @@ impl Default for Config {
             keybind_toggle_like_fullscreen: default_keybind_toggle_like_fullscreen(),
             keybind_toggle_like_collapsed: default_keybind_toggle_like_collapsed(),
             keybind_small_window_toggle: default_keybind_small_window_toggle(),
+            keybind_download: default_keybind_download(),
+            keybind_download_fullscreen: default_keybind_download_fullscreen(),
         }
     }
 }
@@ -706,6 +744,10 @@ impl Config {
             || !raw.contains("keybind_toggle_like_collapsed")
             || !raw.contains("small_window_display")
             || !raw.contains("keybind_small_window_toggle")
+            || !raw.contains("download_audio_quality")
+            || !raw.contains("download_path")
+            || !raw.contains("keybind_download")
+            || !raw.contains("keybind_download_fullscreen")
             || legacy_startup_folder_key_present
             || migrated_legacy_sidebar
         {
@@ -789,6 +831,7 @@ mod tests {
             ("hidden", VisualizeMode::Hidden),
             ("bars", VisualizeMode::Bars),
             ("oscilloscope", VisualizeMode::Oscilloscope),
+            ("vector", VisualizeMode::Vector),
         ];
 
         for (raw, expected) in cases {

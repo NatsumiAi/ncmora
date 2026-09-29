@@ -30,7 +30,10 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 - **主程序界面**：登录、首页推荐、歌单 / 作者 / 搜索页、可滑出的侧边栏，以及底部 5 行的折叠播放栏；
 - **内置全屏播放页**（TMPlayer）：封面、歌词、歌单浮层和 10 段均衡器。按全屏快捷键（默认 `Ctrl+F`）交给它，页内再按 `Ctrl+F` 或 `Esc` 返回主程序。
 
-播放本身由主程序负责：带本地缓存的流式播放、播放记忆、私人漫游、按 VIP 权限裁剪的音质，以及由其它界面绘制的可视化（cava 频谱、真 PCM 示波器、LUFS 音量条）。
+播放本身由主程序负责：带本地缓存的流式播放、播放记忆、私人漫游、按 VIP 权限裁剪的音质，以及由其它界面绘制的可视化（cava 频谱、真 PCM 示波器、李萨如矢量模式、LUFS 音量条）。
+
+> 使用前请先读 [免责声明](#免责声明)：本项目是非官方客户端，音乐内容版权归原权利人所有，
+> 播放缓存与下载仅供个人离线使用，**禁止二次传播**。
 
 ## 主要功能
 
@@ -79,12 +82,22 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 - 循环模式：顺序 → 随机 → 列表循环 → 单曲循环
 - Linux 媒体控制（MPRIS，播放器名 `cnmplayer`），包含元数据与封面
 
+### 下载
+
+- 下载到系统音乐目录下的 `cnmplayer/`（`download_path` 可改；系统没有音乐目录时回退 `~/Music/cnmplayer/`）
+- 主应用里：歌单页 / 专辑页 / 搜索页的单曲行在时长左侧有下载按钮，单击即下载；`Ctrl+Alt+D` 下载当前聚焦的单曲
+- 全屏页里：标题行爱心左侧的下载按钮，或 `Ctrl+D`，下载当前播放的歌曲
+- 图标三态：未下载（`ec74`）、下载中（盲文转轮帧 `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`）、已下载（`f00c`）；下载中再点一次即取消，半成品文件会被删掉
+- 下载任务全局只有一个：多次触发会排队，先来后到依次下载
+- 文件名 `标题 - 作者 - 专辑.<mp3|flac>`，并写入标签：标题、作者、专辑、曲目号、日期、内嵌封面与歌词（无损写 Vorbis Comment，mp3 写 ID3v2）
+- 设置弹窗的「下载设置」可调下载音质（可选值与播放音质一致，按 VIP 权限放开）与下载路径：绝对路径生效；留空或填字面量 `Null` 即禁用下载（界面上不再显示下载入口；「音质」灰置，路径行与「恢复默认」仍可用），再填回绝对路径即恢复
+
 ### 可视化
 
 - `hidden`（设置弹窗里显示「关闭」）——全屏页右侧整块收起：可视化与歌词都不画，歌曲信息区撑满整个终端宽度（边框铺满整宽，内容宽度上限为窗口的 1/3 并居中）
 - `lyrics`（显示「仅歌词」）——右侧只显示歌词，不画可视化；旧配置里的 `off` 仍按这一档读取
 - `bars`——cava 频谱条，需要外部 `cava` 可执行文件
-- `oscilloscope`——从播放链路抽头得到的真 PCM 波形：上升沿触发、逐子列 min/max 峰值抽取、绝对幅度映射，安静段贴中线、高潮段撑满。**不需要** cava
+- `vector`——屏幕正交轴矢量示波器：横向 x 轴 = 左声道 L（向右为正）、纵向 y 轴 = 右声道 R（**向上恒为正**），用与示波器相同的盲文点阵逐点绘制，以面板中心为原点、不画坐标轴。缩放基准取本曲开播以来的最响段落（单调只增），峰值恰好撑满面板，仅切歌重新开始；单声道退化为右上 45° 对角线。暂停或突断静音时图形炸开：每个盲文点**恒亮**飞向可视化区域内的一个随机落点（急剧减速、先后停稳；粒子数上限 1200，超出的点一次性淡出后退役），停稳后尘埃按 **Astra Sparkle 星点闪烁**——codex CLI 输入框星空的同款确定性公式：每颗粒子以落点坐标哈希得到 4~7 s 的闪烁周期与相位偏移，亮度呈 sin¹² 尖峰脉冲、连续趋暗而不整点熄灭；位置与数量不变，直到恢复播放。恢复播放（或声音回来）时以清晰可见的汇聚流回归：先有点火错峰，再指数逼近当前图形（约 0.5 s，锚定搜索随时间扩张保证全部粒子回归，超出的落上即吸收）。渐弱不爆炸：图形随电平缩小直至消失。**不需要** cava
 - 没有 cava 时默认改为 `oscilloscope`，切换设置时会跳过 `bars`，而不是让整项无法调整
 - 折叠播放栏绘制 10 格盲文迷你频谱，数据来自 cava；`lyrics` 与 `hidden` 两档不启动 cava，那里因此是空白。窄窗则用 400 ms Momentary LUFS 计量驱动双声道音量条（显示范围 −60…0 LUFS）
 
@@ -202,7 +215,7 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 | --- | --- | --- |
 | `theme` | `frappe` | `system`、`latte`、`frappe`、`macchiato`、`mocha` |
 | `language` | `zh` | `zh`、`en` |
-| `visualize` | 有 cava 时为 `bars`，否则 `oscilloscope` | `hidden`（设置里显示「关闭」）、`lyrics`（「仅歌词」，旧的 `off` 同义）、`bars`、`oscilloscope`；只有 `bars` 依赖 cava |
+| `visualize` | 有 cava 时为 `bars`，否则 `oscilloscope` | `hidden`（设置里显示「关闭」）、`lyrics`（「仅歌词」，旧的 `off` 同义）、`bars`、`oscilloscope`、`vector`；只有 `bars` 依赖 cava |
 | `graphics_protocol` | `halfblocks` | `off`、`halfblocks`；`off` 时封面用 ASCII 字符绘制 |
 | `transparent_background` | `true` | 使用终端背景 |
 | `album_border` | `true` | 全屏封面边框 |
@@ -215,7 +228,9 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 | `small_window_display` | `true` | 终端过小时启用紧凑布局 |
 | `home_more_recommend` | `false` | 首页在三块固定磁贴之外展开更多推荐 |
 | `default_opening_title` | `""` | 替换登录页与加载页的 ASCII 标题，支持 `\n` |
-| `audio_quality` | `exhigh` | `standard`、`higher`、`exhigh`、`lossless`、`hires`、`jyeffect`、`sky`、`dolby`、`jymaster`；非 VIP 会限制到 `exhigh` |
+| `audio_quality` | `exhigh` | `standard`、`higher`、`exhigh`、`lossless`、`hires`、`jyeffect`、`sky`、`dolby`、`jymaster`；非 VIP 账号会被限制到 `exhigh` |
+| `download_audio_quality` | `exhigh` | 下载音质：与 `audio_quality` 同一套可选值，同样按 VIP 权限放开 |
+| `download_path` | 未设置 | 下载目录（绝对路径，默认 `<系统音乐目录>/cnmplayer/`，没有音乐目录时回退 `~/Music/cnmplayer/`）；留空或填字面量 `Null` 表示显式禁用下载 |
 | `playback_memory` | `false` | 持久化并恢复队列、索引与循环模式 |
 | `eq_bands_db` | 10 个 `0.0` | 均衡器各段增益（dB），在全屏 EQ 弹窗中调整 |
 | `bar_number` | `auto` | `auto`、`16`、`32`、`48`、`64`、`80`、`96`（全屏频谱） |
@@ -235,7 +250,7 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 | `cache.max_size_mb` | `500` | LRU 阶段的容量上限 |
 | `cache.max_age_days` | `7` | 按时间清理阶段的有效期 |
 | `cache.clean_on_startup` | `true` | 启动时执行清理 |
-| `keybind_*` | 见下文 | 20 个可重绑快捷键 |
+| `keybind_*` | 见下文 | 22 个可重绑快捷键 |
 
 清理按「先按时间、再按容量 LRU」两遍执行，且只统计目录下直属的文件。
 
@@ -268,6 +283,8 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 | `keybind_toggle_like_fullscreen` | `L` | 收藏 / 取消收藏（仅全屏页） |
 | `keybind_toggle_like_collapsed` | `Alt+L` | 折叠播放栏的收藏 / 取消收藏 |
 | `keybind_small_window_toggle` | `Alt+X` | 在扁窗的两个面板之间切换 |
+| `keybind_download` | `Ctrl+Alt+D` | 下载当前聚焦的单曲（再按一次取消） |
+| `keybind_download_fullscreen` | `Ctrl+D` | 下载当前播放的歌曲（仅全屏页，再按一次取消） |
 
 仅全屏页生效的槽位在主程序里是空操作：那些按键会继续按页面导航处理。
 
@@ -333,7 +350,7 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 - 播放：rodio + symphonia（mp3 / flac），后端为 PipeWire
 - 元数据与封面：image + qrcode
 - 图像渲染：ratatui-image + chafa
-- 可视化：外部 `cava`，以及内部 PCM 抽头驱动的示波器与 LUFS 计量
+- 可视化：外部 `cava`，以及内部 PCM 抽头驱动的示波器、李萨如矢量模式与 LUFS 计量
 - Linux 媒体控制：mpris-server
 - 全屏播放整合：TMPlayer
 
@@ -353,6 +370,23 @@ CI（`ci.yml`）在面向 `main` / `develop` 的 PR 以及推送到 `develop` �
 
 - [TMPlayer](https://github.com/professor-lee/TMPlayer)：内置到 CNMPlayer 的全屏播放页实现
 - [ncm-api-rs](https://github.com/imsyy/ncm-api-rs)：vendored 在 `ncm-api-rs/` 目录中的网易云音乐 API 客户端
+
+## 免责声明
+
+> 简版：本项目是非官方客户端，音乐内容的版权属于原权利人；软件只提供本机播放与个人离线下载，
+> **禁止任何形式的二次传播**。
+
+- **非官方项目**：CNMPlayer 是第三方开源客户端，与网易云音乐及其关联公司不存在任何隶属、授权或认可关系。
+  项目通过 `ncm-api-rs`（vendored 在本仓库中的社区非官方 API 客户端）访问服务，不保证接口的可用性与稳定性。
+- **音乐版权归权利人所有**：通过本软件访问、播放、缓存或下载的音乐、封面、歌词与元数据，其著作权与邻接权
+  属于原权利人（唱片公司、词曲作者、表演者等）。本仓库不包含任何音乐内容，也不托管、不代理、不对外分发音频文件。
+- **仅供个人使用**：播放缓存与下载功能面向使用者本人的个人学习、研究与离线试听；下载得到的文件保存在使用者本机。
+- **禁止二次传播**：使用者不得将通过本软件获取的任何音乐内容（含下载文件及其中内嵌的封面与歌词）用于
+  商业用途、公开播放、二次分发或再上传——例如上传到网盘、视频平台、其它音乐服务，或打包分享给他人。
+  此类行为可能侵犯权利人权益，风险与后果由使用者自行承担。
+- **账号风险自负**：使用第三方客户端可能违反平台服务条款（如账号被限流、封禁），请自行评估并承担相应风险。
+- **免责**：本项目按「现状」提供（免责条款见 [LICENSE](LICENSE)），不对使用后果承担任何责任。
+  若权利人认为本项目或其文档侵权，请通过 issue 联系，我们会及时删除或修改相关内容。
 
 ## 许可证
 
