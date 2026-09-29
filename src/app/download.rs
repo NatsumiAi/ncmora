@@ -30,6 +30,12 @@ pub const AUDIO_EXTENSIONS: [&str; 2] = ["mp3", "flac"];
 /// 取消标志的轮询间隔（读取流时的超时切片）。
 const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+/// 取链 / 响应头 / 元数据阶段的网络总闸：CDN 或接口建立连接后不再回包
+/// 时（实测发生过），裸 await 会让任务永不落地、单任务队列永久堵死。
+/// 超时即终止该任务（半成品已清理），队列继续下一个；读流阶段仍用
+/// [`CANCEL_POLL_INTERVAL`] 切片（慢速但活着的下载不该被误杀）。
+const NET_PHASE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// 未下载（Nerd Font `ec74`）。
 pub const ICON_DOWNLOAD: char = '\u{ec74}';
 /// 已下载（Nerd Font `f00c`）。
@@ -659,12 +665,20 @@ async fn download_task(
 ) -> Result<DownloadOutcome, TaskError> {
     let cancelled = || shared.cancelled.load(Ordering::SeqCst);
 
-    let source = match api
-        .audio_download_url(&request.song_id, request.level.as_api_level())
-        .await
+    let source = match compio::time::timeout(
+        NET_PHASE_TIMEOUT,
+        api.audio_download_url(&request.song_id, request.level.as_api_level()),
+    )
+    .await
     {
-        Ok(source) => source,
-        Err(err) => return Err(TaskError::Failed(err.to_string())),
+        Ok(Ok(source)) => source,
+        Ok(Err(err)) => return Err(TaskError::Failed(err.to_string())),
+        Err(_) => {
+            return Err(TaskError::Failed(format!(
+                "取链超时（{}s 无响应，任务终止）",
+                NET_PHASE_TIMEOUT.as_secs()
+            )));
+        }
     };
 
     if cancelled() {
@@ -711,10 +725,15 @@ async fn download_task(
         }
     }
 
-    let tag_error = write_metadata(api, &request, &final_path, cancelled())
-        .await
-        .err()
-        .map(|err| err.to_string());
+    let tag_error = match compio::time::timeout(
+        NET_PHASE_TIMEOUT,
+        write_metadata(api, &request, &final_path, cancelled()),
+    )
+    .await
+    {
+        Ok(result) => result.err().map(|err| err.to_string()),
+        Err(_) => Some("元数据获取超时（音频文件已保留）".to_string()),
+    };
 
     if cancelled() {
         return Err(TaskError::Cancelled);
@@ -746,9 +765,14 @@ async fn stream_to_file(
         };
     }
 
-    let response = match request.send().await {
-        Ok(response) => response,
-        Err(err) => return Err(TaskError::Failed(err.to_string())),
+    let response = match compio::time::timeout(NET_PHASE_TIMEOUT, request.send()).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(err)) => return Err(TaskError::Failed(err.to_string())),
+        Err(_) => {
+            return Err(TaskError::Failed(
+                "等待下载响应超时（任务终止）".to_string(),
+            ));
+        }
     };
     let response = match crate::app::api::error_for_status(response) {
         Ok(response) => response,
