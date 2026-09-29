@@ -1340,7 +1340,7 @@ mod tests {
             st.float_elapsed = Duration::from_secs_f32(time);
             st.rasterize();
             let left = st.pixel_alpha[0];
-            // (x=1,y=0) 的盲文位是 0x08 → 槽 3；槽 1 属于 (x=1,y=1)。
+            // (x=1,y=0) 的盲文位是 0x08 → 槽 3；槽 1（0x02 位）属于 (x=0,y=1)。
             let right = st.pixel_alpha[3];
             if (left - right).abs() > 1.0e-4 {
                 found_different = true;
