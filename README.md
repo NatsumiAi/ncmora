@@ -90,7 +90,7 @@ Artists and playlists are capped at the 5 most relevant hits and never paginate;
 - Three icon states: not downloaded (`ec74`), downloading (spinning `f1ce`), downloaded (`f00c`); pressing/clicking again cancels and removes the partial file
 - Exactly one download task exists: extra requests queue up and run in order
 - File name is `Title - Artist - Album.<mp3|flac>`, with tags written in: title, artists, album, track number, date, embedded cover and lyrics (Vorbis Comment for lossless, ID3v2 for mp3)
-- The "Download Settings" page holds the download quality (same option set as playback quality, VIP-aware) and the download path: an absolute path enables downloads, the literal `Null` disables them (no download button is drawn and the quality row greys out, while the path row and "Restore Defaults" stay usable); typing an absolute path back re-enables
+- The "Download Settings" page holds the download quality (same option set as playback quality, VIP-aware) and the download path: an absolute path enables downloads; leaving it empty or typing the literal `Null` disables them (no download button is drawn and the quality row greys out, while the path row and "Restore Defaults" stay usable); typing an absolute path back re-enables
 
 ### Visualization
 
@@ -230,7 +230,7 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 | `default_opening_title` | `""` | Replaces the ASCII banner on the login and loading pages; supports `\n` |
 | `audio_quality` | `exhigh` | `standard`, `higher`, `exhigh`, `lossless`, `hires`, `jyeffect`, `sky`, `dolby`, `jymaster`; clamped to `exhigh` without VIP |
 | `download_audio_quality` | `exhigh` | Download quality: same option set as `audio_quality`, VIP-aware as well |
-| `download_path` | unset | Download directory (absolute; defaults to `<music dir>/cnmplayer/`, falling back to `~/Music/cnmplayer/`); the literal `Null` disables downloads |
+| `download_path` | unset | Download directory (absolute; defaults to `<music dir>/cnmplayer/`, falling back to `~/Music/cnmplayer/`); an empty value or the literal `Null` disables downloads |
 | `playback_memory` | `false` | Persist and restore the queue, index and repeat mode |
 | `eq_bands_db` | 10 × `0.0` | EQ gains in dB, edited from the fullscreen EQ modal |
 | `bar_number` | `auto` | `auto`, `16`, `32`, `48`, `64`, `80`, `96` (fullscreen spectrum) |

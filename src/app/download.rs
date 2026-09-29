@@ -64,8 +64,6 @@ pub fn state_glyph(state: DownloadState, phase: Duration) -> char {
 /// 下载目录不可用的原因（文案由两端各自的 `lang_text` 生成）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DownloadPathError {
-    /// 空串。
-    Empty,
     /// 不是绝对路径。
     NotAbsolute,
     /// 建不出来或不可写。
@@ -105,15 +103,13 @@ pub fn is_null_download_path(raw: &str) -> bool {
     raw.trim().eq_ignore_ascii_case(DOWNLOAD_PATH_NULL)
 }
 
-/// 解析并校验用户填写的下载目录：`Null` = 显式禁用；其余必须非空、
-/// 是绝对路径、能建出来且可写。
+/// 解析并校验用户填写的下载目录。
+///
+/// 留空或填 `Null`（忽略大小写与首尾空白）都表示**显式禁用下载**；
+/// 其余必须是非空的绝对路径、能建出来且可写。
 pub fn parse_download_path(raw: &str) -> Result<DownloadPathChoice, DownloadPathError> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(DownloadPathError::Empty);
-    }
-
-    if is_null_download_path(trimmed) {
+    if trimmed.is_empty() || is_null_download_path(trimmed) {
         return Ok(DownloadPathChoice::Disabled);
     }
 
@@ -1170,11 +1166,24 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_relative_and_empty() {
-        assert_eq!(parse_download_path("  "), Err(DownloadPathError::Empty));
+    fn parse_rejects_relative_paths() {
         assert_eq!(
             parse_download_path("relative/dir"),
             Err(DownloadPathError::NotAbsolute)
+        );
+        assert_eq!(
+            parse_download_path("  相对/路径  "),
+            Err(DownloadPathError::NotAbsolute)
+        );
+    }
+
+    /// 留空 = 按需求回填成 `Null`（禁用下载），不是"保留旧值"。
+    #[test]
+    fn empty_path_falls_back_to_null() {
+        assert_eq!(parse_download_path(""), Ok(DownloadPathChoice::Disabled));
+        assert_eq!(
+            parse_download_path("   \t "),
+            Ok(DownloadPathChoice::Disabled)
         );
     }
 

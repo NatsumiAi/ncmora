@@ -6591,9 +6591,6 @@ impl App {
             }
             Err(err) => {
                 let reason = match err {
-                    crate::app::download::DownloadPathError::Empty => {
-                        self.lang_text("路径不能为空", "path must not be empty")
-                    }
                     crate::app::download::DownloadPathError::NotAbsolute => {
                         self.lang_text("必须使用绝对路径", "path must be absolute")
                     }

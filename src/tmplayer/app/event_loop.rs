@@ -1658,12 +1658,8 @@ async fn activate_download_reset(
     host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
 ) {
     if !app.download_reset_armed {
+        // 待确认态由行内文字（「确认恢复」+ 警戒色）表达，不再弹提示。
         app.download_reset_armed = true;
-        app.set_toast(crate::tmplayer::ui::tui::lang_text(
-            app,
-            "再按一次确认恢复下载设置",
-            "Press again to restore download settings",
-        ));
         return;
     }
 
@@ -1673,11 +1669,6 @@ async fn activate_download_reset(
     app.config.download_path = None;
     save_and_sync_host_config(app, host_bridge).await;
     app.refresh_download_root();
-    app.set_toast(crate::tmplayer::ui::tui::lang_text(
-        app,
-        "下载设置已恢复默认",
-        "Download settings restored to defaults",
-    ));
 }
 
 /// 进入路径行的行内编辑（独立的 overlay，字符按键因此直接进输入框）。
@@ -1750,51 +1741,14 @@ async fn commit_download_path_edit(
             app.config.download_path = Some(crate::app::download::DOWNLOAD_PATH_NULL.to_string());
             save_and_sync_host_config(app, host_bridge).await;
             app.refresh_download_root();
-            app.set_toast(crate::tmplayer::ui::tui::lang_text(
-                app,
-                "已禁用下载（路径填 Null）",
-                "Downloads disabled (path is Null)",
-            ));
         }
         Ok(crate::app::download::DownloadPathChoice::Dir(path)) => {
             app.config.download_path = Some(path.display().to_string());
             save_and_sync_host_config(app, host_bridge).await;
             app.refresh_download_root();
-            app.set_toast(format!(
-                "{}: {}",
-                crate::tmplayer::ui::tui::lang_text(app, "下载路径已更新", "Download path updated"),
-                path.display()
-            ));
         }
-        Err(err) => {
-            let reason = match err {
-                crate::app::download::DownloadPathError::Empty => {
-                    crate::tmplayer::ui::tui::lang_text(
-                        app,
-                        "路径不能为空",
-                        "path must not be empty",
-                    )
-                }
-                crate::app::download::DownloadPathError::NotAbsolute => {
-                    crate::tmplayer::ui::tui::lang_text(
-                        app,
-                        "必须使用绝对路径",
-                        "path must be absolute",
-                    )
-                }
-                crate::app::download::DownloadPathError::NotWritable => {
-                    crate::tmplayer::ui::tui::lang_text(app, "路径不可写", "path is not writable")
-                }
-            };
-            app.set_toast(format!(
-                "{}（{reason}）",
-                crate::tmplayer::ui::tui::lang_text(
-                    app,
-                    "下载路径无效，保留修改前的值",
-                    "Invalid download path, keeping the previous value"
-                )
-            ));
-        }
+        // 非法输入不弹提示：保留修改前的值，行里显示的就是那个旧值。
+        Err(_) => {}
     }
 }
 

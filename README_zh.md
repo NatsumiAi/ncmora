@@ -90,7 +90,7 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 - 图标三态：未下载（`ec74`）、下载中（`f1ce` 旋转）、已下载（`f00c`）；下载中再点一次即取消，半成品文件会被删掉
 - 下载任务全局只有一个：多次触发会排队，先来后到依次下载
 - 文件名 `标题 - 作者 - 专辑.<mp3|flac>`，并写入标签：标题、作者、专辑、曲目号、日期、内嵌封面与歌词（无损写 Vorbis Comment，mp3 写 ID3v2）
-- 设置弹窗的「下载设置」可调下载音质（可选值与播放音质一致，按 VIP 权限放开）与下载路径：绝对路径生效；填字面量 `Null` 即禁用下载（界面上不再显示下载入口；「音质」灰置，路径行与「恢复默认」仍可用），再填回绝对路径即恢复
+- 设置弹窗的「下载设置」可调下载音质（可选值与播放音质一致，按 VIP 权限放开）与下载路径：绝对路径生效；留空或填字面量 `Null` 即禁用下载（界面上不再显示下载入口；「音质」灰置，路径行与「恢复默认」仍可用），再填回绝对路径即恢复
 
 ### 可视化
 
@@ -230,7 +230,7 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 | `default_opening_title` | `""` | 替换登录页与加载页的 ASCII 标题，支持 `\n` |
 | `audio_quality` | `exhigh` | `standard`、`higher`、`exhigh`、`lossless`、`hires`、`jyeffect`、`sky`、`dolby`、`jymaster`；非 VIP 账号会被限制到 `exhigh` |
 | `download_audio_quality` | `exhigh` | 下载音质：与 `audio_quality` 同一套可选值，同样按 VIP 权限放开 |
-| `download_path` | 未设置 | 下载目录（绝对路径，默认 `<系统音乐目录>/cnmplayer/`，没有音乐目录时回退 `~/Music/cnmplayer/`）；填字面量 `Null` 表示显式禁用下载 |
+| `download_path` | 未设置 | 下载目录（绝对路径，默认 `<系统音乐目录>/cnmplayer/`，没有音乐目录时回退 `~/Music/cnmplayer/`）；留空或填字面量 `Null` 表示显式禁用下载 |
 | `playback_memory` | `false` | 持久化并恢复队列、索引与循环模式 |
 | `eq_bands_db` | 10 个 `0.0` | 均衡器各段增益（dB），在全屏 EQ 弹窗中调整 |
 | `bar_number` | `auto` | `auto`、`16`、`32`、`48`、`64`、`80`、`96`（全屏频谱） |
