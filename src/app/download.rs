@@ -184,11 +184,29 @@ fn sanitize_component(raw: &str, fallback: &str) -> String {
         trimmed.to_string()
     };
 
-    // 单个组件别超过 150 字符，避免 CJK 长标题撞上文件系统的 255 字节上限。
+    // 单个组件的 sanity 上限（真正的字节预算在 download_file_stem 收口）。
     if text.chars().count() > 150 {
         text = text.chars().take(150).collect();
     }
     text
+}
+
+/// 文件名主干的字节预算：常见文件系统的 NAME_MAX 是 255 **字节**，
+/// 减去路径分隔符、最长扩展名 `.flac` 与下载期的 `.part` 后缀后留出余量。
+/// CJK 每字 3 字节，按字符数截断挡不住这个上限（曾导致长标题必然
+/// ENAMETOOLONG、整首下载固定失败）。
+const STEM_BYTE_BUDGET: usize = 240;
+
+/// 按字节预算在字符边界上截断。
+fn truncate_bytes(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    let mut end = budget;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 /// 文件名主干：`标题 - 作者 - 专辑`（缺失的段直接省略，专辑名里已含标题时也保留）。
@@ -200,7 +218,7 @@ pub fn download_file_stem(title: &str, artist: &str, album: &str) -> String {
             parts.push(part);
         }
     }
-    parts.join(" - ")
+    truncate_bytes(&parts.join(" - "), STEM_BYTE_BUDGET)
 }
 
 /// 一次下载的目标位置：下载根目录 + 文件名主干（所有下载都直接落根目录）。
@@ -1054,6 +1072,38 @@ mod tests {
         assert_eq!(
             download_file_stem("Title", "Woodkid   /   Connelly", "Album"),
             "Title - Woodkid - Connelly - Album"
+        );
+    }
+
+    /// 回归：NAME_MAX 是 255 **字节**，CJK 每字 3 字节——按字符数截断
+    /// 挡不住上限（长标题曾必然 ENAMETOOLONG、整首下载固定失败）。
+    #[test]
+    fn stem_respects_the_byte_budget_of_name_max() {
+        let long_cjk: String = "歌".repeat(150);
+        for (title, artist, album) in [
+            (long_cjk.as_str(), "", ""),
+            (long_cjk.as_str(), long_cjk.as_str(), long_cjk.as_str()),
+            ("T", long_cjk.as_str(), long_cjk.as_str()),
+        ] {
+            let stem = download_file_stem(title, artist, album);
+            assert!(
+                stem.len() <= STEM_BYTE_BUDGET,
+                "主干 {len} 字节应 ≤ {STEM_BYTE_BUDGET}",
+                len = stem.len()
+            );
+            let path = format!("{stem}.flac.part");
+            assert!(path.len() < 255, "含 .flac.part 后仍须 <255 字节");
+        }
+
+        // 截断必须落在字符边界上（结果仍是合法 UTF-8，且是原串前缀）。
+        let stem = download_file_stem(&long_cjk, &long_cjk, &long_cjk);
+        let joined = format!("{long_cjk} - {long_cjk} - {long_cjk}");
+        assert!(joined.starts_with(&stem));
+
+        // 常规名字不受影响。
+        assert_eq!(
+            download_file_stem("歌名", "作者", "专辑"),
+            "歌名 - 作者 - 专辑"
         );
     }
 
