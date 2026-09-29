@@ -415,7 +415,7 @@ fn render_search_row(
     let download_style = if focused {
         row_style
     } else {
-        match download_state {
+        let download_style = match download_state {
             Some(crate::app::download::DownloadState::Done) => {
                 Style::default().fg(app.theme.color_accent3())
             }
@@ -423,6 +423,12 @@ fn render_search_row(
                 .fg(app.theme.color_accent2())
                 .add_modifier(Modifier::BOLD),
             _ => Style::default().fg(app.theme.color_subtext()),
+        };
+        // 图标格与所在行同底色：斑马底在行样式上，这里补齐，
+        // 避免图标格露出与行不同的背景。
+        match zebra_bg {
+            Some(bg) => download_style.bg(bg),
+            None => download_style,
         }
     };
 
