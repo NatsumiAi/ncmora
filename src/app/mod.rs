@@ -4965,7 +4965,7 @@ impl App {
 
     /// 歌单页 / 专辑页的行内图标：每帧调一次；列表代与任务版本都不变时几乎零成本。
     pub(crate) fn refresh_playlist_downloads(&mut self) {
-        let epoch = self.playlist.generation() ^ self.download_rows_epoch;
+        let epoch = (self.playlist.generation(), self.download_rows_epoch);
         let root = self.download_root.clone();
         let tracks = &self.playlist.tracks;
         self.playlist_download_cache
@@ -4981,7 +4981,7 @@ impl App {
 
     /// 搜索页的行内图标：每帧调一次。
     pub(crate) fn refresh_search_downloads(&mut self) {
-        let epoch = self.search.generation() ^ self.download_rows_epoch;
+        let epoch = (self.search.generation(), self.download_rows_epoch);
         let root = self.download_root.clone();
         let results = &self.search.results;
         self.search_download_cache

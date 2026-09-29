@@ -341,13 +341,16 @@ impl DownloadRow {
 
 /// 行内图标状态的 memo。
 ///
-/// - `epoch`（列表代 × 下载根目录代）变化 → 重建行数据（做一次 `sanitize`/`join`）；
+/// - `epoch`（列表代，下载根目录代）任一变化 → 重建行数据（做一次
+///   `sanitize`/`join`）：两个计数器都可能落在相邻两次绘制之间，曾经把
+///   两者异或折叠成一个 u64，同增且低位掩码相同时键不变，行数据陈旧
+///   （图标错位、新行无图标），因此改为二元组逐项比较；
 /// - `DownloadManager::version`（任务开始 / 结束 / 取消 / 磁盘缓存作废）变化 → 重算状态。
 ///
-/// 两个都不变时每帧只做一次 u64 比较，行内取值是一次切片索引。
+/// 两个都不变时每帧只做两次 u64 比较，行内取值是一次切片索引。
 #[derive(Default)]
 pub struct DownloadRowCache {
-    epoch: u64,
+    epoch: (u64, u64),
     initialized: bool,
     rows: Vec<Option<DownloadRow>>,
     states: Vec<Option<DownloadState>>,
@@ -357,7 +360,7 @@ pub struct DownloadRowCache {
 impl DownloadRowCache {
     pub fn refresh(
         &mut self,
-        epoch: u64,
+        epoch: (u64, u64),
         manager: &mut DownloadManager,
         build: impl FnOnce() -> Vec<Option<DownloadRow>>,
     ) {
@@ -367,7 +370,7 @@ impl DownloadRowCache {
 
     fn refresh_inner(
         &mut self,
-        epoch: u64,
+        epoch: (u64, u64),
         version: u64,
         build: impl FnOnce() -> Vec<Option<DownloadRow>>,
         mut resolve: impl FnMut(&DownloadRow) -> DownloadState,
@@ -1191,7 +1194,7 @@ mod tests {
 
         fn refresh(
             cache: &mut DownloadRowCache,
-            epoch: u64,
+            epoch: (u64, u64),
             version: u64,
             builds: &Cell<u32>,
             resolves: &Cell<u32>,
@@ -1220,21 +1223,30 @@ mod tests {
         let builds = Cell::new(0);
         let resolves = Cell::new(0);
 
-        refresh(&mut cache, 1, 7, &builds, &resolves);
+        refresh(&mut cache, (1, 0), 7, &builds, &resolves);
         assert_eq!((builds.get(), resolves.get()), (1, 1));
         assert_eq!(cache.state_at(0), Some(DownloadState::NotDownloaded));
 
         // 同代同版本：什么都不做。
-        refresh(&mut cache, 1, 7, &builds, &resolves);
+        refresh(&mut cache, (1, 0), 7, &builds, &resolves);
         assert_eq!((builds.get(), resolves.get()), (1, 1), "不该重建/重算");
 
         // 任务事件（版本 +1）：只重算状态。
-        refresh(&mut cache, 1, 8, &builds, &resolves);
+        refresh(&mut cache, (1, 0), 8, &builds, &resolves);
         assert_eq!((builds.get(), resolves.get()), (1, 2), "只重算状态");
 
         // 换列表（代 +1）：重建行数据并重算状态。
-        refresh(&mut cache, 2, 8, &builds, &resolves);
+        refresh(&mut cache, (2, 0), 8, &builds, &resolves);
         assert_eq!((builds.get(), resolves.get()), (2, 3), "换列表要重建行数据");
+
+        // 回归：两个计数器同时 +1。旧实现把两者异或折叠成一个 u64，
+        // 2^0 == 3^1 == 2，键不变 → 行数据陈旧（图标错位）；二元组必须照常重建。
+        refresh(&mut cache, (3, 1), 8, &builds, &resolves);
+        assert_eq!(
+            (builds.get(), resolves.get()),
+            (3, 4),
+            "列表代与根目录代同增时必须重建行数据"
+        );
 
         assert_eq!(cache.state_at(9), None, "越界行没有图标");
     }
