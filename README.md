@@ -30,7 +30,7 @@ A single process carries two UIs:
 - the **host UI** — login, home recommendations, playlist / artist / search pages, a sliding sidebar and a 5-row collapsed player bar;
 - the **embedded fullscreen playback page** (TMPlayer) — cover, lyrics, playlist overlay and a 10-band EQ. The fullscreen keybind (default `Ctrl+F`) hands playback over to it; inside, `Ctrl+F` or `Esc` returns to the host.
 
-Playback belongs to the host: streaming with a local cache, queue memory, private roam, VIP-aware audio quality, and the visualizers (cava bars, a real-PCM oscilloscope, a LUFS VU meter) that the other UIs draw.
+Playback belongs to the host: streaming with a local cache, queue memory, private roam, VIP-aware audio quality, and the visualizers (cava bars, a real-PCM oscilloscope, a Lissajous vector mode, a LUFS VU meter) that the other UIs draw.
 
 > Read the [Disclaimer](#disclaimer) first: this is an unofficial client, music copyright belongs to the
 > rights holders, and the cache/download features are for personal offline use only — **no redistribution**.
@@ -97,7 +97,7 @@ Artists and playlists are capped at the 5 most relevant hits and never paginate;
 - `hidden` (shown as "Off" in settings) — the whole right-hand side of the fullscreen page is collapsed: neither a visualizer nor the lyrics are drawn, and the song info panel stretches across the full terminal width (its border spans the full width, while the content inside is capped at 1/3 of the window and centred).
 - `lyrics` (shown as "Lyrics") — the right-hand side only shows the lyrics; no visualizer is drawn. The old `off` value still selects this mode.
 - `bars` — cava spectrum bars. Requires the external `cava` binary.
-- `oscilloscope` — a real PCM waveform tapped from the playback chain: rising-edge trigger, min/max peak extraction per sub-column and absolute amplitude mapping, so quiet passages hug the centre line and loud ones fill the panel. It does **not** need cava.
+- `vector` — a Lissajous figure (audio vectorscope): the left channel drives X, the right channel drives Y, drawn dot by dot with the same braille raster as the oscilloscope, centred on the panel origin with no axes. The scale is calibrated once during the first seconds of each track and then locked (only track changes recalibrate); mono sources collapse to the honest 45° diagonal. On pause or a sudden cut to silence the figure bursts outward in a tiny explosion — every braille dot flies radially from the figure's centroid, decelerates hard, settles and then drifts extremely slowly inside the 3×3-dot neighbourhood of its resting spot; resuming playback (or sound returning) snaps the dots back onto the live figure. A gradual fade-out does **not** burst: the figure just shrinks with the level and disappears. It does **not** need cava.
 - If cava is missing, the default becomes `oscilloscope` and cycling the setting skips `bars` instead of failing.
 - The collapsed player bar draws a 10-cell braille mini spectrum from cava; that spot stays blank in `lyrics` and `hidden` because cava is not started there. The narrow small window draws a stereo VU meter driven by a 400 ms momentary LUFS meter (display range −60…0 LUFS).
 
@@ -215,7 +215,7 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 | --- | --- | --- |
 | `theme` | `frappe` | `system`, `latte`, `frappe`, `macchiato`, `mocha` |
 | `language` | `zh` | `zh`, `en` |
-| `visualize` | cava present → `bars`, otherwise `oscilloscope` | `hidden` (shown as "Off" in settings), `lyrics` ("Lyrics"; the old `off` means the same), `bars`, `oscilloscope`; only `bars` needs cava |
+| `visualize` | cava present → `bars`, otherwise `oscilloscope` | `hidden` (shown as "Off" in settings), `lyrics` ("Lyrics"; the old `off` means the same), `bars`, `oscilloscope`, `vector`; only `bars` needs cava |
 | `graphics_protocol` | `halfblocks` | `off`, `halfblocks`; `off` draws covers as ASCII art |
 | `transparent_background` | `true` | Use the terminal background |
 | `album_border` | `true` | Border around the fullscreen cover |
