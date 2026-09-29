@@ -392,6 +392,8 @@ pub struct AppState {
     pub scope: crate::tmplayer::render::oscilloscope_renderer::ScopeScratch,
     /// 波形幅度包络，暂停/停止后驱动波形收回中线。
     pub scope_gain: ScopeGain,
+    /// 矢量模式的可变状态（李萨如光栅 / 自动缩放 / 打断动画）。
+    pub vector: crate::tmplayer::render::vector_renderer::VectorState,
 
     pub cover_cache: RefCell<CoverCache>,
     pub cover_dominant_rgb_cache: RefCell<HashMap<u64, (u8, u8, u8)>>,
@@ -537,6 +539,7 @@ impl AppState {
             pcm_ring: None,
             scope: Default::default(),
             scope_gain: ScopeGain::default(),
+            vector: Default::default(),
             cover_cache: RefCell::new(CoverCache::new(20)),
             cover_dominant_rgb_cache: RefCell::new(HashMap::new()),
             cover_render_tx,
@@ -699,6 +702,13 @@ impl AppState {
         self.tick_playlist_slide(now);
         self.scope_gain
             .tick(self.player.playback == PlaybackState::Playing, dt);
+
+        self.vector.tick(
+            self.config.visualize
+                == crate::tmplayer::data::config::VisualizeMode::Vector,
+            self.player.playback == PlaybackState::Playing,
+            dt,
+        );
     }
 
     /// 启动一次侧边栏滑入/滑出。记录当前位置作为起点，因此支持动画中途反向。
@@ -755,6 +765,10 @@ impl AppState {
             return true;
         }
 
+        if self.vector_is_animating() || self.vector_is_floating() {
+            return true;
+        }
+
         if self.cover_anim.is_some()
             || self.playlist_album_anim.is_some()
             || self.pending_system_cover_anim.is_some()
@@ -794,6 +808,9 @@ impl AppState {
             VisualizeMode::Oscilloscope => {
                 self.player.playback == PlaybackState::Playing || self.scope_gain.is_animating()
             }
+            VisualizeMode::Vector => {
+                self.player.playback == PlaybackState::Playing || self.vector.is_animating()
+            }
         };
 
         if visual_active {
@@ -819,6 +836,18 @@ impl AppState {
             self.config.visualize,
             crate::tmplayer::data::config::VisualizeMode::Oscilloscope
         ) && self.scope_gain.is_animating()
+    }
+
+    /// 矢量模式的快动画（分散 / 回位）进行中，需要持续重绘把它推完。
+    fn vector_is_animating(&self) -> bool {
+        self.config.visualize == crate::tmplayer::data::config::VisualizeMode::Vector
+            && self.vector.is_animating()
+    }
+
+    /// 矢量模式停稳后的极慢悬浮仍在动，暂停状态下也要维持基础帧率重绘。
+    fn vector_is_floating(&self) -> bool {
+        self.config.visualize == crate::tmplayer::data::config::VisualizeMode::Vector
+            && self.vector.is_floating()
     }
 
     pub fn start_cover_anim(
