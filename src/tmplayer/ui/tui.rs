@@ -1539,13 +1539,13 @@ pub fn help_items(app: &AppState) -> Vec<(String, String)> {
             &app.config.keybind_small_window_toggle,
         ),
         item(
-            "下载歌曲（主应用）",
-            "Download Song (Host)",
+            "主应用下载歌曲",
+            "Host Download Song",
             &app.config.keybind_download,
         ),
         item(
-            "下载歌曲（全屏页）",
-            "Download Song (Fullscreen)",
+            "全屏页下载歌曲",
+            "Fullscreen Download Song",
             &app.config.keybind_download_fullscreen,
         ),
         item(

@@ -4683,8 +4683,8 @@ impl App {
             17 => self.lang_text("折叠栏模式切换", "Collapsed Mode Switch"),
             18 => self.lang_text("折叠栏收藏/取消收藏", "Collapsed Like/Unlike"),
             19 => self.lang_text("小窗口切换显示", "Small Window Switch"),
-            20 => self.lang_text("下载歌曲（主应用）", "Download Song (Host)"),
-            21 => self.lang_text("下载歌曲（全屏页）", "Download Song (Fullscreen)"),
+            20 => self.lang_text("主应用下载歌曲", "Host Download Song"),
+            21 => self.lang_text("全屏页下载歌曲", "Fullscreen Download Song"),
             _ => self.lang_text("未知", "Unknown"),
         }
     }
