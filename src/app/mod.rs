@@ -2916,6 +2916,9 @@ pub struct App {
     pub settings_lyrics_selected: usize,
     pub settings_keybind_selected: usize,
     pub settings_keybind_rebinding: Option<usize>,
+    /// 按键绑定页的滚动偏移：与应用内列表一致，仅当焦点行越过可视窗口
+    /// 边界时才挪动（不是每次移动焦点都滚动）。
+    pub settings_keybind_scroll: usize,
     /// 「下载设置」页的选中行。
     pub settings_download_selected: usize,
     /// 下载路径行的编辑状态（Some = 正在编辑该行）。
@@ -3085,6 +3088,7 @@ impl App {
             settings_lyrics_selected: 0,
             settings_keybind_selected: 0,
             settings_keybind_rebinding: None,
+            settings_keybind_scroll: 0,
             settings_download_selected: 0,
             download_path_edit: None,
             download_reset_armed: false,
@@ -6101,6 +6105,7 @@ impl App {
     fn open_keybind_settings(&mut self) {
         self.settings_keybind_selected = 0;
         self.settings_keybind_rebinding = None;
+        self.settings_keybind_scroll = 0;
         self.overlay = Some(Overlay::SettingsKeybinds);
     }
 
@@ -8214,6 +8219,7 @@ impl App {
         self.settings_playback_selected = 0;
         self.settings_keybind_selected = 0;
         self.settings_keybind_rebinding = None;
+        self.settings_keybind_scroll = 0;
         self.session_cookie = None;
         self.api.clear_cookie();
         let _ = session::clear_cookie();

@@ -661,7 +661,13 @@ fn draw_keybind_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
         .unwrap_or(app.settings_keybind_selected);
     let visible_rows = rows[1].height as usize;
     let total_rows = lines.len();
-    let scroll = scroll_for_focus(total_rows, visible_rows, focus_index);
+    let scroll = scroll_for_focus(
+        app.settings_keybind_scroll,
+        total_rows,
+        visible_rows,
+        focus_index,
+    );
+    app.settings_keybind_scroll = scroll;
 
     frame.render_widget(
         Paragraph::new(lines)
@@ -716,13 +722,21 @@ fn draw_keybind_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
     }
 }
 
-/// 让 `focus` 落在可视窗口内的滚动偏移（渲染与命中区共用同一算法）。
-fn scroll_for_focus(total: usize, visible_rows: usize, focus: usize) -> usize {
-    if visible_rows == 0 || focus < visible_rows {
+/// 与应用内列表一致的聚焦滚动：`scroll` 是当前偏移，**只在焦点行越过可视
+/// 窗口的上/下边界时**才挪到刚好把它露出来的位置，其余情况视口不动
+/// （渲染与命中区共用同一算法）。
+fn scroll_for_focus(scroll: usize, total: usize, visible_rows: usize, focus: usize) -> usize {
+    let max_scroll = total.saturating_sub(visible_rows);
+    if visible_rows == 0 {
         return 0;
     }
-
-    (focus + 1 - visible_rows).min(total.saturating_sub(visible_rows))
+    if focus < scroll {
+        focus.min(max_scroll)
+    } else if focus >= scroll + visible_rows {
+        (focus + 1 - visible_rows).min(max_scroll)
+    } else {
+        scroll.min(max_scroll)
+    }
 }
 
 /// 窗口内可见的条目：(条目序号, 相对行号)。渲染带同一 `scroll`，
@@ -1316,22 +1330,42 @@ mod tests {
         let total = crate::app::SETTINGS_KEYBIND_ITEMS + 3;
 
         for visible_rows in 1..=total {
-            for focus in 0..crate::app::SETTINGS_KEYBIND_ITEMS {
-                let scroll = scroll_for_focus(total, visible_rows, focus);
-                let end = (scroll + visible_rows).min(total);
+            for start_scroll in 0..=total {
+                for focus in 0..crate::app::SETTINGS_KEYBIND_ITEMS {
+                    let scroll = scroll_for_focus(start_scroll, total, visible_rows, focus);
+                    let end = (scroll + visible_rows).min(total);
 
-                assert!(
-                    scroll <= focus && focus < end,
-                    "visible_rows={visible_rows} focus={focus} scroll={scroll}"
-                );
+                    assert!(
+                        scroll <= focus && focus < end,
+                        "visible_rows={visible_rows} start_scroll={start_scroll} \
+                         focus={focus} scroll={scroll}"
+                    );
+                }
             }
         }
     }
 
+    /// 应用内滚动语义：焦点还在窗口内时视口不动，越过边界才滚，
+    /// 且只滚到刚好把焦点行露出来（不持续把焦点钉在窗口底边）。
+    #[test]
+    fn keybind_scroll_only_moves_on_boundary_crossing() {
+        let total = crate::app::SETTINGS_KEYBIND_ITEMS + 3;
+
+        // 焦点在窗口 [4, 12) 内：视口不动。
+        assert_eq!(scroll_for_focus(4, total, 8, 6), 4);
+        assert_eq!(scroll_for_focus(4, total, 8, 11), 4);
+        // 越过下边界：只滚一格，焦点贴底。
+        assert_eq!(scroll_for_focus(4, total, 8, 12), 5);
+        // 越过上边界：只滚一格，焦点贴顶。
+        assert_eq!(scroll_for_focus(6, total, 8, 5), 5);
+        // 视口增长到装下全部内容：钳制回 0。
+        assert_eq!(scroll_for_focus(6, total, 30, 10), 0);
+    }
+
     #[test]
     fn scroll_is_zero_when_everything_fits() {
-        assert_eq!(scroll_for_focus(23, 23, 19), 0);
-        assert_eq!(scroll_for_focus(23, 40, 19), 0);
+        assert_eq!(scroll_for_focus(7, 23, 23, 19), 0);
+        assert_eq!(scroll_for_focus(7, 23, 40, 19), 0);
     }
 
     /// 命中区行号必须与渲染行号一致：条目 i 画在 `i - scroll` 行。
