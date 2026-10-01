@@ -4,7 +4,6 @@ use crate::tmplayer::app::state::{
 use crate::tmplayer::audio::cava::{CavaChannels, CavaConfig, CavaRunner};
 use crate::tmplayer::data::config::{AudioQuality, BarChannels, BarNumber, VisualizeMode};
 use crate::tmplayer::data::theme_loader::ThemeLoader;
-use crate::tmplayer::ui::theme::ThemeName;
 use crate::tmplayer::ui::tui::{Tui, UiLayout};
 use crate::tmplayer::utils::input::{Action, map_key, map_mouse};
 use crate::tmplayer::{
@@ -139,10 +138,9 @@ fn host_config_sync_from_app(app: &AppState) -> HostConfigSync {
 
 fn apply_host_config_sync(app: &mut AppState, config: HostConfigSync) {
     if app.config.theme != config.theme {
-        if let Ok(theme) = ThemeLoader::load(&config.theme) {
-            app.theme = theme;
-            app.config.theme = config.theme;
-        }
+        // 同步来的主题格式有问题时回退默认主题，而不是卡在旧主题上。
+        app.theme = ThemeLoader::load_or_default(&config.theme);
+        app.config.theme = config.theme;
     }
 
     app.config.transparent_background = config.transparent_background;
@@ -1489,39 +1487,6 @@ async fn handle_action(
     Ok(())
 }
 
-fn themes() -> [ThemeName; 5] {
-    [
-        ThemeName::System,
-        ThemeName::Latte,
-        ThemeName::Frappe,
-        ThemeName::Macchiato,
-        ThemeName::Mocha,
-    ]
-}
-
-fn theme_count() -> usize {
-    themes().len()
-}
-
-fn theme_index(name: ThemeName) -> usize {
-    themes().iter().position(|&t| t == name).unwrap_or(0)
-}
-
-fn theme_by_index(idx: usize) -> ThemeName {
-    let t = themes();
-    t[idx.min(t.len().saturating_sub(1))]
-}
-
-fn theme_key(name: ThemeName) -> &'static str {
-    match name {
-        ThemeName::System => "system",
-        ThemeName::Latte => "latte",
-        ThemeName::Frappe => "frappe",
-        ThemeName::Macchiato => "macchiato",
-        ThemeName::Mocha => "mocha",
-    }
-}
-
 async fn apply_settings_delta(
     app: &mut AppState,
     host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
@@ -1530,17 +1495,16 @@ async fn apply_settings_delta(
     match app.settings_selected {
         // Theme
         0 => {
-            let count = theme_count() as i32;
-            if count <= 0 {
-                return;
-            }
-            let cur = theme_index(app.theme.name) as i32;
-            let next = (cur + delta).rem_euclid(count) as usize;
-            let name = theme_by_index(next);
-            let key = theme_key(name);
+            let themes = ThemeLoader::list_themes();
+            let cur = themes
+                .iter()
+                .position(|key| key.eq_ignore_ascii_case(app.config.theme.as_str()))
+                .unwrap_or(0) as i32;
+            let next = (cur + delta).rem_euclid(themes.len() as i32) as usize;
+            let key = &themes[next];
             if let Ok(theme) = ThemeLoader::load(key) {
                 app.theme = theme;
-                app.config.theme = key.to_string();
+                app.config.theme = key.clone();
                 save_and_sync_host_config(app, host_bridge).await;
             } else {
                 app.set_toast("Theme load error");

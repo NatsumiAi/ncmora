@@ -290,7 +290,7 @@ async fn init_logger() -> Result<()> {
 async fn main() -> Result<()> {
     init_logger().await?;
     let config = Config::load_or_default()?;
-    let theme = ThemeLoader::load(&config.theme).unwrap_or_default();
+    let theme = ThemeLoader::load_or_default(&config.theme);
     let mut app = App::new(config, theme)?;
 
     let mut terminal = init_terminal()?;

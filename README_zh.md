@@ -118,7 +118,7 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 
 ### 界面
 
-- 主题：`system`、`latte`、`frappe`（默认）、`macchiato`、`mocha`
+- 主题：从 `themes/*.toml` 动态加载——内置 20 款（默认 `frappe`，另有 `system`、Catppuccin 其余变体、`ayu_light`、`ayu_mirage`、`ocean`、`everforest_dark`、`everforest_light`、`monokai_pro`、`nord`、`rose_pine_moon`、`solarized_dark`、`solarized_light`、`tomorrow_light`、`tomorrow_night`、`zenburn`、`zinc_dark`、`zinc_light`）；自己丢一个 toml 进去即可加入循环。校验不过的文件会被跳过，选中的主题损坏时回退默认主题
 - 界面语言：`zh` / `en`
 - 启动：先出加载页（ASCII 标题 + 进度条，不显示文字），登录恢复、推荐加载等网络步骤在后台按步推进；登录态不可用时收尾后进入登录页
 - 透明背景、封面边框、提示行开关
@@ -195,7 +195,7 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 首次启动后该目录下会有：
 
 - `config/default.toml`：程序、播放、快捷键与缓存配置
-- `themes/*.toml`：`system`、`catppuccin_latte`、`catppuccin_frappe`、`catppuccin_macchiato`、`catppuccin_mocha`
+- `themes/*.toml`：主题文件（key 取文件内 `name` 字段）；额外丢进来的 `.toml` 会自动变为可选
 - `auth/session.toml`：持久化登录 cookie
 - `playback/session.toml`：播放记忆的队列（`playback_memory` 开启时写入）
 - `private_roam/session.toml`：私人漫游列表、最后播放位置与缓存封面
@@ -213,7 +213,7 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 
 | 配置项 | 默认值 | 取值 / 说明 |
 | --- | --- | --- |
-| `theme` | `frappe` | `system`、`latte`、`frappe`、`macchiato`、`mocha` |
+| `theme` | `frappe` | `themes/*.toml` 里的任意主题 key（内置 20 款，自动识别自定义文件）；选中的主题文件损坏时回退默认主题 |
 | `language` | `zh` | `zh`、`en` |
 | `visualize` | 有 cava 时为 `bars`，否则 `oscilloscope` | `hidden`（设置里显示「关闭」）、`lyrics`（「仅歌词」，旧的 `off` 同义）、`bars`、`oscilloscope`、`vector`；只有 `bars` 依赖 cava |
 | `graphics_protocol` | `halfblocks` | `off`、`halfblocks`；`off` 时封面用 ASCII 字符绘制 |

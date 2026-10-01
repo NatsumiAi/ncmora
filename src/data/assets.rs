@@ -13,6 +13,21 @@ const THEME_LATTE_TOML: &str = include_str!("../../themes/catppuccin_latte.toml"
 const THEME_FRAPPE_TOML: &str = include_str!("../../themes/catppuccin_frappe.toml");
 const THEME_MACCHIATO_TOML: &str = include_str!("../../themes/catppuccin_macchiato.toml");
 const THEME_MOCHA_TOML: &str = include_str!("../../themes/catppuccin_mocha.toml");
+const THEME_AYU_LIGHT_TOML: &str = include_str!("../../themes/ayu_light.toml");
+const THEME_AYU_MIRAGE_TOML: &str = include_str!("../../themes/ayu_mirage.toml");
+const THEME_OCEAN_TOML: &str = include_str!("../../themes/base16_ocean.toml");
+const THEME_EVERFOREST_DARK_TOML: &str = include_str!("../../themes/everforest_dark.toml");
+const THEME_EVERFOREST_LIGHT_TOML: &str = include_str!("../../themes/everforest_light.toml");
+const THEME_MONOKAI_PRO_TOML: &str = include_str!("../../themes/monokai_pro.toml");
+const THEME_NORD_TOML: &str = include_str!("../../themes/nord.toml");
+const THEME_ROSE_PINE_MOON_TOML: &str = include_str!("../../themes/rose_pine_moon.toml");
+const THEME_SOLARIZED_DARK_TOML: &str = include_str!("../../themes/solarized_dark.toml");
+const THEME_SOLARIZED_LIGHT_TOML: &str = include_str!("../../themes/solarized_light.toml");
+const THEME_TOMORROW_LIGHT_TOML: &str = include_str!("../../themes/tomorrow_light.toml");
+const THEME_TOMORROW_NIGHT_TOML: &str = include_str!("../../themes/tomorrow_night.toml");
+const THEME_ZENBURN_TOML: &str = include_str!("../../themes/zenburn.toml");
+const THEME_ZINC_DARK_TOML: &str = include_str!("../../themes/shadcn_zinc_dark.toml");
+const THEME_ZINC_LIGHT_TOML: &str = include_str!("../../themes/shadcn_zinc_light.toml");
 
 pub fn resolve_asset_root() -> Cow<'static, PathBuf> {
     if let Some(path) = std::env::var_os(ENV_ASSET_DIR) {
@@ -60,6 +75,51 @@ fn ensure_themes(root: &Path) -> Result<()> {
         THEME_MACCHIATO_TOML,
     )?;
     write_if_missing(&root.join("themes/catppuccin_mocha.toml"), THEME_MOCHA_TOML)?;
+    write_if_missing(&root.join("themes/ayu_light.toml"), THEME_AYU_LIGHT_TOML)?;
+    write_if_missing(&root.join("themes/ayu_mirage.toml"), THEME_AYU_MIRAGE_TOML)?;
+    write_if_missing(&root.join("themes/base16_ocean.toml"), THEME_OCEAN_TOML)?;
+    write_if_missing(
+        &root.join("themes/everforest_dark.toml"),
+        THEME_EVERFOREST_DARK_TOML,
+    )?;
+    write_if_missing(
+        &root.join("themes/everforest_light.toml"),
+        THEME_EVERFOREST_LIGHT_TOML,
+    )?;
+    write_if_missing(
+        &root.join("themes/monokai_pro.toml"),
+        THEME_MONOKAI_PRO_TOML,
+    )?;
+    write_if_missing(&root.join("themes/nord.toml"), THEME_NORD_TOML)?;
+    write_if_missing(
+        &root.join("themes/rose_pine_moon.toml"),
+        THEME_ROSE_PINE_MOON_TOML,
+    )?;
+    write_if_missing(
+        &root.join("themes/solarized_dark.toml"),
+        THEME_SOLARIZED_DARK_TOML,
+    )?;
+    write_if_missing(
+        &root.join("themes/solarized_light.toml"),
+        THEME_SOLARIZED_LIGHT_TOML,
+    )?;
+    write_if_missing(
+        &root.join("themes/tomorrow_light.toml"),
+        THEME_TOMORROW_LIGHT_TOML,
+    )?;
+    write_if_missing(
+        &root.join("themes/tomorrow_night.toml"),
+        THEME_TOMORROW_NIGHT_TOML,
+    )?;
+    write_if_missing(&root.join("themes/zenburn.toml"), THEME_ZENBURN_TOML)?;
+    write_if_missing(
+        &root.join("themes/shadcn_zinc_dark.toml"),
+        THEME_ZINC_DARK_TOML,
+    )?;
+    write_if_missing(
+        &root.join("themes/shadcn_zinc_light.toml"),
+        THEME_ZINC_LIGHT_TOML,
+    )?;
 
     Ok(())
 }

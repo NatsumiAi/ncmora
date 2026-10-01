@@ -118,7 +118,7 @@ The flat player bar keeps its mouse targets (previous, play-pause, next, like, r
 
 ### Interface
 
-- Themes: `system`, `latte`, `frappe` (default), `macchiato`, `mocha`
+- Themes: loaded dynamically from `themes/*.toml` — 20 built-ins (`frappe` by default, plus `system`, the other Catppuccin variants, `ayu_light`, `ayu_mirage`, `ocean`, `everforest_dark`, `everforest_light`, `monokai_pro`, `nord`, `rose_pine_moon`, `solarized_dark`, `solarized_light`, `tomorrow_light`, `tomorrow_night`, `zenburn`, `zinc_dark`, `zinc_light`); drop in your own toml and it joins the cycle. Files that fail validation are skipped, and a broken selected theme falls back to the default
 - UI language: `zh` / `en`
 - Startup: a loading page (ASCII title plus progress bar, no text) appears first; login restore and recommendation fetches run in the background step by step, and an unusable saved session hands over to the login page
 - Transparent background, album-cover border and hint lines
@@ -195,7 +195,7 @@ If `CNMPLAYER_ASSET_DIR` is set, that directory becomes the asset root instead.
 After the first start the root contains:
 
 - `config/default.toml` — application, playback, keybind and cache settings
-- `themes/*.toml` — `system`, `catppuccin_latte`, `catppuccin_frappe`, `catppuccin_macchiato`, `catppuccin_mocha`
+- `themes/*.toml` — the theme files (the key is the `name` field inside each file); any extra `.toml` dropped here becomes selectable
 - `auth/session.toml` — the persisted login cookie
 - `playback/session.toml` — the remembered queue (written while `playback_memory` is on)
 - `private_roam/session.toml` — the private-roam list, its last played position and the cached cover
@@ -213,7 +213,7 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 
 | Key | Default | Values / notes |
 | --- | --- | --- |
-| `theme` | `frappe` | `system`, `latte`, `frappe`, `macchiato`, `mocha` |
+| `theme` | `frappe` | Any theme key from `themes/*.toml` (20 built-ins, custom files picked up); a broken file falls back to the default |
 | `language` | `zh` | `zh`, `en` |
 | `visualize` | cava present → `bars`, otherwise `oscilloscope` | `hidden` (shown as "Off" in settings), `lyrics` ("Lyrics"; the old `off` means the same), `bars`, `oscilloscope`, `vector`; only `bars` needs cava |
 | `graphics_protocol` | `halfblocks` | `off`, `halfblocks`; `off` draws covers as ASCII art |

@@ -2179,7 +2179,7 @@ fn lang_on_off(app: &AppState, enabled: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tmplayer::ui::theme::{ColorCapability, Theme, ThemeName, ThemePalette};
+    use crate::tmplayer::ui::theme::{ColorCapability, Theme, ThemePalette};
 
     fn rect(x: u16, y: u16, width: u16, height: u16) -> Rect {
         Rect {
@@ -2192,7 +2192,7 @@ mod tests {
 
     fn state(overlay: Overlay) -> AppState {
         let theme = Theme {
-            name: ThemeName::System,
+            name: "system".to_string(),
             palette: ThemePalette {
                 text: (255, 255, 255),
                 subtext: (128, 128, 128),

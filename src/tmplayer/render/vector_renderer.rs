@@ -1645,11 +1645,11 @@ mod tests {
     /// 面板底色的中点插值，全可见粒子与示波器同色。
     #[test]
     fn fading_particles_blend_colors_toward_background() {
-        use crate::tmplayer::ui::theme::{ColorCapability, Theme, ThemeName, ThemePalette};
+        use crate::tmplayer::ui::theme::{ColorCapability, Theme, ThemePalette};
         use ratatui::buffer::Buffer;
 
         let theme = Theme {
-            name: ThemeName::System,
+            name: "system".to_string(),
             capability: ColorCapability::TrueColor,
             palette: ThemePalette {
                 text: (200, 200, 200),
@@ -1711,11 +1711,11 @@ mod tests {
     /// 纯粒子格仍按自身透明度渐变。
     #[test]
     fn recovering_trace_cells_stay_full_bright() {
-        use crate::tmplayer::ui::theme::{ColorCapability, Theme, ThemeName, ThemePalette};
+        use crate::tmplayer::ui::theme::{ColorCapability, Theme, ThemePalette};
         use ratatui::buffer::Buffer;
 
         let theme = Theme {
-            name: ThemeName::System,
+            name: "system".to_string(),
             capability: ColorCapability::TrueColor,
             palette: ThemePalette {
                 text: (200, 200, 200),

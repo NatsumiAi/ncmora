@@ -307,7 +307,7 @@ fn mix(a: Color, b: Color, t: f32) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tmplayer::ui::theme::{ColorCapability, ThemeName, ThemePalette};
+    use crate::tmplayer::ui::theme::{ColorCapability, Theme, ThemePalette};
 
     const RATE: u32 = 48_000;
 
@@ -482,7 +482,7 @@ mod tests {
 
     fn test_theme() -> Theme {
         Theme {
-            name: ThemeName::Frappe,
+            name: "frappe".to_string(),
             palette: ThemePalette {
                 text: (198, 208, 245),
                 subtext: (165, 173, 206),

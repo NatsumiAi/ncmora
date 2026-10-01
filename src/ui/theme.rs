@@ -7,27 +7,6 @@ pub enum ColorCapability {
     NoColor,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThemeName {
-    System,
-    Latte,
-    Frappe,
-    Macchiato,
-    Mocha,
-}
-
-impl ThemeName {
-    pub fn from_str_or_system(raw: &str) -> Self {
-        match raw.to_lowercase().as_str() {
-            "latte" => Self::Latte,
-            "frappe" => Self::Frappe,
-            "macchiato" => Self::Macchiato,
-            "mocha" => Self::Mocha,
-            _ => Self::System,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct ThemePalette {
     pub text: (u8, u8, u8),
@@ -40,10 +19,12 @@ pub struct ThemePalette {
     pub accent3: (u8, u8, u8),
 }
 
-#[derive(Debug, Clone, Copy)]
+/// 主题不再由枚举穷举：`name` 是 `themes/<key>.toml` 的 key（加载失败的
+/// 调用方回退默认主题）。
+#[derive(Debug, Clone)]
 pub struct Theme {
     #[allow(dead_code)]
-    pub name: ThemeName,
+    pub name: String,
     pub palette: ThemePalette,
     pub capability: ColorCapability,
 }
@@ -93,7 +74,7 @@ impl Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            name: ThemeName::System,
+            name: "system".to_string(),
             capability: detect_color_capability(),
             palette: ThemePalette {
                 text: (255, 255, 255),
@@ -134,6 +115,7 @@ fn map_color(cap: ColorCapability, rgb: (u8, u8, u8)) -> Color {
 }
 
 fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
+    // 6x6x6 color cube, 16..231
     let r6 = (r as u16 * 5 / 255) as u8;
     let g6 = (g as u16 * 5 / 255) as u8;
     let b6 = (b as u16 * 5 / 255) as u8;

@@ -169,7 +169,7 @@ pub async fn run_fullscreen(
     host_bridge: Option<&mut impl HostPlaybackBridge>,
 ) -> Result<FullscreenExit> {
     let config = tm_config_from_host(host_config);
-    let theme = data::theme_loader::ThemeLoader::load(&host_config.theme)?;
+    let theme = data::theme_loader::ThemeLoader::load_or_default(&host_config.theme);
 
     let mut app = app::state::AppState::new(config, theme, host_config.language);
     let ncm_cover_cache_dir = resolve_cache_root(host_config).join("tmplayer_ncm_cover");

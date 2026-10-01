@@ -7,38 +7,6 @@ pub enum ColorCapability {
     NoColor,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThemeName {
-    System,
-    Latte,
-    Frappe,
-    Macchiato,
-    Mocha,
-}
-
-impl ThemeName {
-    pub fn from_str_or_system(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "latte" => Self::Latte,
-            "frappe" => Self::Frappe,
-            "macchiato" => Self::Macchiato,
-            "mocha" => Self::Mocha,
-            _ => Self::System,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn as_label(&self) -> &'static str {
-        match self {
-            ThemeName::System => "System",
-            ThemeName::Latte => "Latte",
-            ThemeName::Frappe => "Frappe",
-            ThemeName::Macchiato => "Macchiato",
-            ThemeName::Mocha => "Mocha",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct ThemePalette {
     pub text: (u8, u8, u8),
@@ -52,9 +20,12 @@ pub struct ThemePalette {
     pub accent3: (u8, u8, u8),
 }
 
-#[derive(Debug, Clone, Copy)]
+/// 主题不再由枚举穷举：`name` 是 `themes/<key>.toml` 的 key（加载失败的
+/// 调用方回退默认主题）。
+#[derive(Debug, Clone)]
 pub struct Theme {
-    pub name: ThemeName,
+    #[allow(dead_code)]
+    pub name: String,
     pub palette: ThemePalette,
     pub capability: ColorCapability,
 }
@@ -109,6 +80,24 @@ pub fn detect_color_capability() -> ColorCapability {
     }
 
     ColorCapability::NoColor
+}
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            name: "system".to_string(),
+            capability: detect_color_capability(),
+            palette: ThemePalette {
+                text: (255, 255, 255),
+                subtext: (170, 170, 170),
+                base: (0, 0, 0),
+                surface: (32, 32, 32),
+                buff: (42, 42, 42),
+                accent: (255, 255, 255),
+                accent2: (255, 255, 255),
+                accent3: (255, 255, 255),
+            },
+        }
+    }
 }
 
 fn map_color(cap: ColorCapability, t: (u8, u8, u8)) -> Color {
