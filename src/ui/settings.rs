@@ -724,8 +724,13 @@ fn draw_keybind_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
 
 /// 与应用内列表一致的聚焦滚动：`scroll` 是当前偏移，**只在焦点行越过可视
 /// 窗口的上/下边界时**才挪到刚好把它露出来的位置，其余情况视口不动
-/// （渲染与命中区共用同一算法）。
-fn scroll_for_focus(scroll: usize, total: usize, visible_rows: usize, focus: usize) -> usize {
+/// （渲染与命中区共用同一算法；主应用按键绑定页与全屏页按键提示弹窗共用）。
+pub(crate) fn scroll_for_focus(
+    scroll: usize,
+    total: usize,
+    visible_rows: usize,
+    focus: usize,
+) -> usize {
     let max_scroll = total.saturating_sub(visible_rows);
     if visible_rows == 0 {
         return 0;

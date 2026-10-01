@@ -784,6 +784,7 @@ async fn handle_action(
             app.help_keybind_selected = app
                 .help_keybind_selected
                 .min(crate::tmplayer::ui::tui::help_item_count(app).saturating_sub(1));
+            app.help_keybind_scroll = 0;
             app.overlay = Overlay::HelpModal;
         }
         Action::OpenEqModal => {
@@ -893,6 +894,7 @@ async fn handle_action(
                     app.overlay = Overlay::BarSettingsModal;
                 }
                 5 => {
+                    app.help_keybind_scroll = 0;
                     app.overlay = Overlay::HelpModal;
                 }
                 6 => {

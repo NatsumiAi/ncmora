@@ -410,6 +410,9 @@ pub struct AppState {
     pub local_audio_settings_selected: usize,
     pub lyrics_settings_selected: usize,
     pub help_keybind_selected: usize,
+    /// 按键提示弹窗的滚动偏移：与主应用/应用内列表一致，仅当焦点行越过
+    /// 可视窗口边界时才挪动。
+    pub help_keybind_scroll: usize,
     pub vip_audio_unlocked: bool,
 
     /// 信息区下载图标状态（宿主每帧同步）。
@@ -552,6 +555,7 @@ impl AppState {
             local_audio_settings_selected: 0,
             lyrics_settings_selected: 0,
             help_keybind_selected: 0,
+            help_keybind_scroll: 0,
             vip_audio_unlocked: false,
             download_state: crate::tmplayer::DownloadIconState::Hidden,
             download_phase_start: Instant::now(),

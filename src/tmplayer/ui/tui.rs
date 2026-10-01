@@ -1602,12 +1602,14 @@ fn render_help_modal(
     let visible_rows = rows[1].height as usize;
     let total_rows = items.len();
     let selected = app.help_keybind_selected.min(total_rows.saturating_sub(1));
-    let max_scroll = total_rows.saturating_sub(visible_rows);
-    let scroll = if visible_rows == 0 || selected < visible_rows {
-        0
-    } else {
-        (selected + 1 - visible_rows).min(max_scroll)
-    };
+    // 与主应用按键绑定弹窗共用的越界聚焦滚动：焦点在窗口内视口不动。
+    let scroll = crate::ui::settings::scroll_for_focus(
+        app.help_keybind_scroll,
+        total_rows,
+        visible_rows,
+        selected,
+    );
+    app.help_keybind_scroll = scroll;
 
     for (idx, (label, key)) in items.iter().enumerate().skip(scroll).take(visible_rows) {
         let style = if idx == selected {
@@ -2912,5 +2914,36 @@ mod tests {
         }
         assert_eq!(hits, rows.len(), "登记的行都该画在屏幕上");
         assert!(hits > 0, "至少要有一行可点");
+    }
+
+    /// 与主应用一致的越界聚焦滚动：焦点还在窗口内时视口不动，
+    /// 越过下/上边界才滚（旧实现会把焦点持续钉在窗口底边）。
+    #[test]
+    fn help_modal_viewport_stays_put_while_focus_is_inside() {
+        let mut app = state(Overlay::HelpModal);
+        let items = help_items(&app);
+        let last = items.len() - 1;
+
+        // 末条越界：视口滚起来（24 行终端放不下全部条目）。
+        app.help_keybind_selected = last;
+        let _ = render_to_buffer(&mut app, |f, app, rows| {
+            render_help_modal(f, f.area(), app, rows)
+        });
+        let scrolled = app.help_keybind_scroll;
+        assert!(scrolled > 0, "末条应当把视口滚起来");
+
+        // 倒数第二条仍在窗口内：视口不得回跳。
+        app.help_keybind_selected = last - 1;
+        let _ = render_to_buffer(&mut app, |f, app, rows| {
+            render_help_modal(f, f.area(), app, rows)
+        });
+        assert_eq!(app.help_keybind_scroll, scrolled, "窗口内不动");
+
+        // 回首条：越过上边界，视口回到顶。
+        app.help_keybind_selected = 0;
+        let _ = render_to_buffer(&mut app, |f, app, rows| {
+            render_help_modal(f, f.area(), app, rows)
+        });
+        assert_eq!(app.help_keybind_scroll, 0, "越过顶边回到顶部");
     }
 }
