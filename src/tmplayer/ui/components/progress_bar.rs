@@ -4,7 +4,16 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use std::time::Duration;
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+
+/// 脉冲动画的时间基准：进程启动时初始化。
+/// 注意不能用 Instant::now().elapsed()——那是“当前时刻到当前时刻”，恒为 0，
+/// 会导致波形静止不动。
+static ANIM_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// 单个浅色脉冲带从左端扫到右端的周期（秒）
+const PULSE_PERIOD_SECS: f32 = 1.4;
 
 pub fn render(f: &mut Frame, area: Rect, app: &AppState, pos: Duration, dur: Duration) {
     let w = area.width as usize;
@@ -32,11 +41,42 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState, pos: Duration, dur: Dur
         String::new()
     };
 
-    let line = Line::from(vec![
-        Span::styled(left, Style::default().fg(app.theme.color_accent2())),
-        Span::styled("○", Style::default().fg(app.theme.color_accent())),
-        Span::styled(right, Style::default().fg(app.theme.color_subtext())),
-    ]);
+    let line = if app.player.seeking {
+        // 宿主正在后台加载跳转目标：单个浅色脉冲带从已播放区域最左侧向右
+        // 移动，先慢后快（二次缓动）；颜色 = 当前进度条颜色（主题色 accent2）
+        // 稍作提亮，基础颜色来自主题，不硬编码颜色。
+        let cycle = (ANIM_EPOCH.elapsed().as_secs_f32() / PULSE_PERIOD_SECS).fract();
+        let eased = cycle * cycle; // 先慢后快
+        let width = knob.max(1) as f32;
+        let center = eased * (width - 1.0);
+        let band_half = (width * 0.08).max(1.0);
+        let mut spans = Vec::with_capacity(knob + 2);
+        for x in 0..knob {
+            let d = (x as f32 - center).abs();
+            let amount = if d <= band_half {
+                0.25 * (d / band_half * std::f32::consts::FRAC_PI_2).cos()
+            } else {
+                0.0
+            };
+            let color = app.theme.lighten(app.theme.palette.accent2, amount);
+            spans.push(Span::styled("─", Style::default().fg(color)));
+        }
+        spans.push(Span::styled(
+            "○",
+            Style::default().fg(app.theme.color_accent()),
+        ));
+        spans.push(Span::styled(
+            right,
+            Style::default().fg(app.theme.color_subtext()),
+        ));
+        Line::from(spans)
+    } else {
+        Line::from(vec![
+            Span::styled(left, Style::default().fg(app.theme.color_accent2())),
+            Span::styled("○", Style::default().fg(app.theme.color_accent())),
+            Span::styled(right, Style::default().fg(app.theme.color_subtext())),
+        ])
+    };
 
     f.render_widget(Paragraph::new(line), area);
 }

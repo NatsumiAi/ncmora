@@ -1,7 +1,12 @@
 [package]
 name = "ncmora"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
+
+[features]
+default = ["easter-egg"]
+# about 弹窗里的形象彩蛋。默认编入；用 --no-default-features 可剔除。
+easter-egg = []
 
 [dependencies]
 anyhow = "1"
@@ -18,8 +23,9 @@ futures = "0.3"
 ncm-api = { path = "./ncm-api-rs" }
 qrcode = "0.14"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+parking_lot = "0.12"
 cyper = { version = "0.9", features = ["json", "cookies", "stream", "http2"] }
-compio = { version = "0.19", features = ["macros"] }
+compio = { version = "0.19", features = ["macros", "time"] }
 http = "1.4"
 see = { git = "https://github.com/compio-rs/see" }
 unicode-width = "0.2"
@@ -29,6 +35,10 @@ rodio = { git = "https://github.com/RustAudio/rodio", default-features = false, 
 # 无损 Hi-Res 高清环绕声 flac !VIP
 # 沉浸环绕声 杜比全景声 超清母带 flac !SVIP
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac"] }
+lofty = "0.25.4"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 mpris-server = "0.10"

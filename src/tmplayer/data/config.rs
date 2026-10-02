@@ -1,5 +1,6 @@
 use crate::data::assets;
 use crate::data::config::GraphicsProtocol;
+pub use crate::data::config::VisualizeMode;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -35,6 +36,20 @@ pub struct Config {
     #[serde(default)]
     pub page_lyrics: bool,
 
+    /// 歌词浮窗的从属项（与主应用同步）：是否允许鼠标拖动。
+    #[serde(default = "default_page_lyrics_drag")]
+    pub page_lyrics_drag: bool,
+
+    /// 拖动结束后是否吸附到最近的边（左/右/上/下，另一轴保持自由；仅拖动开启时可改）。
+    #[serde(default = "default_page_lyrics_snap")]
+    pub page_lyrics_snap: bool,
+
+    /// 歌词浮窗左上角的归一化位置（0..=1）。
+    #[serde(default = "default_page_lyrics_pos")]
+    pub page_lyrics_pos_x: f32,
+    #[serde(default = "default_page_lyrics_pos")]
+    pub page_lyrics_pos_y: f32,
+
     #[serde(default = "default_kitty_cover_scale_percent")]
     pub kitty_cover_scale_percent: u8,
 
@@ -47,11 +62,22 @@ pub struct Config {
     #[serde(default = "default_audio_quality")]
     pub audio_quality: AudioQuality,
 
+    /// 下载音频的档位（与主应用同步；可选值同「播放设置 / 音质」）。
+    #[serde(default = "default_download_audio_quality")]
+    pub download_audio_quality: AudioQuality,
+
+    /// 下载目录（绝对路径）。`None` = 未自定义，由主应用按系统音乐目录推导。
+    #[serde(default)]
+    pub download_path: Option<String>,
+
     #[serde(default)]
     pub playback_memory: bool,
 
     #[serde(default = "default_show_hints")]
     pub show_hints: bool,
+
+    #[serde(default = "default_small_window_display")]
+    pub small_window_display: bool,
 
     #[serde(default)]
     pub home_more_recommend: bool,
@@ -133,28 +159,17 @@ pub struct Config {
 
     #[serde(default = "default_keybind_toggle_like_fullscreen")]
     pub keybind_toggle_like_fullscreen: String,
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum VisualizeMode {
-    Off,
-    Bars,
-    Oscilloscope,
-}
+    #[serde(default = "default_keybind_small_window_toggle")]
+    pub keybind_small_window_toggle: String,
 
-impl VisualizeMode {
-    pub fn cycle(self, delta: i32) -> Self {
-        const MODES: [VisualizeMode; 3] = [
-            VisualizeMode::Off,
-            VisualizeMode::Bars,
-            VisualizeMode::Oscilloscope,
-        ];
+    /// 主应用：下载当前聚焦的单曲。
+    #[serde(default = "default_keybind_download")]
+    pub keybind_download: String,
 
-        let index = MODES.iter().position(|mode| *mode == self).unwrap_or(1) as i32;
-        let next = (index + delta).rem_euclid(MODES.len() as i32) as usize;
-        MODES[next]
-    }
+    /// 全屏页：下载当前播放的单曲。
+    #[serde(default = "default_keybind_download_fullscreen")]
+    pub keybind_download_fullscreen: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,12 +265,25 @@ fn default_visualize() -> VisualizeMode {
     if crate::tmplayer::audio::cava::is_available() {
         VisualizeMode::Bars
     } else {
-        VisualizeMode::Off
+        // 示波器不依赖 cava，比直接关掉可视化更有用。
+        VisualizeMode::Oscilloscope
     }
 }
 
 fn default_album_border() -> bool {
     true
+}
+
+fn default_page_lyrics_drag() -> bool {
+    true
+}
+
+fn default_page_lyrics_snap() -> bool {
+    true
+}
+
+fn default_page_lyrics_pos() -> f32 {
+    1.0
 }
 
 fn default_eq_bands_db() -> [f32; crate::tmplayer::app::state::EQ_BANDS] {
@@ -276,6 +304,11 @@ fn default_bar_channels() -> BarChannels {
 
 fn default_audio_quality() -> AudioQuality {
     AudioQuality::Exhigh
+}
+
+/// 下载音质默认档与播放默认档同源。
+pub fn default_download_audio_quality() -> AudioQuality {
+    default_audio_quality()
 }
 
 fn default_show_hints() -> bool {
@@ -360,6 +393,22 @@ fn default_keybind_toggle_like_fullscreen() -> String {
     "L".to_string()
 }
 
+fn default_small_window_display() -> bool {
+    true
+}
+
+fn default_keybind_small_window_toggle() -> String {
+    "Alt+X".to_string()
+}
+
+fn default_keybind_download() -> String {
+    "Ctrl+Alt+D".to_string()
+}
+
+fn default_keybind_download_fullscreen() -> String {
+    "Ctrl+D".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -373,12 +422,19 @@ impl Default for Config {
             album_border: default_album_border(),
             graphics_protocol: GraphicsProtocol::default(),
             page_lyrics: false,
+            page_lyrics_drag: default_page_lyrics_drag(),
+            page_lyrics_snap: default_page_lyrics_snap(),
+            page_lyrics_pos_x: default_page_lyrics_pos(),
+            page_lyrics_pos_y: default_page_lyrics_pos(),
             kitty_cover_scale_percent: default_kitty_cover_scale_percent(),
             super_smooth_bar: false,
             bars_gap: false,
             audio_quality: default_audio_quality(),
+            download_audio_quality: default_download_audio_quality(),
+            download_path: None,
             playback_memory: false,
             show_hints: default_show_hints(),
+            small_window_display: default_small_window_display(),
             home_more_recommend: false,
             bar_number: default_bar_number(),
             bar_channels: default_bar_channels(),
@@ -406,6 +462,9 @@ impl Default for Config {
             keybind_fullscreen_eq: default_keybind_fullscreen_eq(),
             keybind_fullscreen_eq_reset: default_keybind_fullscreen_eq_reset(),
             keybind_toggle_like_fullscreen: default_keybind_toggle_like_fullscreen(),
+            keybind_small_window_toggle: default_keybind_small_window_toggle(),
+            keybind_download: default_keybind_download(),
+            keybind_download_fullscreen: default_keybind_download_fullscreen(),
         }
     }
 }
@@ -431,10 +490,11 @@ impl Config {
             cfg.spectrum_hz = 60;
         }
 
-        let mut forced_visualize_off = false;
-        if !crate::tmplayer::audio::cava::is_available() && cfg.visualize != VisualizeMode::Off {
-            cfg.visualize = VisualizeMode::Off;
-            forced_visualize_off = true;
+        let mut forced_visualize_fallback = false;
+        if !cfg.visualize.is_available() {
+            // 只有依赖 cava 的模式会落到这里；退到同样无需外部进程的示波器。
+            cfg.visualize = VisualizeMode::Oscilloscope;
+            forced_visualize_fallback = true;
         }
 
         let mut migrated_legacy_sidebar = false;
@@ -451,6 +511,10 @@ impl Config {
             || !raw.contains("audio_quality")
             || !raw.contains("playback_memory")
             || !raw.contains("page_lyrics")
+            || !raw.contains("page_lyrics_drag")
+            || !raw.contains("page_lyrics_snap")
+            || !raw.contains("page_lyrics_pos_x")
+            || !raw.contains("page_lyrics_pos_y")
             || !raw.contains("show_hints")
             || !raw.contains("home_more_recommend")
             || !raw.contains("keybind_search_box")
@@ -471,9 +535,15 @@ impl Config {
             || !raw.contains("keybind_fullscreen_eq")
             || !raw.contains("keybind_fullscreen_eq_reset")
             || !raw.contains("keybind_toggle_like_fullscreen")
+            || !raw.contains("small_window_display")
+            || !raw.contains("keybind_small_window_toggle")
+            || !raw.contains("download_audio_quality")
+            || !raw.contains("download_path")
+            || !raw.contains("keybind_download")
+            || !raw.contains("keybind_download_fullscreen")
             || legacy_startup_folder_key_present
             || !raw.contains("spectrum_hz")
-            || forced_visualize_off
+            || forced_visualize_fallback
             || migrated_legacy_sidebar
         {
             let _ = cfg.save();

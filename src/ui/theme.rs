@@ -80,6 +80,14 @@ impl Theme {
     pub fn color_accent3(&self) -> Color {
         map_color(self.capability, self.palette.accent3)
     }
+
+    /// 将主题色向白色方向提亮 amount∈[0,1]：脉冲动画“稍浅一点”的效果，
+    /// 基础颜色来自主题，明暗主题均自适应（不硬编码颜色）。
+    pub fn lighten(&self, color: (u8, u8, u8), amount: f32) -> Color {
+        let amount = amount.clamp(0.0, 1.0);
+        let mix = |x: u8| (x as f32 + (255.0 - x as f32) * amount).round() as u8;
+        map_color(self.capability, (mix(color.0), mix(color.1), mix(color.2)))
+    }
 }
 
 impl Default for Theme {

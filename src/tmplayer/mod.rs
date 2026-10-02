@@ -11,12 +11,12 @@ use anyhow::Result;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::data::config::{
     AudioQuality as HostAudioQuality, BarChannels as HostBarChannels, BarNumber as HostBarNumber,
-    Config as HostConfig, GraphicsProtocol, Language as HostLanguage,
-    VisualizeMode as HostVisualizeMode,
+    Config as HostConfig, GraphicsProtocol, Language as HostLanguage, VisualizeMode,
 };
 
 #[derive(Debug, Clone)]
@@ -52,6 +52,10 @@ pub struct FullscreenBootstrap {
 pub enum FullscreenExit {
     BackToHost,
     BackToHostOpenSettings,
+    /// 全屏页里点了作者名：宿主退出后打开该作者页（附带显示串里的段序号）。
+    BackToHostOpenAuthor(usize),
+    /// 全屏页里点了专辑名：宿主退出后打开该专辑页。
+    BackToHostOpenAlbum,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -90,6 +94,21 @@ pub struct HostPlaybackRuntimeSnapshot {
     pub repeat_mode: HostRepeatMode,
     pub position: Duration,
     pub volume: f32,
+    pub seeking: bool,
+    /// 信息区下载图标状态（宿主每帧同步；`Hidden` = 不显示）。
+    pub download: DownloadIconState,
+}
+
+/// 信息区下载图标的状态。
+///
+/// `Hidden`：下载不可用（宿主没有可写目录）或没有播放中的歌曲——图标整格不画、不可点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DownloadIconState {
+    #[default]
+    Hidden,
+    NotDownloaded,
+    Downloading,
+    Done,
 }
 
 #[derive(Debug, Clone)]
@@ -100,13 +119,22 @@ pub struct HostConfigSync {
     pub language: HostLanguage,
     pub graphics_protocol: GraphicsProtocol,
     pub page_lyrics: bool,
+    pub page_lyrics_drag: bool,
+    pub page_lyrics_snap: bool,
+    pub page_lyrics_pos_x: f32,
+    pub page_lyrics_pos_y: f32,
     pub audio_quality: HostAudioQuality,
+    /// 下载音质档位（与播放音质同一套可选值）。
+    pub download_audio_quality: HostAudioQuality,
+    /// 下载目录原始配置值（`None` = 用系统音乐目录推导）。
+    pub download_path: Option<String>,
     pub eq_bands_db: [f32; crate::tmplayer::app::state::EQ_BANDS],
     pub playback_memory: bool,
     pub vip_audio_unlocked: bool,
     pub show_hints: bool,
+    pub small_window_display: bool,
     pub home_more_recommend: bool,
-    pub visualize: HostVisualizeMode,
+    pub visualize: VisualizeMode,
     pub super_smooth_bar: bool,
     pub bars_gap: bool,
     pub bar_number: HostBarNumber,
@@ -118,6 +146,8 @@ pub trait HostPlaybackBridge {
     async fn tick(&mut self);
     fn metadata_signature(&self) -> u64;
     fn runtime_snapshot(&self) -> HostPlaybackRuntimeSnapshot;
+    /// 宿主播放链路上的 PCM 抽头环，示波器由此取真实波形。
+    fn pcm_ring(&self) -> Arc<crate::tmplayer::audio::pcm_tap::PcmRing>;
     fn snapshot(&mut self) -> HostPlaybackSnapshot;
     fn config_snapshot(&self) -> HostConfigSync;
     async fn apply_config_sync(&mut self, config: HostConfigSync);
@@ -129,6 +159,8 @@ pub trait HostPlaybackBridge {
     fn set_volume(&mut self, volume: f32);
     fn toggle_repeat_mode(&mut self);
     async fn toggle_like_current(&mut self);
+    /// 全屏页发起/取消「下载当前播放歌曲」。
+    fn download_current(&mut self);
 }
 
 pub async fn run_fullscreen(
@@ -147,6 +179,7 @@ pub async fn run_fullscreen(
     let _ = std::fs::create_dir_all(&ncm_cover_cache_dir);
     app.ncm_cover_cache_dir = Some(ncm_cover_cache_dir);
     app.eq.bands_db = app.config.eq_bands_db;
+    app.refresh_download_root();
 
     apply_bootstrap(&mut app, bootstrap);
 
@@ -159,14 +192,14 @@ fn tm_config_from_host(host: &HostConfig) -> data::config::Config {
         ui_fps: host.ui_fps,
         spectrum_hz: host.spectrum_hz,
         mpris_poll_ms: host.mpris_poll_ms,
-        visualize: match host.visualize {
-            HostVisualizeMode::Off => data::config::VisualizeMode::Off,
-            HostVisualizeMode::Bars => data::config::VisualizeMode::Bars,
-            HostVisualizeMode::Oscilloscope => data::config::VisualizeMode::Oscilloscope,
-        },
+        visualize: host.visualize,
         eq_bands_db: host.eq_bands_db,
         transparent_background: host.transparent_background,
         page_lyrics: host.page_lyrics,
+        page_lyrics_drag: host.page_lyrics_drag,
+        page_lyrics_snap: host.page_lyrics_snap,
+        page_lyrics_pos_x: host.page_lyrics_pos_x,
+        page_lyrics_pos_y: host.page_lyrics_pos_y,
         album_border: host.album_border,
         graphics_protocol: host.graphics_protocol,
         kitty_cover_scale_percent: host.kitty_cover_scale_percent,
@@ -184,7 +217,20 @@ fn tm_config_from_host(host: &HostConfig) -> data::config::Config {
             HostAudioQuality::Jymaster => data::config::AudioQuality::Jymaster,
         },
         playback_memory: host.playback_memory,
+        download_audio_quality: match host.download_audio_quality {
+            HostAudioQuality::Standard => data::config::AudioQuality::Standard,
+            HostAudioQuality::Higher => data::config::AudioQuality::Higher,
+            HostAudioQuality::Exhigh => data::config::AudioQuality::Exhigh,
+            HostAudioQuality::Lossless => data::config::AudioQuality::Lossless,
+            HostAudioQuality::Hires => data::config::AudioQuality::Hires,
+            HostAudioQuality::Jyeffect => data::config::AudioQuality::Jyeffect,
+            HostAudioQuality::Sky => data::config::AudioQuality::Sky,
+            HostAudioQuality::Dolby => data::config::AudioQuality::Dolby,
+            HostAudioQuality::Jymaster => data::config::AudioQuality::Jymaster,
+        },
+        download_path: host.download_path.clone(),
         show_hints: host.show_hints,
+        small_window_display: host.small_window_display,
         home_more_recommend: host.home_more_recommend,
         bar_number: match host.bar_number {
             HostBarNumber::Auto => data::config::BarNumber::Auto,
@@ -224,6 +270,9 @@ fn tm_config_from_host(host: &HostConfig) -> data::config::Config {
         keybind_fullscreen_eq: host.keybind_fullscreen_eq.clone(),
         keybind_fullscreen_eq_reset: host.keybind_fullscreen_eq_reset.clone(),
         keybind_toggle_like_fullscreen: host.keybind_toggle_like_fullscreen.clone(),
+        keybind_small_window_toggle: host.keybind_small_window_toggle.clone(),
+        keybind_download: host.keybind_download.clone(),
+        keybind_download_fullscreen: host.keybind_download_fullscreen.clone(),
     }
 }
 

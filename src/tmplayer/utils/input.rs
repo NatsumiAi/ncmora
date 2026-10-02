@@ -13,6 +13,14 @@ pub enum Action {
     SetVolume(f32),
     ToggleRepeatMode,
     ToggleFavorite,
+    /// 下载当前播放的歌曲（再按一次取消在途下载）。
+    ToggleDownload,
+    /// 信息区里点了作者名（多作者显示串里的**段序号**）：退出全屏页，由宿主打开该作者页。
+    OpenAuthorPage(usize),
+    /// 信息区里点了专辑名：退出全屏页，由宿主打开该专辑页。
+    OpenAlbumPage,
+    /// 弹窗条目行被点击（序号）；单击聚焦，双击等同 Enter。
+    ModalSelect(usize),
     TogglePlaylist,
     Confirm,
     CloseOverlay,
@@ -24,7 +32,10 @@ pub enum Action {
 
     EqResetDefault,
 
-    EqSetBandDb { band: usize, db: f32 },
+    EqSetBandDb {
+        band: usize,
+        db: f32,
+    },
 
     ModalUp,
     ModalDown,
@@ -46,7 +57,26 @@ pub enum Action {
     FolderChar(char),
     FolderBackspace,
 
-    MouseClick { col: u16, row: u16 },
+    MouseClick {
+        col: u16,
+        row: u16,
+    },
+
+    /// 滚轮：`col/row` 用于判断落在哪个面板上，`forward` 为向下滚。
+    MouseScroll {
+        col: u16,
+        row: u16,
+        forward: bool,
+    },
+
+    /// 按住左键拖动（音量条这类需要按住拖的控件）。
+    MouseDrag {
+        col: u16,
+        row: u16,
+    },
+
+    /// 松开左键。
+    MouseUp,
 
     None,
 }
@@ -105,6 +135,49 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay, config: &Config) -> Action {
         };
     }
 
+    if overlay == Overlay::LyricsSettingsModal {
+        return match ev.code {
+            KeyCode::Esc => Action::CloseOverlay,
+            KeyCode::Enter => Action::Confirm,
+            KeyCode::Up => Action::ModalUp,
+            KeyCode::Down => Action::ModalDown,
+            KeyCode::Left => Action::ModalLeft,
+            KeyCode::Right => Action::ModalRight,
+            _ => Action::None,
+        };
+    }
+
+    if overlay == Overlay::DownloadSettingsModal {
+        return match ev.code {
+            KeyCode::Esc => Action::CloseOverlay,
+            KeyCode::Enter => Action::Confirm,
+            KeyCode::Up => Action::ModalUp,
+            KeyCode::Down => Action::ModalDown,
+            KeyCode::Left => Action::ModalLeft,
+            KeyCode::Right => Action::ModalRight,
+            _ => Action::None,
+        };
+    }
+
+    if overlay == Overlay::DownloadPathEditModal {
+        // 路径行编辑：字符直接进输入框，左右键移动光标，回车确认，Esc 取消。
+        return match ev.code {
+            KeyCode::Esc => Action::CloseOverlay,
+            KeyCode::Enter => Action::Confirm,
+            KeyCode::Backspace => Action::FolderBackspace,
+            KeyCode::Left => Action::ModalLeft,
+            KeyCode::Right => Action::ModalRight,
+            KeyCode::Char(ch) => {
+                if ev.modifiers.contains(KeyModifiers::CONTROL) || ch.is_control() {
+                    Action::None
+                } else {
+                    Action::FolderChar(ch)
+                }
+            }
+            _ => Action::None,
+        };
+    }
+
     if overlay == Overlay::EqModal {
         if keybind_matches(&config.keybind_fullscreen_eq_reset, ev) {
             return Action::EqResetDefault;
@@ -154,6 +227,12 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay, config: &Config) -> Action {
 
     if keybind_matches(&config.keybind_fullscreen_eq, ev) {
         return Action::OpenEqModal;
+    }
+
+    // 下载（默认 Ctrl+D）：必须排在下面"与修饰键无关"的 match 之前，
+    // 否则 Ctrl+D 会落进 Char('d') 之类的分支。
+    if keybind_matches(&config.keybind_download_fullscreen, ev) {
+        return Action::ToggleDownload;
     }
 
     if ev.modifiers.contains(KeyModifiers::CONTROL) {
@@ -243,13 +322,28 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay, config: &Config) -> Action {
 }
 
 pub fn map_mouse(ev: MouseEvent) -> Action {
-    if let MouseEventKind::Down(MouseButton::Left) = ev.kind {
-        return Action::MouseClick {
+    match ev.kind {
+        MouseEventKind::Down(MouseButton::Left) => Action::MouseClick {
             col: ev.column,
             row: ev.row,
-        };
+        },
+        MouseEventKind::ScrollUp => Action::MouseScroll {
+            col: ev.column,
+            row: ev.row,
+            forward: false,
+        },
+        MouseEventKind::ScrollDown => Action::MouseScroll {
+            col: ev.column,
+            row: ev.row,
+            forward: true,
+        },
+        MouseEventKind::Drag(MouseButton::Left) => Action::MouseDrag {
+            col: ev.column,
+            row: ev.row,
+        },
+        MouseEventKind::Up(MouseButton::Left) => Action::MouseUp,
+        _ => Action::None,
     }
-    Action::None
 }
 
 fn keybind_matches(binding: &str, key: KeyEvent) -> bool {
@@ -428,5 +522,102 @@ fn key_code_to_keybind_token(code: KeyCode) -> Option<String> {
         }
         KeyCode::Esc => Some("Esc".to_string()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{MouseEvent, MouseEventKind};
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// 鼠标事件映射：滚轮与拖动都要带坐标传给事件循环（此前只认左键按下）。
+    #[test]
+    fn mouse_mapping_covers_wheel_drag_and_release() {
+        assert_eq!(
+            map_mouse(mouse(MouseEventKind::ScrollDown, 3, 4)),
+            Action::MouseScroll {
+                col: 3,
+                row: 4,
+                forward: true
+            }
+        );
+        assert_eq!(
+            map_mouse(mouse(MouseEventKind::ScrollUp, 3, 4)),
+            Action::MouseScroll {
+                col: 3,
+                row: 4,
+                forward: false
+            }
+        );
+        assert_eq!(
+            map_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 5, 6)),
+            Action::MouseDrag { col: 5, row: 6 }
+        );
+        assert_eq!(
+            map_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 5, 6)),
+            Action::MouseUp
+        );
+        assert_eq!(
+            map_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 1, 2)),
+            Action::MouseClick { col: 1, row: 2 }
+        );
+        assert_eq!(map_mouse(mouse(MouseEventKind::Moved, 1, 2)), Action::None);
+    }
+
+    fn esc() -> KeyEvent {
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    }
+
+    /// 全屏页 Ctrl+D 必须映射成下载动作（且不能被下面"与修饰键无关"的
+    /// `match ev.code` 分支吃掉）。
+    #[test]
+    fn ctrl_d_maps_to_toggle_download() {
+        let config = crate::tmplayer::data::config::Config::default();
+        assert_eq!(
+            config.keybind_download_fullscreen, "Ctrl+D",
+            "默认键位变了？"
+        );
+
+        let ev = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(map_key(ev, Overlay::None, &config), Action::ToggleDownload);
+    }
+
+    /// 设置类弹窗里的 Esc 必须走"关闭弹窗"而不是退出全屏页。
+    ///
+    /// 曾经漏了 LyricsSettingsModal 的分支，Esc 于是落到默认的 Action::Quit，
+    /// 在歌词浮窗子页按 Esc 会直接把全屏页关掉。
+    #[test]
+    fn esc_in_settings_submodals_closes_the_modal() {
+        let config = crate::tmplayer::data::config::Config::default();
+
+        for overlay in [
+            Overlay::SettingsModal,
+            Overlay::BarSettingsModal,
+            Overlay::LocalAudioSettingsModal,
+            Overlay::LyricsSettingsModal,
+            Overlay::DownloadSettingsModal,
+            Overlay::DownloadPathEditModal,
+            Overlay::HelpModal,
+            Overlay::AboutModal,
+            Overlay::EqModal,
+        ] {
+            assert_eq!(
+                map_key(esc(), overlay, &config),
+                Action::CloseOverlay,
+                "{overlay:?} 里 Esc 应该是返回上一级"
+            );
+        }
+
+        // 没有弹窗时 Esc 才是退出全屏页。
+        assert_eq!(map_key(esc(), Overlay::None, &config), Action::Quit);
     }
 }

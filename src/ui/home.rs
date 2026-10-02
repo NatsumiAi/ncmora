@@ -36,23 +36,43 @@ pub fn draw_home(frame: &mut Frame, app: &mut App) {
         ])
         .split(size);
 
-    let (content_area, hint_area) = if app.config.show_hints {
-        let split = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(1)])
-            .split(rows[0]);
-        (split[0], split[1])
+    // 提示行叠在内容之上，不从内容区扣高度：否则开关"显示提示"会把
+    // 整页（含歌词框）挤上去一行。
+    let content_area = rows[0];
+    let lyrics_area = if app.config.page_lyrics {
+        page_lyrics::overlay_panel_area(content_area, app.page_lyrics_pos())
     } else {
-        (rows[0], Rect::default())
+        Rect::default()
+    };
+
+    // 提示留在内容区最后一行。歌词框贴在该区右下角，故提示宽度收窄到
+    // 歌词框左边缘为止——否则会横穿它、盖掉其边框。
+    let hint_area = if app.config.show_hints && content_area.height > 0 {
+        let width = if lyrics_area.height > 0 {
+            lyrics_area.x.saturating_sub(content_area.x)
+        } else {
+            content_area.width
+        };
+        if width > 0 {
+            Rect {
+                x: content_area.x,
+                y: content_area.y + content_area.height - 1,
+                width,
+                height: 1,
+            }
+        } else {
+            Rect::default()
+        }
+    } else {
+        Rect::default()
     };
 
     draw_tiles(frame, app, content_area);
-    if app.config.page_lyrics {
-        let panel_area = page_lyrics::overlay_panel_area(content_area);
-        page_lyrics::draw_page_lyrics_panel(frame, app, panel_area);
-    }
     if app.config.show_hints {
         draw_home_hint(frame, app, hint_area);
+    }
+    if lyrics_area.height > 0 {
+        page_lyrics::draw_page_lyrics_overlay(frame, app, content_area);
     }
     if app.home_sidebar.is_visible() {
         draw_home_sidebar(frame, app, rows[0]);
@@ -165,7 +185,8 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
             continue;
         }
 
-        let text_rows = if inner_rect.height >= 4 { 2 } else { 1 };
+        // 文字只占底部一行，空出来的那行让封面吃掉。
+        let text_rows = 1;
         let cover_height = inner_rect.height.saturating_sub(text_rows);
         let cover_rect = Rect {
             x: inner_rect.x,
@@ -197,10 +218,7 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
             );
         }
 
-        let (title, subtitle) = {
-            let tile = &app.home.tiles[index];
-            (tile.title.clone(), tile.subtitle.clone())
-        };
+        let title = app.home.tiles[index].title.clone();
 
         let title_style = if focused {
             Style::default()
@@ -209,12 +227,8 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             Style::default().fg(app.theme.color_text())
         };
-        let subtitle_style = Style::default().fg(app.theme.color_subtext());
 
-        let mut lines = vec![Line::from(Span::styled(title, title_style))];
-        if text_rows > 1 {
-            lines.push(Line::from(Span::styled(subtitle, subtitle_style)));
-        }
+        let lines = vec![Line::from(Span::styled(title, title_style))];
 
         let content = Paragraph::new(lines)
             .wrap(Wrap { trim: true })
@@ -237,6 +251,10 @@ fn draw_home_hint(frame: &mut Frame, app: &App, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+
+    // 提示行是叠在卡片网格之上的，先清底再写，避免与卡片字符重叠。
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(base_bg_style(app)), area);
 
     let text = match app.config.language {
         Language::Zh => format!(
@@ -416,6 +434,17 @@ fn draw_home_sidebar_section(
     if area.width < 6 || area.height < 3 {
         return;
     }
+
+    // 整块分区都要能接住滚轮：列表短时下方空白处也属于该分区。
+    app.push_home_sidebar_section_hit(
+        crate::app::HitRect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: area.height,
+        },
+        section,
+    );
 
     let section_focused = app.home_sidebar.expanded && app.home_sidebar.focused_section == section;
     let section_title_style = if section_focused {

@@ -22,7 +22,22 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
 
-const HELP_MODAL_ITEMS: usize = 14;
+/// 子页的上一级：挂在设置弹窗下面的这些弹窗，Esc 应该回到设置弹窗，
+/// 而不是直接关掉整个弹窗（更不是退出全屏页）。`None` 表示没有上一级。
+fn settings_parent(overlay: Overlay) -> Option<Overlay> {
+    matches!(
+        overlay,
+        Overlay::AcoustIdModal
+            | Overlay::BarSettingsModal
+            | Overlay::LocalAudioSettingsModal
+            | Overlay::LyricsSettingsModal
+            | Overlay::DownloadSettingsModal
+            | Overlay::DownloadPathEditModal
+            | Overlay::HelpModal
+            | Overlay::AboutModal
+    )
+    .then_some(Overlay::SettingsModal)
+}
 
 fn accept_key_event(kind: KeyEventKind) -> bool {
     kind == KeyEventKind::Press
@@ -37,20 +52,15 @@ fn sync_playlists_when_viewing_playback(app: &mut AppState) {
 }
 
 fn clear_spectrum(app: &mut AppState) {
-    let bar_len = app.spectrum.bars.len().max(1);
-    app.spectrum.bars = vec![0.0; bar_len];
-    app.spectrum.bars_left = vec![0.0; bar_len];
-    app.spectrum.bars_right = vec![0.0; bar_len];
-    app.spectrum.stereo_left = [0.0; 64];
-    app.spectrum.stereo_right = [0.0; 64];
+    app.spectrum.bars.fill(0.0);
+    app.spectrum.bars_left.fill(0.0);
+    app.spectrum.bars_right.fill(0.0);
 }
 
 fn has_spectrum_data(app: &AppState) -> bool {
     app.spectrum.bars.iter().any(|&v| v > 0.0)
         || app.spectrum.bars_left.iter().any(|&v| v > 0.0)
         || app.spectrum.bars_right.iter().any(|&v| v > 0.0)
-        || app.spectrum.stereo_left.iter().any(|&v| v > 0.0)
-        || app.spectrum.stereo_right.iter().any(|&v| v > 0.0)
 }
 
 fn map_host_state(state: HostPlaybackState) -> PlaybackState {
@@ -78,6 +88,10 @@ fn host_config_sync_from_app(app: &AppState) -> HostConfigSync {
         language: app.language,
         graphics_protocol: app.config.graphics_protocol,
         page_lyrics: app.config.page_lyrics,
+        page_lyrics_drag: app.config.page_lyrics_drag,
+        page_lyrics_snap: app.config.page_lyrics_snap,
+        page_lyrics_pos_x: app.config.page_lyrics_pos_x,
+        page_lyrics_pos_y: app.config.page_lyrics_pos_y,
         audio_quality: match app.config.audio_quality {
             AudioQuality::Standard => crate::data::config::AudioQuality::Standard,
             AudioQuality::Higher => crate::data::config::AudioQuality::Higher,
@@ -90,15 +104,24 @@ fn host_config_sync_from_app(app: &AppState) -> HostConfigSync {
             AudioQuality::Jymaster => crate::data::config::AudioQuality::Jymaster,
         },
         eq_bands_db: app.config.eq_bands_db,
+        download_audio_quality: match app.config.download_audio_quality {
+            AudioQuality::Standard => crate::data::config::AudioQuality::Standard,
+            AudioQuality::Higher => crate::data::config::AudioQuality::Higher,
+            AudioQuality::Exhigh => crate::data::config::AudioQuality::Exhigh,
+            AudioQuality::Lossless => crate::data::config::AudioQuality::Lossless,
+            AudioQuality::Hires => crate::data::config::AudioQuality::Hires,
+            AudioQuality::Jyeffect => crate::data::config::AudioQuality::Jyeffect,
+            AudioQuality::Sky => crate::data::config::AudioQuality::Sky,
+            AudioQuality::Dolby => crate::data::config::AudioQuality::Dolby,
+            AudioQuality::Jymaster => crate::data::config::AudioQuality::Jymaster,
+        },
+        download_path: app.config.download_path.clone(),
         playback_memory: app.config.playback_memory,
         vip_audio_unlocked: app.vip_audio_unlocked,
         show_hints: app.config.show_hints,
+        small_window_display: app.config.small_window_display,
         home_more_recommend: app.config.home_more_recommend,
-        visualize: match app.config.visualize {
-            VisualizeMode::Off => crate::data::config::VisualizeMode::Off,
-            VisualizeMode::Bars => crate::data::config::VisualizeMode::Bars,
-            VisualizeMode::Oscilloscope => crate::data::config::VisualizeMode::Oscilloscope,
-        },
+        visualize: app.config.visualize,
         super_smooth_bar: app.config.super_smooth_bar,
         bars_gap: app.config.bars_gap,
         bar_number: match app.config.bar_number {
@@ -130,6 +153,10 @@ fn apply_host_config_sync(app: &mut AppState, config: HostConfigSync) {
     app.config.album_border = config.album_border;
     app.language = config.language;
     app.config.page_lyrics = config.page_lyrics;
+    app.config.page_lyrics_drag = config.page_lyrics_drag;
+    app.config.page_lyrics_snap = config.page_lyrics_snap;
+    app.config.page_lyrics_pos_x = config.page_lyrics_pos_x.clamp(0.0, 1.0);
+    app.config.page_lyrics_pos_y = config.page_lyrics_pos_y.clamp(0.0, 1.0);
     app.vip_audio_unlocked = config.vip_audio_unlocked;
     app.config.audio_quality = match config.audio_quality {
         crate::data::config::AudioQuality::Standard => AudioQuality::Standard,
@@ -143,16 +170,34 @@ fn apply_host_config_sync(app: &mut AppState, config: HostConfigSync) {
         crate::data::config::AudioQuality::Jymaster => AudioQuality::Jymaster,
     }
     .clamp_for_vip(app.vip_audio_unlocked);
+    app.config.download_audio_quality = match config.download_audio_quality {
+        crate::data::config::AudioQuality::Standard => AudioQuality::Standard,
+        crate::data::config::AudioQuality::Higher => AudioQuality::Higher,
+        crate::data::config::AudioQuality::Exhigh => AudioQuality::Exhigh,
+        crate::data::config::AudioQuality::Lossless => AudioQuality::Lossless,
+        crate::data::config::AudioQuality::Hires => AudioQuality::Hires,
+        crate::data::config::AudioQuality::Jyeffect => AudioQuality::Jyeffect,
+        crate::data::config::AudioQuality::Sky => AudioQuality::Sky,
+        crate::data::config::AudioQuality::Dolby => AudioQuality::Dolby,
+        crate::data::config::AudioQuality::Jymaster => AudioQuality::Jymaster,
+    }
+    .clamp_for_vip(app.vip_audio_unlocked);
+    // 路径非法时保留本地的修改前值（宿主侧也会再校验一遍）。
+    if config.download_path != app.config.download_path
+        && config
+            .download_path
+            .as_deref()
+            .is_none_or(|raw| crate::app::download::parse_download_path(raw).is_ok())
+    {
+        app.config.download_path = config.download_path.clone();
+    }
     app.config.eq_bands_db = config.eq_bands_db;
     app.eq.bands_db = config.eq_bands_db;
     app.config.playback_memory = config.playback_memory;
     app.config.show_hints = config.show_hints;
+    app.config.small_window_display = config.small_window_display;
     app.config.home_more_recommend = config.home_more_recommend;
-    app.config.visualize = match config.visualize {
-        crate::data::config::VisualizeMode::Off => VisualizeMode::Off,
-        crate::data::config::VisualizeMode::Bars => VisualizeMode::Bars,
-        crate::data::config::VisualizeMode::Oscilloscope => VisualizeMode::Oscilloscope,
-    };
+    app.config.visualize = config.visualize;
     app.config.super_smooth_bar = config.super_smooth_bar;
     app.config.bars_gap = config.bars_gap;
     app.config.bar_number = match config.bar_number {
@@ -169,6 +214,9 @@ fn apply_host_config_sync(app: &mut AppState, config: HostConfigSync) {
         crate::data::config::BarChannels::Mono => BarChannels::Mono,
     };
     app.config.bar_channel_reverse = config.bar_channel_reverse;
+
+    // 下载路径可能刚被宿主改过：重算本地根目录（Gray 状态与 `Null` 显示都看它）。
+    app.refresh_download_root();
 }
 
 async fn save_and_sync_host_config(
@@ -417,6 +465,16 @@ fn apply_host_runtime_snapshot(app: &mut AppState, runtime: HostPlaybackRuntimeS
         changed = true;
     }
 
+    if app.player.seeking != runtime.seeking {
+        app.player.seeking = runtime.seeking;
+        changed = true;
+    }
+
+    if app.download_state != runtime.download {
+        app.download_state = runtime.download;
+        changed = true;
+    }
+
     if app.player.position != runtime.position {
         app.player.position = runtime.position;
         changed = true;
@@ -500,6 +558,9 @@ pub async fn run(
 
     let mut last_layout = UiLayout::default();
 
+    // 示波器读宿主播放链路上的 PCM 抽头环。独立运行（无宿主）时为空，只画中线。
+    app.pcm_ring = host_bridge.as_ref().map(|bridge| bridge.pcm_ring());
+
     // Initialize cava with the current desired config (best-effort).
     ensure_cava(
         &mut cava,
@@ -567,55 +628,34 @@ pub async fn run(
             ensure_bar_buffers(app, bars);
         }
 
-        // spectrum update
-        if app.config.visualize == VisualizeMode::Off {
-            if has_spectrum_data(app) {
-                clear_spectrum(app);
+        // 频谱采集。示波器不走这里 —— 它在渲染时直接读 PCM 抽头环。但残留的
+        // cava 数据会让 has_spectrum_tail_motion() 长期为真，暂停后仍按高帧率
+        // 空转，所以切走时必须清零。
+        if app.config.visualize.needs_cava() {
+            let period = Duration::from_millis((1000 / app.config.spectrum_hz.max(1)) as u64);
+            if frame_start.duration_since(last_spectrum) >= period {
+                last_spectrum = frame_start;
                 state_changed = true;
-            }
-        } else if frame_start.duration_since(last_spectrum)
-            >= Duration::from_millis((1000 / app.config.spectrum_hz.max(1)) as u64)
-        {
-            last_spectrum = frame_start;
-            state_changed = true;
-
-            match app.config.visualize {
-                VisualizeMode::Off => clear_spectrum(app),
-                VisualizeMode::Bars => {
-                    if let Some(c) = cava.as_ref() {
+                match cava.as_ref() {
+                    Some(c) => {
                         let (l, r) = c.latest_stereo_bars();
                         app.spectrum.bars_left = l;
                         app.spectrum.bars_right = r;
                         let raw = c.latest_bars();
                         app.spectrum.bars = app.spectrum_bar_smoother.apply(&raw);
-                    } else {
-                        clear_spectrum(app);
                     }
-                }
-                VisualizeMode::Oscilloscope => {
-                    if let Some(c) = cava.as_ref() {
-                        let (l, r) = c.latest_stereo_bars();
-                        fill_fixed_bars(&mut app.spectrum.stereo_left, &l);
-                        fill_fixed_bars(&mut app.spectrum.stereo_right, &r);
-                        app.spectrum.bars = c.latest_bars();
-                    } else {
-                        clear_spectrum(app);
-                    }
-
-                    let dt = 1.0 / app.config.spectrum_hz.max(1) as f32;
-                    crate::tmplayer::render::oscilloscope_renderer::advance_phases(
-                        &mut app.spectrum.osc_phase_left,
-                        dt,
-                    );
-                    crate::tmplayer::render::oscilloscope_renderer::advance_phases(
-                        &mut app.spectrum.osc_phase_right,
-                        dt,
-                    );
+                    None => clear_spectrum(app),
                 }
             }
+        } else if has_spectrum_data(app) {
+            clear_spectrum(app);
+            state_changed = true;
         }
 
-        if app.player.mode == PlayMode::Idle && app.player.playback == PlaybackState::Playing {
+        if app.player.mode == PlayMode::Idle
+            && app.player.playback == PlaybackState::Playing
+            && !app.player.seeking
+        {
             let dt = frame_start.saturating_duration_since(app.last_frame);
             if dt > Duration::from_millis(0) {
                 let next = app.player.position.saturating_add(dt);
@@ -655,9 +695,11 @@ pub async fn run(
             needs_redraw = false;
         }
 
-        // The fullscreen loop runs on compio's single-threaded runtime. Keep
-        // frame pacing cooperative so streaming downloads and decoders can
-        // continue while a newly selected song is buffering.
+        // frame pacing
+        // 使用异步 sleep 而非 std::thread::sleep：本应用跑在单线程 compio 运行时上，
+        // 阻塞式 sleep 会让 executor/proactor（含流媒体下载任务）在整个睡眠期间停摆，
+        // 导致全屏页切到未缓存的下一首时下载冻结、播放卡在歌曲开头。
+        // 异步 sleep 会把执行权交还给运行时，后台下载得以持续推进。
         let elapsed = frame_start.elapsed();
         if elapsed < frame_dt {
             compio::time::sleep(frame_dt - elapsed).await;
@@ -671,10 +713,12 @@ pub async fn run(
     tui.exit()?;
     disable_raw_mode()?;
 
-    let exit = if app.request_host_settings_open {
-        crate::tmplayer::FullscreenExit::BackToHostOpenSettings
-    } else {
-        crate::tmplayer::FullscreenExit::BackToHost
+    let exit = match app.exit_request {
+        Some(exit) => exit,
+        None if app.request_host_settings_open => {
+            crate::tmplayer::FullscreenExit::BackToHostOpenSettings
+        }
+        None => crate::tmplayer::FullscreenExit::BackToHost,
     };
     Ok(exit)
 }
@@ -739,13 +783,13 @@ async fn handle_action(
             app.set_toast("Bye");
         }
         Action::OpenSettingsModal => {
-            app.settings_selected = app.settings_selected.min(9);
+            app.settings_selected = app.settings_selected.min(12);
             app.overlay = Overlay::SettingsModal;
         }
         Action::OpenHelpModal => {
             app.help_keybind_selected = app
                 .help_keybind_selected
-                .min(HELP_MODAL_ITEMS.saturating_sub(1));
+                .min(crate::tmplayer::ui::tui::help_item_count(app).saturating_sub(1));
             app.overlay = Overlay::HelpModal;
         }
         Action::OpenEqModal => {
@@ -772,33 +816,36 @@ async fn handle_action(
         Action::FolderChar(c) => {
             if app.overlay == Overlay::AcoustIdModal {
                 app.acoustid_input.push(c);
+            } else if app.overlay == Overlay::DownloadPathEditModal {
+                download_path_edit_insert(app, c);
             }
         }
         Action::FolderBackspace => {
             if app.overlay == Overlay::AcoustIdModal {
                 app.acoustid_input.pop();
+            } else if app.overlay == Overlay::DownloadPathEditModal {
+                download_path_edit_backspace(app);
             }
         }
         Action::CloseOverlay => {
             if app.overlay == Overlay::Playlist {
-                // close animation will be driven by ui
-                // actual state closed after fully slid out
-                // here just set target
-                app.playlist_slide_target_x = -(layout.left_width as i16);
+                // 面板状态立即关闭，滑出动画由 tick 推进到位。
+                app.start_playlist_slide(-(layout.left_width as i16));
                 app.overlay = Overlay::None;
-            } else if app.overlay == Overlay::AcoustIdModal
-                || app.overlay == Overlay::BarSettingsModal
-                || app.overlay == Overlay::LocalAudioSettingsModal
-                || app.overlay == Overlay::AboutModal
-            {
-                app.overlay = Overlay::SettingsModal;
+            } else if app.overlay == Overlay::DownloadPathEditModal {
+                // 路径编辑中的 Esc = 取消编辑（丢弃输入），回下载设置页。
+                app.download_path_edit = None;
+                app.overlay = Overlay::DownloadSettingsModal;
+            } else if let Some(parent) = settings_parent(app.overlay) {
+                // 设置类子页：回上一级，而不是直接退出全屏页。
+                app.overlay = parent;
             } else {
                 app.close_overlay();
             }
         }
         Action::TogglePlaylist => {
             if app.overlay == Overlay::Playlist {
-                app.playlist_slide_target_x = -(layout.left_width as i16);
+                app.start_playlist_slide(-(layout.left_width as i16));
                 app.overlay = Overlay::None;
             } else {
                 // 需求：打开 playlist 时聚焦当前播放的歌曲。
@@ -827,7 +874,7 @@ async fn handle_action(
                 }
                 app.overlay = Overlay::Playlist;
                 app.playlist_slide_x = -(layout.left_width as i16);
-                app.playlist_slide_target_x = 0;
+                app.start_playlist_slide(0);
             }
         }
         Action::Confirm => match app.overlay {
@@ -855,30 +902,43 @@ async fn handle_action(
                     app.overlay = Overlay::HelpModal;
                 }
                 6 => {
-                    apply_settings_delta(app, host_bridge, 1).await;
+                    app.lyrics_settings_selected = app.lyrics_settings_selected.min(2);
+                    app.overlay = Overlay::LyricsSettingsModal;
                 }
                 7 => {
                     apply_settings_delta(app, host_bridge, 1).await;
                 }
                 8 => {
-                    app.set_toast("Logout is unavailable in fullscreen");
+                    apply_settings_delta(app, host_bridge, 1).await;
                 }
                 9 => {
+                    apply_settings_delta(app, host_bridge, 1).await;
+                }
+                10 => {
+                    app.download_settings_selected =
+                        download_selectable_rows(app).first().copied().unwrap_or(1);
+                    app.download_reset_armed = false;
+                    app.download_path_edit = None;
+                    app.overlay = Overlay::DownloadSettingsModal;
+                }
+                11 => {
+                    app.set_toast("Logout is unavailable in fullscreen");
+                }
+                12 => {
                     app.overlay = Overlay::AboutModal;
                 }
                 _ => {}
             },
+            Overlay::DownloadSettingsModal => {
+                activate_download_settings_item(app, host_bridge).await;
+            }
+            Overlay::DownloadPathEditModal => {
+                commit_download_path_edit(app, host_bridge).await;
+            }
             Overlay::BarSettingsModal => match app.bar_settings_selected {
                 0 => {
-                    if crate::tmplayer::audio::cava::is_available() {
-                        app.config.visualize = app.config.visualize.cycle(1);
-                        save_and_sync_host_config(app, host_bridge).await;
-                    } else if app.config.visualize
-                        != crate::tmplayer::data::config::VisualizeMode::Off
-                    {
-                        app.config.visualize = crate::tmplayer::data::config::VisualizeMode::Off;
-                        save_and_sync_host_config(app, host_bridge).await;
-                    }
+                    app.config.visualize = app.config.visualize.cycle(1);
+                    save_and_sync_host_config(app, host_bridge).await;
                 }
                 1 => {
                     app.config.super_smooth_bar = !app.config.super_smooth_bar;
@@ -901,17 +961,31 @@ async fn handle_action(
                     save_and_sync_host_config(app, host_bridge).await;
                 }
                 6 => {
-                    app.config.page_lyrics = !app.config.page_lyrics;
-                    save_and_sync_host_config(app, host_bridge).await;
-                }
-                7 => {
                     app.config.audio_quality =
                         app.config.audio_quality.cycle(1, app.vip_audio_unlocked);
                     save_and_sync_host_config(app, host_bridge).await;
                 }
-                8 => {
+                7 => {
                     app.config.playback_memory = !app.config.playback_memory;
                     save_and_sync_host_config(app, host_bridge).await;
+                }
+                _ => {}
+            },
+            Overlay::LyricsSettingsModal => match app.lyrics_settings_selected {
+                0 => {
+                    app.config.page_lyrics = !app.config.page_lyrics;
+                    save_and_sync_host_config(app, host_bridge).await;
+                }
+                1 => {
+                    app.config.page_lyrics_drag = !app.config.page_lyrics_drag;
+                    save_and_sync_host_config(app, host_bridge).await;
+                }
+                2 => {
+                    // 拖动关闭时吸附无意义：灰置且不可改。
+                    if app.config.page_lyrics_drag {
+                        app.config.page_lyrics_snap = !app.config.page_lyrics_snap;
+                        save_and_sync_host_config(app, host_bridge).await;
+                    }
                 }
                 _ => {}
             },
@@ -975,18 +1049,27 @@ async fn handle_action(
         Action::PrevAlbum | Action::NextAlbum => (),
         Action::ModalUp => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 10;
+                let count = 13;
                 if app.settings_selected == 0 {
                     app.settings_selected = count - 1;
                 } else {
                     app.settings_selected -= 1;
                 }
+            } else if app.overlay == Overlay::DownloadSettingsModal {
+                move_download_selection(app, -1);
             } else if app.overlay == Overlay::BarSettingsModal {
-                let count = 9;
+                let count = 8;
                 if app.bar_settings_selected == 0 {
                     app.bar_settings_selected = count - 1;
                 } else {
                     app.bar_settings_selected -= 1;
+                }
+            } else if app.overlay == Overlay::LyricsSettingsModal {
+                let count = 3;
+                if app.lyrics_settings_selected == 0 {
+                    app.lyrics_settings_selected = count - 1;
+                } else {
+                    app.lyrics_settings_selected -= 1;
                 }
             } else if app.overlay == Overlay::LocalAudioSettingsModal {
                 let count = 5;
@@ -1003,8 +1086,12 @@ async fn handle_action(
                 }
                 sync_eq_config(app, host_bridge).await;
             } else if app.overlay == Overlay::HelpModal {
+                let count = crate::tmplayer::ui::tui::help_item_count(app);
+                if count == 0 {
+                    return Ok(());
+                }
                 if app.help_keybind_selected == 0 {
-                    app.help_keybind_selected = HELP_MODAL_ITEMS - 1;
+                    app.help_keybind_selected = count - 1;
                 } else {
                     app.help_keybind_selected -= 1;
                 }
@@ -1012,11 +1099,16 @@ async fn handle_action(
         }
         Action::ModalDown => {
             if app.overlay == Overlay::SettingsModal {
-                let count = 10;
+                let count = 13;
                 app.settings_selected = (app.settings_selected + 1) % count;
+            } else if app.overlay == Overlay::DownloadSettingsModal {
+                move_download_selection(app, 1);
             } else if app.overlay == Overlay::BarSettingsModal {
-                let count = 9;
+                let count = 8;
                 app.bar_settings_selected = (app.bar_settings_selected + 1) % count;
+            } else if app.overlay == Overlay::LyricsSettingsModal {
+                let count = 3;
+                app.lyrics_settings_selected = (app.lyrics_settings_selected + 1) % count;
             } else if app.overlay == Overlay::LocalAudioSettingsModal {
                 let count = 5;
                 app.local_audio_settings_selected = (app.local_audio_settings_selected + 1) % count;
@@ -1028,19 +1120,24 @@ async fn handle_action(
                 }
                 sync_eq_config(app, host_bridge).await;
             } else if app.overlay == Overlay::HelpModal {
-                app.help_keybind_selected = (app.help_keybind_selected + 1) % HELP_MODAL_ITEMS;
+                let count = crate::tmplayer::ui::tui::help_item_count(app);
+                if count > 0 {
+                    app.help_keybind_selected = (app.help_keybind_selected + 1) % count;
+                }
             }
         }
         Action::ModalLeft => {
             if app.overlay == Overlay::SettingsModal {
                 apply_settings_delta(app, host_bridge, -1).await;
+            } else if app.overlay == Overlay::DownloadSettingsModal {
+                apply_download_settings_delta(app, host_bridge, -1).await;
+            } else if app.overlay == Overlay::DownloadPathEditModal {
+                download_path_edit_move(app, -1);
             } else if app.overlay == Overlay::BarSettingsModal {
                 match app.bar_settings_selected {
                     0 => {
-                        if crate::tmplayer::audio::cava::is_available() {
-                            app.config.visualize = app.config.visualize.cycle(-1);
-                            save_and_sync_host_config(app, host_bridge).await;
-                        }
+                        app.config.visualize = app.config.visualize.cycle(-1);
+                        save_and_sync_host_config(app, host_bridge).await;
                     }
                     1 => {
                         app.config.super_smooth_bar = !app.config.super_smooth_bar;
@@ -1063,20 +1160,18 @@ async fn handle_action(
                         save_and_sync_host_config(app, host_bridge).await;
                     }
                     6 => {
-                        app.config.page_lyrics = !app.config.page_lyrics;
-                        save_and_sync_host_config(app, host_bridge).await;
-                    }
-                    7 => {
                         app.config.audio_quality =
                             app.config.audio_quality.cycle(-1, app.vip_audio_unlocked);
                         save_and_sync_host_config(app, host_bridge).await;
                     }
-                    8 => {
+                    7 => {
                         app.config.playback_memory = !app.config.playback_memory;
                         save_and_sync_host_config(app, host_bridge).await;
                     }
                     _ => {}
                 }
+            } else if app.overlay == Overlay::LyricsSettingsModal {
+                apply_lyrics_settings_delta(app, host_bridge, -1).await;
             } else if app.overlay == Overlay::LocalAudioSettingsModal {
                 apply_local_audio_settings_delta(app, -1);
             } else if app.overlay == Overlay::EqModal {
@@ -1091,13 +1186,15 @@ async fn handle_action(
         Action::ModalRight => {
             if app.overlay == Overlay::SettingsModal {
                 apply_settings_delta(app, host_bridge, 1).await;
+            } else if app.overlay == Overlay::DownloadSettingsModal {
+                apply_download_settings_delta(app, host_bridge, 1).await;
+            } else if app.overlay == Overlay::DownloadPathEditModal {
+                download_path_edit_move(app, 1);
             } else if app.overlay == Overlay::BarSettingsModal {
                 match app.bar_settings_selected {
                     0 => {
-                        if crate::tmplayer::audio::cava::is_available() {
-                            app.config.visualize = app.config.visualize.cycle(1);
-                            save_and_sync_host_config(app, host_bridge).await;
-                        }
+                        app.config.visualize = app.config.visualize.cycle(1);
+                        save_and_sync_host_config(app, host_bridge).await;
                     }
                     1 => {
                         app.config.super_smooth_bar = !app.config.super_smooth_bar;
@@ -1120,20 +1217,18 @@ async fn handle_action(
                         save_and_sync_host_config(app, host_bridge).await;
                     }
                     6 => {
-                        app.config.page_lyrics = !app.config.page_lyrics;
-                        save_and_sync_host_config(app, host_bridge).await;
-                    }
-                    7 => {
                         app.config.audio_quality =
                             app.config.audio_quality.cycle(1, app.vip_audio_unlocked);
                         save_and_sync_host_config(app, host_bridge).await;
                     }
-                    8 => {
+                    7 => {
                         app.config.playback_memory = !app.config.playback_memory;
                         save_and_sync_host_config(app, host_bridge).await;
                     }
                     _ => {}
                 }
+            } else if app.overlay == Overlay::LyricsSettingsModal {
+                apply_lyrics_settings_delta(app, host_bridge, 1).await;
             } else if app.overlay == Overlay::LocalAudioSettingsModal {
                 apply_local_audio_settings_delta(app, 1);
             } else if app.overlay == Overlay::EqModal {
@@ -1147,31 +1242,26 @@ async fn handle_action(
                 app.playlist_view.clamp_selected();
                 sync_playlists_when_viewing_playback(app);
 
+                // 单击只聚焦；400ms 内再点同一行才切歌（按条目序号判定，
+                // 与滚动窗口无关，聚焦本身可能引起列表滚动）。
+                let now = Instant::now();
+                let is_double = app.last_playlist_click.is_some_and(|(at, last)| {
+                    now.duration_since(at) <= Duration::from_millis(400) && last == idx
+                });
+                app.last_playlist_click = Some((now, idx));
+
+                if !is_double {
+                    return Ok(());
+                }
+
                 if let Some(bridge) = host_bridge.as_mut() {
                     (*bridge).play_queue_index(idx).await;
                     let snapshot = (*bridge).snapshot();
                     sync_from_host_snapshot(app, snapshot);
-                    return Ok(());
+                } else {
+                    // 本地模式：双击等价 Enter。
+                    Box::pin(handle_action(app, host_bridge, Action::Confirm, layout)).await?;
                 }
-
-                // double click => play
-                let now = Instant::now();
-                if let Some((at, last_col, last_row)) = app.last_mouse_click {
-                    if now.duration_since(at) <= Duration::from_millis(400) {
-                        // same row (best-effort)
-                        if last_row == (layout.playlist_list_inner.y + idx as u16) {
-                            return Box::pin(handle_action(
-                                app,
-                                host_bridge,
-                                Action::Confirm,
-                                layout,
-                            ))
-                            .await;
-                        }
-                        let _ = last_col;
-                    }
-                }
-                app.last_mouse_click = Some((now, 0, layout.playlist_list_inner.y + idx as u16));
             }
         }
         Action::TogglePlayPause => {
@@ -1235,6 +1325,8 @@ async fn handle_action(
         },
         Action::SetVolume(v) => match app.player.mode {
             PlayMode::Idle => {
+                // 音量条：按下即开始拖动，MouseDrag 持续跟随。
+                app.volume_drag = true;
                 let next = v.clamp(0.0, 1.0);
                 if let Some(bridge) = host_bridge.as_mut() {
                     (*bridge).set_volume(next);
@@ -1263,6 +1355,38 @@ async fn handle_action(
 
             app.set_toast("Like is unavailable in local mode");
         }
+        Action::ToggleDownload => {
+            if let Some(bridge) = host_bridge.as_mut() {
+                (*bridge).download_current();
+                // 立刻回显一次运行态：图标马上切到"下载中"，不用等下一帧。
+                let snapshot = (*bridge).runtime_snapshot();
+                apply_host_runtime_snapshot(app, snapshot);
+                return Ok(());
+            }
+
+            app.set_toast(crate::tmplayer::ui::tui::lang_text(
+                app,
+                "独立模式不支持下载",
+                "Download is unavailable in standalone mode",
+            ));
+        }
+        Action::OpenAuthorPage(index) => {
+            // 作者页归宿主（全屏页只有显示名，没有作者 ID）：记下请求退出与段序号，
+            // 宿主在关闭全屏页后按当前播放歌曲解析并打开。
+            if host_bridge.is_some() {
+                app.exit_request =
+                    Some(crate::tmplayer::FullscreenExit::BackToHostOpenAuthor(index));
+            } else {
+                app.set_toast("Author page is unavailable in standalone mode");
+            }
+        }
+        Action::OpenAlbumPage => {
+            if host_bridge.is_some() {
+                app.exit_request = Some(crate::tmplayer::FullscreenExit::BackToHostOpenAlbum);
+            } else {
+                app.set_toast("Album page is unavailable in standalone mode");
+            }
+        }
         Action::SeekToFraction(r) => {
             if let Some(bridge) = host_bridge.as_mut() {
                 (*bridge).seek_to_ratio(r);
@@ -1286,6 +1410,81 @@ async fn handle_action(
             // map click to controls/progress/volume/playlist
             if let Some(a) = crate::tmplayer::ui::tui::hit_test(layout, app, col, row) {
                 Box::pin(handle_action(app, host_bridge, a, layout)).await?;
+            }
+        }
+        Action::MouseScroll { col, row, forward } => {
+            // 弹窗（设置/播放设置/歌词浮窗/本地音频/按键提示/EQ）打开时：
+            // 滚轮切换聚焦行，与 Up/Down 同效。
+            if app.overlay != Overlay::None && app.overlay != Overlay::Playlist {
+                let action = if forward {
+                    Action::ModalDown
+                } else {
+                    Action::ModalUp
+                };
+                Box::pin(handle_action(app, host_bridge, action, layout)).await?;
+                return Ok(());
+            }
+
+            // 侧边栏（播放列表面板）：滚轮滚动聚焦。
+            if crate::tmplayer::ui::tui::wheel_over_playlist(layout, app, col, row) {
+                let action = if forward {
+                    Action::PlaylistDown
+                } else {
+                    Action::PlaylistUp
+                };
+                Box::pin(handle_action(app, host_bridge, action, layout)).await?;
+            }
+        }
+        Action::MouseDrag { col, .. } => {
+            // 按住音量条拖动：只要起点落在条内，之后拖着走（哪怕拖出条外）
+            // 都继续改音量，不在拖动中途要求光标还在条上。
+            if app.volume_drag
+                && let Some(volume) = crate::tmplayer::ui::tui::volume_for_drag(layout, col)
+            {
+                app.player.volume = volume;
+                if let Some(bridge) = host_bridge.as_mut() {
+                    (*bridge).set_volume(volume);
+                }
+            }
+        }
+        Action::MouseUp => {
+            app.volume_drag = false;
+        }
+        Action::ModalSelect(idx) => {
+            let Some(rect) = layout.modal_rows.get(idx) else {
+                return Ok(());
+            };
+
+            match app.overlay {
+                Overlay::SettingsModal => app.settings_selected = idx,
+                Overlay::BarSettingsModal => app.bar_settings_selected = idx,
+                Overlay::LocalAudioSettingsModal => app.local_audio_settings_selected = idx,
+                Overlay::LyricsSettingsModal => {
+                    // 开关行：左键直接改值（与宿主一致），不走双击。
+                    app.lyrics_settings_selected = idx.min(2);
+                    apply_lyrics_settings_delta(app, host_bridge, 1).await;
+                    return Ok(());
+                }
+                Overlay::DownloadSettingsModal => {
+                    // 与歌词浮窗同构：单击即执行（音质改值 / 路径进编辑 / 恢复默认两段式）。
+                    app.download_settings_selected = idx.min(2);
+                    activate_download_settings_item(app, host_bridge).await;
+                    return Ok(());
+                }
+                Overlay::HelpModal => app.help_keybind_selected = idx,
+                _ => return Ok(()),
+            }
+
+            // 同一行 400ms 内再点一次 = Enter（与播放列表双击同款判定）。
+            // 列归一化到行首，行内任意位置都算同一个目标。
+            let now = Instant::now();
+            let is_double = app.last_mouse_click.is_some_and(|(at, col, row)| {
+                now.duration_since(at) <= Duration::from_millis(400)
+                    && (col, row) == (rect.x, rect.y)
+            });
+            app.last_mouse_click = Some((now, rect.x, rect.y));
+            if is_double {
+                return Box::pin(handle_action(app, host_bridge, Action::Confirm, layout)).await;
             }
         }
         Action::None => {}
@@ -1375,17 +1574,212 @@ async fn apply_settings_delta(
                 save_and_sync_host_config(app, host_bridge).await;
             }
         }
+        // “歌词浮窗...”是可进入项：左右键不改变配置。
+        6 => {}
         // Show hints
-        6 => {
+        7 => {
             if delta != 0 {
                 app.config.show_hints = !app.config.show_hints;
                 save_and_sync_host_config(app, host_bridge).await;
             }
         }
+        // Small window display
+        8 => {
+            if delta != 0 {
+                app.config.small_window_display = !app.config.small_window_display;
+                save_and_sync_host_config(app, host_bridge).await;
+            }
+        }
         // Home more recommendations
-        7 => {
+        9 => {
             if delta != 0 {
                 app.config.home_more_recommend = !app.config.home_more_recommend;
+                save_and_sync_host_config(app, host_bridge).await;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 下载设置页的可选中行：下载不可用时只灰置「音质」——路径行是自救入口，
+/// 「恢复默认」是把显式 `Null` / 无家目录状态拉回来的出口。
+fn download_selectable_rows(app: &AppState) -> Vec<usize> {
+    (0..3)
+        .filter(|row| app.download_enabled() || *row != 0)
+        .collect()
+}
+
+fn move_download_selection(app: &mut AppState, delta: i32) {
+    let rows = download_selectable_rows(app);
+    if rows.is_empty() || delta == 0 {
+        return;
+    }
+    let current = rows
+        .iter()
+        .position(|row| *row == app.download_settings_selected)
+        .unwrap_or(0) as i32;
+    let next = (current + delta).rem_euclid(rows.len() as i32) as usize;
+    app.download_settings_selected = rows[next];
+    // 换行即撤下待确认态：恢复默认必须连着选两次同一个地方。
+    app.download_reset_armed = false;
+}
+
+/// 下载设置页的「执行」：Enter / 左右键 / 双击共用。
+async fn activate_download_settings_item(
+    app: &mut AppState,
+    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+) {
+    match app.download_settings_selected {
+        0 => apply_download_settings_delta(app, host_bridge, 1).await,
+        1 => begin_download_path_edit(app),
+        2 => activate_download_reset(app, host_bridge).await,
+        _ => {}
+    }
+}
+
+/// 音质行：与播放设置同一套可选值（按会员放开）。
+async fn apply_download_settings_delta(
+    app: &mut AppState,
+    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+    delta: i32,
+) {
+    if delta == 0 || app.download_settings_selected != 0 || !app.download_enabled() {
+        return;
+    }
+    let next = app
+        .config
+        .download_audio_quality
+        .cycle(delta, app.vip_audio_unlocked);
+    if next != app.config.download_audio_quality {
+        app.config.download_audio_quality = next;
+        save_and_sync_host_config(app, host_bridge).await;
+    }
+}
+
+/// 「恢复默认」两段式：首次进入待确认态，再选一次才写回默认值。
+///
+/// 下载不可用（显式 `Null` / 宿主没有可写位置）时也允许：它就是那个出口。
+async fn activate_download_reset(
+    app: &mut AppState,
+    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+) {
+    if !app.download_reset_armed {
+        // 待确认态由行内文字（「确认恢复」+ 警戒色）表达，不再弹提示。
+        app.download_reset_armed = true;
+        return;
+    }
+
+    app.download_reset_armed = false;
+    app.config.download_audio_quality =
+        crate::tmplayer::data::config::default_download_audio_quality();
+    app.config.download_path = None;
+    save_and_sync_host_config(app, host_bridge).await;
+    app.refresh_download_root();
+}
+
+/// 进入路径行的行内编辑（独立的 overlay，字符按键因此直接进输入框）。
+fn begin_download_path_edit(app: &mut AppState) {
+    let current = app
+        .download_root
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| app.download_display_path());
+    app.download_path_edit = Some(crate::app::DownloadPathEdit {
+        cursor: current.chars().count(),
+        buffer: current,
+        window_col: 0,
+    });
+    app.overlay = Overlay::DownloadPathEditModal;
+}
+
+fn char_to_byte_index(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .nth(char_index)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len())
+}
+
+fn download_path_edit_insert(app: &mut AppState, ch: char) {
+    let Some(edit) = app.download_path_edit.as_mut() else {
+        return;
+    };
+    if edit.cursor >= 4096 {
+        return;
+    }
+    let index = char_to_byte_index(&edit.buffer, edit.cursor);
+    edit.buffer.insert(index, ch);
+    edit.cursor += 1;
+}
+
+fn download_path_edit_backspace(app: &mut AppState) {
+    let Some(edit) = app.download_path_edit.as_mut() else {
+        return;
+    };
+    if edit.cursor == 0 {
+        return;
+    }
+    let index = char_to_byte_index(&edit.buffer, edit.cursor - 1);
+    edit.buffer.remove(index);
+    edit.cursor -= 1;
+}
+
+fn download_path_edit_move(app: &mut AppState, delta: i32) {
+    let Some(edit) = app.download_path_edit.as_mut() else {
+        return;
+    };
+    let last = edit.buffer.chars().count() as i32;
+    edit.cursor = (edit.cursor as i32 + delta).clamp(0, last) as usize;
+}
+
+/// 回车确认：非法（空 / 非绝对 / 不可写）就保留修改前的值，只弹一次 toast。
+async fn commit_download_path_edit(
+    app: &mut AppState,
+    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+) {
+    let Some(edit) = app.download_path_edit.take() else {
+        return;
+    };
+    let raw = edit.buffer.trim().to_string();
+    app.overlay = Overlay::DownloadSettingsModal;
+
+    match crate::app::download::parse_download_path(&raw) {
+        Ok(crate::app::download::DownloadPathChoice::Disabled) => {
+            app.config.download_path = Some(crate::app::download::DOWNLOAD_PATH_NULL.to_string());
+            save_and_sync_host_config(app, host_bridge).await;
+            app.refresh_download_root();
+        }
+        Ok(crate::app::download::DownloadPathChoice::Dir(path)) => {
+            app.config.download_path = Some(path.display().to_string());
+            save_and_sync_host_config(app, host_bridge).await;
+            app.refresh_download_root();
+        }
+        // 非法输入不弹提示：保留修改前的值，行里显示的就是那个旧值。
+        Err(_) => {}
+    }
+}
+
+/// “歌词浮窗”子页三行开关；吸附行只在拖动开启时可改。
+async fn apply_lyrics_settings_delta(
+    app: &mut AppState,
+    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+    delta: i32,
+) {
+    if delta == 0 {
+        return;
+    }
+
+    match app.lyrics_settings_selected {
+        0 => {
+            app.config.page_lyrics = !app.config.page_lyrics;
+            save_and_sync_host_config(app, host_bridge).await;
+        }
+        1 => {
+            app.config.page_lyrics_drag = !app.config.page_lyrics_drag;
+            save_and_sync_host_config(app, host_bridge).await;
+        }
+        2 => {
+            if app.config.page_lyrics_drag {
+                app.config.page_lyrics_snap = !app.config.page_lyrics_snap;
                 save_and_sync_host_config(app, host_bridge).await;
             }
         }
@@ -1491,24 +1885,15 @@ fn desired_bar_count(app: &AppState, layout: &UiLayout) -> usize {
 }
 
 fn desired_cava_config(app: &AppState, layout: &UiLayout) -> Option<CavaConfig> {
-    match app.config.visualize {
-        VisualizeMode::Off => None,
-        VisualizeMode::Bars => Some({
-            let bars = desired_bar_count(app, layout);
-            CavaConfig {
-                framerate_hz: app.config.spectrum_hz,
-                bars,
-                channels: CavaChannels::Mono,
-                reverse: app.config.bar_channel_reverse,
-            }
-        }),
-        VisualizeMode::Oscilloscope => Some(CavaConfig {
-            framerate_hz: app.config.spectrum_hz,
-            bars: 64,
-            channels: CavaChannels::Mono,
-            reverse: app.config.bar_channel_reverse,
-        }),
+    if !app.config.visualize.needs_cava() {
+        return None;
     }
+    Some(CavaConfig {
+        framerate_hz: app.config.spectrum_hz,
+        bars: desired_bar_count(app, layout),
+        channels: CavaChannels::Mono,
+        reverse: app.config.bar_channel_reverse,
+    })
 }
 
 fn ensure_cava(
@@ -1564,12 +1949,6 @@ fn max_display_bars(width_cells: u16, gap: bool) -> usize {
     }
 }
 
-fn fill_fixed_bars(dst: &mut [f32; 64], src: &[f32]) {
-    for i in 0..64 {
-        dst[i] = src.get(i).copied().unwrap_or(0.0);
-    }
-}
-
 fn pick_shuffle_index(pl: &crate::tmplayer::data::playlist::Playlist) -> Option<usize> {
     if pl.items.is_empty() {
         return None;
@@ -1593,13 +1972,31 @@ fn pick_shuffle_index(pl: &crate::tmplayer::data::playlist::Playlist) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::accept_key_event;
-    use crossterm::event::KeyEventKind;
+    use super::*;
 
+    /// 挂在设置弹窗下面的子页必须全部登记进 `settings_parent`：
+    /// 漏一个，那个页面按 Esc 就会直接退出全屏页（按键提示弹窗就这么漏过）。
     #[test]
-    fn ignores_key_repeat_and_release_events() {
-        assert!(accept_key_event(KeyEventKind::Press));
-        assert!(!accept_key_event(KeyEventKind::Repeat));
-        assert!(!accept_key_event(KeyEventKind::Release));
+    fn every_settings_child_returns_to_the_settings_modal() {
+        for child in [
+            Overlay::BarSettingsModal,
+            Overlay::LocalAudioSettingsModal,
+            Overlay::LyricsSettingsModal,
+            Overlay::HelpModal,
+            Overlay::AboutModal,
+            Overlay::AcoustIdModal,
+        ] {
+            assert_eq!(
+                settings_parent(child),
+                Some(Overlay::SettingsModal),
+                "{child:?} 应该回设置弹窗"
+            );
+        }
+
+        // 设置弹窗本身与 EQ/播放列表没有上一级。
+        assert_eq!(settings_parent(Overlay::SettingsModal), None);
+        assert_eq!(settings_parent(Overlay::EqModal), None);
+        assert_eq!(settings_parent(Overlay::Playlist), None);
+        assert_eq!(settings_parent(Overlay::None), None);
     }
 }

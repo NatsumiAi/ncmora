@@ -313,18 +313,22 @@ fn render_separator(f: &mut Frame, area: Rect, app: &AppState) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let line = "─".repeat(area.width as usize);
-    f.render_widget(
-        Paragraph::new(line).style(
-            Style::default()
-                .fg(app.theme.color_subtext())
-                .bg(app.theme.color_surface()),
-        ),
-        area,
-    );
+    // 左右各外扩一格，盖住面板自身的竖边框，让分隔线以 ├───┤ 与其接上。
+    let line_area = Rect {
+        x: area.x.saturating_sub(1),
+        y: area.y,
+        width: area.width.saturating_add(2),
+        height: area.height,
+    };
+    let style = Style::default()
+        .fg(app.theme.color_subtext())
+        .bg(app.theme.color_surface());
+    let dashes = usize::from(line_area.width).saturating_sub(2);
+    let line = format!("├{}┤", "─".repeat(dashes));
+    f.render_widget(Paragraph::new(line).style(style), line_area);
 }
 
-fn render_playlist_list(f: &mut Frame, area: Rect, app: &AppState) {
+fn render_playlist_list(f: &mut Frame, area: Rect, app: &mut AppState) {
     // Virtualized rendering to avoid lag on huge playlists.
     let footer_rows: u16 = 2;
     let list_rows = area.height.saturating_sub(footer_rows);
@@ -347,6 +351,10 @@ fn render_playlist_list(f: &mut Frame, area: Rect, app: &AppState) {
     } else {
         (start + visible).min(total)
     };
+
+    // 命中区要用同一份窗口映射：否则列表滚过一屏后点谁都不是谁。
+    app.playlist_list_scroll = start;
+    app.playlist_list_rows = visible;
 
     let mut lines: Vec<Line> = Vec::new();
 

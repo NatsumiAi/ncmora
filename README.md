@@ -26,8 +26,10 @@ NCMora is a Rust TUI for NetEase Cloud Music. It combines QR-code, account, and 
 - Home recommendations, daily recommended songs, and Private Radar
 - Duplicate regional entries such as `欧美私人雷达` are hidden from the home page
 - Playlists, albums, artists, and search
+- Concurrent unfiltered search for songs, artists, and playlists with stale-request protection
 - Search filters: `@single`, `@album`, `@list`, `@author`, and `@artist`
 - Streaming playback with a persistent queue and optional position restore
+- Single-task music downloads with configurable quality/path, cancellation, and embedded metadata
 - VIP-aware audio quality selection
 - Lyrics overlay with translated lyrics and NetEase YRC word-level timing
 - Full-screen TMPlayer playback with smooth per-character lyric highlighting, inspired by [Pigma](https://github.com/akirco/pigma)
@@ -35,7 +37,8 @@ NCMora is a Rust TUI for NetEase Cloud Music. It combines QR-code, account, and 
 - Home artwork is loaded only for visible cards; artwork outside the visible area is released
 - The current playback cover is deduplicated from queued tracks to reduce memory usage
 - Themes, language switching, transparent backgrounds, hints, and configurable keybindings
-- Built-in spectrum and oscilloscope visualizations
+- Built-in spectrum, real-PCM oscilloscope, vector/Lissajous, and LUFS visualizations
+- Compact small-window layouts and a draggable, edge-snapping lyrics overlay
 - Linux MPRIS and Windows media-control integration
 - Configurable audio and artwork-cache cleanup
 

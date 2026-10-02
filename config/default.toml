@@ -22,9 +22,18 @@ resume_last_position = false
 default_opening_title = ""
 language = "zh"
 page_lyrics = false
+page_lyrics_drag = true
+page_lyrics_snap = true
+page_lyrics_pos_x = 1.0
+page_lyrics_pos_y = 1.0
 audio_quality = "exhigh"
+# 下载音质（可选值与 audio_quality 一致，按 VIP 权限放开）。
+download_audio_quality = "exhigh"
+# 下载目录（绝对路径，默认 <系统音乐目录>/ncmora/；没有音乐目录时回退 ~/Music/ncmora/）。
+# download_path = "/home/user/Music/ncmora"
 playback_memory = false
 show_hints = true
+small_window_display = true
 home_more_recommend = false
 
 [cache]
@@ -60,3 +69,6 @@ keybind_fullscreen_toggle_play_pause = "Space"
 keybind_fullscreen_toggle_mode = "M"
 keybind_toggle_like_fullscreen = "L"
 keybind_toggle_like_collapsed = "Alt+L"
+keybind_small_window_toggle = "Alt+X"
+keybind_download = "Ctrl+Alt+D"
+keybind_download_fullscreen = "Ctrl+D"
