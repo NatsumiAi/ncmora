@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::LazyLock;
+use std::time::Duration;
+
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 特殊状态码集合（视为 200）
 static SPECIAL_STATUS_CODES: LazyLock<std::collections::HashSet<i64>> =
@@ -187,12 +190,23 @@ impl ApiClient {
         self.device_id.as_deref().unwrap_or(&DEVICE_ID)
     }
 
-    /// 发起 API 请求 - 核心方法
+    /// 发起 API 请求；HTTP 发送到完整响应 body 共用 30 秒 deadline。
     pub async fn request(
         &self,
         uri: &str,
         data: Value,
         options: RequestOption,
+    ) -> Result<ApiResponse> {
+        self.request_with_timeout(uri, data, options, NETWORK_TIMEOUT)
+            .await
+    }
+
+    async fn request_with_timeout(
+        &self,
+        uri: &str,
+        data: Value,
+        options: RequestOption,
+        timeout: Duration,
     ) -> Result<ApiResponse> {
         let endpoint = api_endpoint(uri)?;
         if !data.is_object() {
@@ -459,28 +473,35 @@ impl ApiClient {
             HeaderValue::from_static("application/x-www-form-urlencoded"),
         );
 
-        let response = self
-            .client
-            .post(&url)?
-            .headers(headers)
-            .body(body)
-            .send()
-            .await?;
+        // One budget covers connection, response headers and the entire body.
+        // Decode/business errors remain outside the network timeout boundary.
+        let (status_code, resp_cookies, bytes) = compio::time::timeout(timeout, async {
+            let response = self
+                .client
+                .post(&url)?
+                .headers(headers)
+                .body(body)
+                .send()
+                .await?;
 
-        // 处理响应 cookie
-        let resp_cookies: Vec<String> = response
-            .headers()
-            .get_all("set-cookie")
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .map(|s| {
-                // 移除 Domain 属性
-                DOMAIN_REGEX.replace_all(s, "").to_string()
-            })
-            .collect();
+            // 处理响应 cookie
+            let resp_cookies: Vec<String> = response
+                .headers()
+                .get_all("set-cookie")
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .map(|s| {
+                    // 移除 Domain 属性
+                    DOMAIN_REGEX.replace_all(s, "").to_string()
+                })
+                .collect();
 
-        let status_code = response.status().as_u16() as i64;
-        let bytes = response.bytes().await?;
+            let status_code = response.status().as_u16() as i64;
+            let bytes = response.bytes().await?;
+            Ok::<_, NcmError>((status_code, resp_cookies, bytes))
+        })
+        .await
+        .map_err(|_| NcmError::Timeout { timeout })??;
         let body = decode_response_body(&bytes, encrypted_response)?;
         response_from_body(status_code, body, resp_cookies)
     }
@@ -489,6 +510,76 @@ impl ApiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[compio::test]
+    async fn api_network_deadline_covers_headers_and_body() {
+        let timeout = Duration::from_millis(200);
+        for send_headers in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (release, wait_for_release) = mpsc::channel();
+            let server = compio::runtime::spawn_blocking(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = socket.read(&mut buffer).unwrap();
+                    assert_ne!(count, 0);
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                assert!(request.starts_with(b"POST /api/deadline HTTP/1.1\r\n"));
+                if send_headers {
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{",
+                        )
+                        .unwrap();
+                }
+                // Hold the connection open until the client returns; no busy loop.
+                let _ = wait_for_release.recv_timeout(Duration::from_secs(2));
+            });
+            let http = cyper::Client::builder().no_proxy().build().unwrap();
+            let api = ApiClient::new(None, http);
+            let result = compio::time::timeout(
+                Duration::from_secs(1),
+                api.request_with_timeout(
+                    "/api/deadline",
+                    serde_json::json!({}),
+                    RequestOption {
+                        crypto: CryptoType::Api,
+                        domain: Some(format!("http://{address}")),
+                        ..RequestOption::default()
+                    },
+                    timeout,
+                ),
+            )
+            .await;
+            let _ = release.send(());
+            server.await.unwrap();
+            let error = result
+                .expect("the request deadline must beat the watchdog")
+                .unwrap_err();
+            assert!(matches!(error, NcmError::Timeout { timeout: elapsed } if elapsed == timeout));
+            assert!(error.to_string().contains("complete response"));
+        }
+    }
+
+    #[test]
+    fn successful_response_preserves_status_body_and_cookies() {
+        let body = decode_response_body(b"{\"code\":200,\"data\":[1,2]}", false).unwrap();
+        let cookies = vec!["MUSIC_U=session; Path=/".to_string()];
+        let response = response_from_body(200, body.clone(), cookies.clone()).unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, body);
+        assert_eq!(response.cookie, cookies);
+    }
 
     #[test]
     fn api_uri_requires_nonempty_api_endpoint() {

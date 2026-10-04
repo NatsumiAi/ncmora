@@ -91,7 +91,10 @@ impl StreamingReader {
         if let Some(cookie) = cookie {
             request = request.header("Cookie", cookie)?;
         }
-        let response = error_for_status(request.send().await?)?;
+        let response = compio::time::timeout(Duration::from_secs(30), request.send())
+            .await
+            .context("streaming response headers timed out after 30s")??;
+        let response = error_for_status(response)?;
         let total = response
             .content_length()
             .context("Music no content_length!")?;

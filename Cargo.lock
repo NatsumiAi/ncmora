@@ -2444,6 +2444,7 @@ dependencies = [
  "base64",
  "cbc",
  "chrono",
+ "compio",
  "cyper",
  "ecb",
  "hex",

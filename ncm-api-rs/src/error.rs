@@ -7,6 +7,10 @@ pub enum NcmError {
     #[error("HTTP request failed: {0}")]
     Http(#[from] cyper::Error),
 
+    /// HTTP 发送到响应 body 完整读取共用一个 deadline
+    #[error("HTTP request timed out after {timeout:?} while waiting for the complete response")]
+    Timeout { timeout: std::time::Duration },
+
     /// API 业务错误（网易云返回非 200 状态码）
     #[error("API error (code={code}): {msg}")]
     Api { code: i64, msg: String },

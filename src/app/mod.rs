@@ -1,7 +1,9 @@
 mod api;
 pub(crate) mod controllers;
 pub(crate) mod download;
+mod latest_fetch;
 mod mpris_bridge;
+mod owned_task;
 pub(crate) mod player;
 mod startup;
 pub(crate) mod streaming;
@@ -35,8 +37,7 @@ use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use cyper::Client;
-use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use futures::{FutureExt, future::Shared};
+use futures::channel::mpsc as async_mpsc;
 use http::header;
 use image::DynamicImage;
 use ncm_api::ApiResponse;
@@ -48,6 +49,7 @@ use ratatui::widgets::{Block, Paragraph};
 use ratatui_image::StatefulImage;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
+use see::unsync as watch;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
@@ -57,12 +59,12 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthChar;
 
 use crate::data::atomic_file::write_atomic;
-use crate::data::persistence::{PersistenceHandle, PersistenceWorker};
+use crate::data::persistence::{PersistenceHandle, PersistenceKey, PersistenceWorker};
 use api::ApiState;
 use browse_controller::BrowseController;
 use controllers::SearchController;
@@ -73,6 +75,7 @@ use download::{
 use download_controller::DownloadController;
 use input_controller::InputController;
 use mpris_bridge::{MprisBridge, MprisControlEvent, MprisSyncPayload};
+use owned_task::{SharedTask, spawn_shared};
 use playback_controller::PlaybackController;
 use settings_controller::SettingsController;
 use startup::StartupInit;
@@ -337,7 +340,6 @@ impl LoginState {
     }
 }
 
-type SharedFuture<T> = Shared<Pin<Box<dyn Future<Output = Option<T>>>>>;
 type HomeSidebarTask = Pin<Box<dyn Future<Output = Option<Result<HomeSidebarFetch, String>>>>>;
 
 /// 侧边栏歌单的一次拉取结果。异步任务不持有 `&mut App`，
@@ -351,7 +353,7 @@ struct HomeSidebarFetch {
     collected: Vec<HomeSidebarPlaylist>,
 }
 
-type HomeSidebarFetchFuture = SharedFuture<Result<HomeSidebarFetch, String>>;
+type HomeSidebarFetchFuture = SharedTask<Result<HomeSidebarFetch, String>>;
 
 async fn fetch_home_sidebar_playlists(
     mut api: ApiState,
@@ -430,11 +432,11 @@ async fn fetch_home_sidebar_playlists(
         collected: parse_home_sidebar_playlists(&collected_response),
     })
 }
-type CoverFuture = SharedFuture<Arc<DynamicImage>>;
-type AsciiFuture = SharedFuture<String>;
+type CoverFuture = SharedTask<Arc<DynamicImage>>;
+type AsciiFuture = SharedTask<String>;
 
-type AuthorFetchFuture = SharedFuture<Result<AuthorFetch, String>>;
-/// 装箱后的任务体（`shot_and_share` 的入参类型）。
+type AuthorFetchFuture = SharedTask<Result<AuthorFetch, String>>;
+/// 装箱后的任务体（`spawn_shared` 的入参类型）。
 type AuthorFetchTask = Pin<Box<dyn Future<Output = Option<Result<AuthorFetch, String>>>>>;
 
 /// 作者页四个接口的原始回包（`None` = 该请求失败）；解析见 `App::build_author_page`。
@@ -447,7 +449,7 @@ struct AuthorResponses {
 
 /// 作者页的一次拉取结果：`AuthorState` 里除封面句柄与视口字段外的全部字段。
 ///
-/// 结果要经 `shot_and_share` 搬运，故实现 `Clone`（封面句柄是 `Shared`，克隆很廉价）。
+/// 结果要经 `spawn_shared` 搬运，故实现 `Clone`（封面句柄共享输出与取消所有权）。
 #[derive(Clone)]
 struct AuthorFetch {
     id: String,
@@ -488,7 +490,7 @@ async fn fetch_artist_responses(api: &ApiState, artist_id: &str) -> AuthorRespon
 
 /// 全屏页点作者名要拉的东西：先 `song/detail` 解析出段对应的作者 ID，再拉作者页数据。
 ///
-/// 整段不借 `&mut App`，交给 `shot_and_share` 后台跑，宿主循环照常重绘。
+/// 整段不借 `&mut App`，交给 `spawn_shared` 后台跑，宿主循环照常重绘。
 async fn fetch_author_page(
     api: ApiState,
     language: Language,
@@ -563,8 +565,8 @@ async fn fetch_song_page_refs(mut api: ApiState, song_id: &str) -> SongPageRefs 
     SongPageRefs { artists, album_id }
 }
 
-type PlaylistFetchFuture = SharedFuture<Result<PlaylistFetch, String>>;
-/// 装箱后的任务体（`shot_and_share` 的入参类型）。
+type PlaylistFetchFuture = SharedTask<Result<PlaylistFetch, String>>;
+/// 装箱后的任务体（`spawn_shared` 的入参类型）。
 type PlaylistFetchTask = Pin<Box<dyn Future<Output = Option<Result<PlaylistFetch, String>>>>>;
 
 /// 歌单页 / 专辑页的在途拉取：句柄旁边记下是哪种页面（成功后文案不同）。
@@ -684,7 +686,7 @@ struct LikedRefresh {
 
 /// 歌单页 / 专辑页的一次拉取结果：`PlaylistState` 里除封面句柄与视口字段外的全部字段。
 ///
-/// 结果要经 `shot_and_share` 搬运，故实现 `Clone`（封面句柄是 `Shared`，克隆很廉价）。
+/// 结果要经 `spawn_shared` 搬运，故实现 `Clone`（封面句柄共享输出与取消所有权）。
 #[derive(Clone)]
 struct PlaylistFetch {
     id: String,
@@ -731,7 +733,7 @@ async fn fetch_liked_refresh(
     Some(LikedRefresh { ids, profile })
 }
 
-/// 拉一次歌单页数据（不借 `&mut App`，可交给 `shot_and_share` 后台跑）。
+/// 拉一次歌单页数据（不借 `&mut App`，可交给 `spawn_shared` 后台跑）。
 ///
 /// `fallback_cover_url` 是搜索结果里那行的封面：接口没给封面时用它兜底。
 /// `liked_playlist_id` / `uid_hint` 只用于判断要不要顺带刷新「我喜欢的音乐」。
@@ -877,7 +879,7 @@ async fn fetch_album_page(
 
 /// 全屏页点专辑名要拉的东西：先 `song/detail` 解析出 `al.id`，再拉专辑页数据。
 ///
-/// 与作者页同理：整段不借 `&mut App`，交给 `shot_and_share` 后台跑；
+/// 与作者页同理：整段不借 `&mut App`，交给 `spawn_shared` 后台跑；
 /// 全屏页只有显示名，本机音频 / 无播放时解析不出来，错误写进占位页与状态行。
 async fn fetch_album_page_from_song(
     api: ApiState,
@@ -898,22 +900,12 @@ async fn fetch_album_page_from_song(
     fetch_album_page(api, language, album_id, None).await
 }
 
-fn shot_and_share<F>(fut: F) -> Shared<F>
-where
-    F: Future + Sized + 'static,
-    F::Output: Clone,
-{
-    let shared = fut.shared();
-    launch(shared.clone());
-    shared
-}
-
-pub fn peek_shared_future<T>(cover_bytes: &Option<SharedFuture<T>>) -> Option<&T> {
+pub fn peek_shared_future<T>(cover_bytes: &Option<SharedTask<T>>) -> Option<&T> {
     cover_bytes.as_ref()?.peek()?.as_ref()
 }
 
 /// 句柄不在 `Option` 里时的取值变体。
-fn peek_shared<T>(fut: &SharedFuture<T>) -> Option<&T> {
+fn peek_shared<T>(fut: &SharedTask<T>) -> Option<&T> {
     fut.peek()?.as_ref()
 }
 
@@ -955,9 +947,9 @@ async fn song_like_check_request(mut api: ApiState, song_id: String) -> Result<b
     parse_song_like_check_result(&response.body, &song_id).ok_or(())
 }
 
-type LikeToggleFuture = SharedFuture<Result<(), String>>;
-type LikeVerifyFuture = SharedFuture<Result<bool, ()>>;
-/// 装箱后的任务体（`shot_and_share` 的入参类型）。
+type LikeToggleFuture = SharedTask<Result<(), String>>;
+type LikeVerifyFuture = SharedTask<Result<bool, ()>>;
+/// 装箱后的任务体（`spawn_shared` 的入参类型）。
 type LikeToggleTask = Pin<Box<dyn Future<Output = Option<Result<(), String>>>>>;
 type LikeVerifyTask = Pin<Box<dyn Future<Output = Option<Result<bool, ()>>>>>;
 
@@ -1158,7 +1150,7 @@ impl CoverFetchState {
             image.map(|x| x.thumbnail(500, 500)).map(Arc::new)
         };
         let fut = Box::pin(fut);
-        self.image = Some(shot_and_share(fut));
+        self.image = Some(spawn_shared(fut));
         self.url = Some(url);
         self.size = Size::ZERO;
         self.protocol = None;
@@ -1287,7 +1279,7 @@ fn source_rows_for_visible(
 
 fn make_ascii_future(bytes: Arc<DynamicImage>, width: u16, height: u16) -> AsciiFuture {
     let fut = Box::pin(async move { render_cover_ascii(bytes, width, height) });
-    shot_and_share(fut)
+    spawn_shared(fut)
 }
 
 pub struct HomeTile {
@@ -2658,17 +2650,19 @@ async fn persist_fetched_cover(
 struct LyricFetchRequest {
     song_id: String,
     cookie: Option<String>,
+    generation: u64,
 }
 
 #[derive(Debug, Clone)]
 struct LyricFetchResult {
     song_id: String,
+    generation: u64,
     lyrics: Option<Vec<LyricLine>>,
 }
 
 async fn loop_cover_fetch(
-    mut rx: UnboundedReceiver<CoverFetchRequest>,
-    tx: Sender<CoverFetchResult>,
+    rx: watch::Receiver<Option<CoverFetchRequest>>,
+    tx: async_mpsc::Sender<CoverFetchResult>,
     client: Client,
     cache_dir: PathBuf,
     persistence: PersistenceHandle,
@@ -2695,20 +2689,21 @@ async fn loop_cover_fetch(
         let path = cover_cache_path_for_dir(&cache_dir, &req.url)?;
         Some(persist_fetched_cover(&persistence, path, bytes).await)
     };
-    while let Ok(req) = rx.recv().await {
+    latest_fetch::run_latest(rx, tx, async move |req: CoverFetchRequest| {
         let bytes = process_fn(&req).await;
-        let _ = tx.send(CoverFetchResult {
+        CoverFetchResult {
             song_id: req.song_id,
             url: req.url,
             generation: req.generation,
             bytes,
-        });
-    }
+        }
+    })
+    .await;
 }
 
 async fn loop_lyric_fetch(
-    mut rx: UnboundedReceiver<LyricFetchRequest>,
-    tx: Sender<LyricFetchResult>,
+    rx: watch::Receiver<Option<LyricFetchRequest>>,
+    tx: async_mpsc::Sender<LyricFetchResult>,
     mut api: ApiState,
 ) {
     let mut process_fn = async move |req: &LyricFetchRequest| {
@@ -2720,13 +2715,15 @@ async fn loop_lyric_fetch(
         let lrc = lyric.body.pointer("/lrc/lyric")?.as_str()?;
         parse_lrc(lrc).or_else(|| parse_plain_lyrics(lrc))
     };
-    while let Ok(req) = rx.recv().await {
+    latest_fetch::run_latest(rx, tx, async move |req: LyricFetchRequest| {
         let lyrics = process_fn(&req).await;
-        let _ = tx.send(LyricFetchResult {
+        LyricFetchResult {
             song_id: req.song_id,
+            generation: req.generation,
             lyrics,
-        });
-    }
+        }
+    })
+    .await;
 }
 
 pub struct App {
@@ -2797,14 +2794,15 @@ pub struct App {
     last_content_click: Option<(Instant, Page, usize)>,
     pub cava: Option<MiniCavaState>,
     cover_cache_dir: PathBuf,
-    cover_fetch_tx: UnboundedSender<CoverFetchRequest>,
-    cover_fetch_rx: Receiver<CoverFetchResult>,
+    cover_fetch_tx: watch::Sender<Option<CoverFetchRequest>>,
+    cover_fetch_rx: async_mpsc::Receiver<CoverFetchResult>,
     cover_fetch_inflight_url: Option<String>,
     cover_fetch_generation: u64,
     cover_fetch_last_attempt_at: Option<Instant>,
-    lyric_fetch_tx: UnboundedSender<LyricFetchRequest>,
-    lyric_fetch_rx: Receiver<LyricFetchResult>,
+    lyric_fetch_tx: watch::Sender<Option<LyricFetchRequest>>,
+    lyric_fetch_rx: async_mpsc::Receiver<LyricFetchResult>,
     lyric_fetch_inflight_song_id: Option<String>,
+    lyric_fetch_generation: u64,
     lyric_fetch_last_attempt_at: Option<Instant>,
     mpris_bridge: MprisBridge,
     mpris_last_sync_at: Instant,
@@ -2855,8 +2853,9 @@ impl App {
             .detach();
         }
 
-        let (cover_fetch_tx, cover_fetch_req_rx) = unbounded();
-        let (cover_fetch_res_tx, cover_fetch_rx) = mpsc::channel::<CoverFetchResult>();
+        // One active request plus one replaceable latest request, not a FIFO backlog.
+        let (cover_fetch_tx, cover_fetch_req_rx) = watch::channel(None);
+        let (cover_fetch_res_tx, cover_fetch_rx) = async_mpsc::channel(1);
         let worker = loop_cover_fetch(
             cover_fetch_req_rx,
             cover_fetch_res_tx,
@@ -2870,8 +2869,8 @@ impl App {
         // 下载任务全局只有一个：管理器起一次常驻 worker，之后只往队列里塞请求。
         let download_manager = DownloadManager::new(api.clone());
 
-        let (lyric_fetch_tx, lyric_fetch_req_rx) = unbounded();
-        let (lyric_fetch_res_tx, lyric_fetch_rx) = mpsc::channel::<LyricFetchResult>();
+        let (lyric_fetch_tx, lyric_fetch_req_rx) = watch::channel(None);
+        let (lyric_fetch_res_tx, lyric_fetch_rx) = async_mpsc::channel(1);
         let worker = loop_lyric_fetch(lyric_fetch_req_rx, lyric_fetch_res_tx, api.clone());
         launch(worker);
 
@@ -2937,6 +2936,7 @@ impl App {
             lyric_fetch_tx,
             lyric_fetch_rx,
             lyric_fetch_inflight_song_id: None,
+            lyric_fetch_generation: 0,
             lyric_fetch_last_attempt_at: None,
             mpris_bridge,
             mpris_last_sync_at: Instant::now(),
@@ -2985,7 +2985,9 @@ impl App {
     fn persist_config(&mut self) {
         self.config_revision = self.config_revision.wrapping_add(1);
         let snapshot = self.config.clone();
-        let _ = self.persistence.enqueue(move || snapshot.save());
+        let _ = self
+            .persistence
+            .enqueue_latest(PersistenceKey::Config, move || snapshot.save());
     }
     pub fn flush_persistence(&self) -> Result<()> {
         self.persistence.flush().map_err(anyhow::Error::msg)
@@ -4207,7 +4209,7 @@ impl App {
             self.browse.home_sidebar.loading = true;
             let fut = fetch_home_sidebar_playlists(self.api.clone(), self.config.language);
             let fut: HomeSidebarTask = Box::pin(async move { Some(fut.await) });
-            self.browse.home_sidebar_fetch = Some(shot_and_share(fut));
+            self.browse.home_sidebar_fetch = Some(spawn_shared(fut));
         }
     }
 
@@ -4774,7 +4776,7 @@ impl App {
         let fut: LikeVerifyTask = Box::pin(async move { Some(fut.await) });
         self.playback
             .like_machine
-            .begin_verify(song_id, shot_and_share(fut));
+            .begin_verify(song_id, spawn_shared(fut));
     }
 
     /// 当前曲目 id。
@@ -5192,7 +5194,7 @@ impl App {
         let fut: LikeToggleTask = Box::pin(async move { Some(fut.await) });
         self.playback
             .like_machine
-            .begin_toggle(song_id, target, shot_and_share(fut));
+            .begin_toggle(song_id, target, spawn_shared(fut));
     }
 
     async fn tick_audio(&mut self) {
@@ -5461,7 +5463,7 @@ impl App {
             url: url.clone(),
             generation,
         };
-        if self.cover_fetch_tx.start_send(req).is_ok() {
+        if self.cover_fetch_tx.send(Some(req)).is_ok() {
             self.cover_fetch_generation = generation;
             self.cover_fetch_inflight_url = Some(url);
             self.cover_fetch_last_attempt_at = Some(now_at);
@@ -5483,11 +5485,11 @@ impl App {
         let generation = self.cover_fetch_generation.wrapping_add(1);
         if self
             .cover_fetch_tx
-            .start_send(CoverFetchRequest {
+            .send(Some(CoverFetchRequest {
                 song_id: String::new(),
                 url: url.clone(),
                 generation,
-            })
+            }))
             .is_ok()
         {
             self.cover_fetch_generation = generation;
@@ -5518,6 +5520,9 @@ impl App {
     }
 
     fn apply_lyric_fetch_result(&mut self, result: LyricFetchResult) {
+        if result.generation != self.lyric_fetch_generation {
+            return;
+        }
         if self.lyric_fetch_inflight_song_id.as_deref() == Some(result.song_id.as_str()) {
             self.lyric_fetch_inflight_song_id = None;
         }
@@ -5569,15 +5574,18 @@ impl App {
             return;
         }
 
+        let generation = self.lyric_fetch_generation.wrapping_add(1);
         let req = LyricFetchRequest {
             song_id: song_id.clone(),
+            generation,
             cookie: self
                 .api
                 .session_cookie()
                 .map(|value| value.to_string())
                 .or_else(|| self.session_cookie.clone()),
         };
-        if self.lyric_fetch_tx.start_send(req).is_ok() {
+        if self.lyric_fetch_tx.send(Some(req)).is_ok() {
+            self.lyric_fetch_generation = generation;
             self.lyric_fetch_inflight_song_id = Some(song_id);
             self.lyric_fetch_last_attempt_at = Some(now_at);
         }
@@ -5594,12 +5602,8 @@ impl App {
             return;
         }
 
-        loop {
-            match self.lyric_fetch_rx.try_recv() {
-                Ok(result) => self.apply_lyric_fetch_result(result),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
-            }
+        while let Ok(result) = self.lyric_fetch_rx.try_recv() {
+            self.apply_lyric_fetch_result(result);
         }
 
         self.maybe_schedule_now_playing_lyric_fetch();
@@ -5615,13 +5619,14 @@ impl App {
 
             if let (Some(bytes), Some(url)) = (track.cover.take(), track.cover_url.as_deref())
                 && let Some(path) = cover_cache_path_for_dir(cover_cache_dir, url)
-            {
-                let _ = persistence.enqueue(move || {
+                && let Err(error) = persistence.enqueue(move || {
                     if let Some(bytes) = validate_cached_cover(bytes) {
                         write_atomic(&path, &bytes)?;
                     }
                     Ok(())
-                });
+                })
+            {
+                log::warn!("cover cache write not admitted: {error:#}");
             }
         }
     }
@@ -5928,7 +5933,7 @@ impl App {
             fallback_cover_url,
         );
         let fut: AuthorFetchTask = Box::pin(async move { Some(fut.await) });
-        self.browse.author_fetch = Some(shot_and_share(fut));
+        self.browse.author_fetch = Some(spawn_shared(fut));
     }
 
     /// 搜索页打开专辑：立即落占位歌单页 + 派发后台拉取（结果由 `tick_playlist_fetch` 搬进来）。
@@ -5976,7 +5981,7 @@ impl App {
         self.downloads.page_kind = PlaylistPageKind::Album;
         self.browse.playlist_fetch = Some(PlaylistFetchSlot {
             kind: PlaylistPageKind::Album,
-            future: shot_and_share(fut),
+            future: spawn_shared(fut),
         });
     }
 
@@ -6021,7 +6026,7 @@ impl App {
         self.downloads.page_kind = PlaylistPageKind::Playlist;
         self.browse.playlist_fetch = Some(PlaylistFetchSlot {
             kind: PlaylistPageKind::Playlist,
-            future: shot_and_share(fut),
+            future: spawn_shared(fut),
         });
     }
 
@@ -7049,6 +7054,7 @@ impl App {
         if self.browse.playlist_fetch.is_some() {
             if matches!(key.code, KeyCode::Esc | KeyCode::Left) {
                 self.page = self.playlist_return_page;
+                self.browse.playlist_fetch = None;
             }
             return;
         }
@@ -7081,6 +7087,7 @@ impl App {
         if self.browse.author_fetch.is_some() {
             if key.code == KeyCode::Esc {
                 self.page = self.author_return_page;
+                self.browse.author_fetch = None;
             }
             return;
         }
@@ -7503,7 +7510,7 @@ impl App {
             artist_line,
         );
         let fut: AuthorFetchTask = Box::pin(async move { Some(fut.await) });
-        self.browse.author_fetch = Some(shot_and_share(fut));
+        self.browse.author_fetch = Some(spawn_shared(fut));
     }
 
     /// 全屏页点了专辑名：立即落占位专辑页 + 派发后台拉取，结果由 `App::tick_playlist_fetch`
@@ -7548,7 +7555,7 @@ impl App {
         self.downloads.page_kind = PlaylistPageKind::Album;
         self.browse.playlist_fetch = Some(PlaylistFetchSlot {
             kind: PlaylistPageKind::Album,
-            future: shot_and_share(fut),
+            future: spawn_shared(fut),
         });
     }
 
@@ -7685,7 +7692,9 @@ impl App {
     }
 
     fn clear_playback_memory(&self) {
-        let _ = self.persistence.enqueue(playback_session::clear);
+        let _ = self
+            .persistence
+            .enqueue_latest(PersistenceKey::Playback, playback_session::clear);
     }
 
     fn persist_playback_memory(&self) {
@@ -7719,7 +7728,9 @@ impl App {
 
         let _ = self
             .persistence
-            .enqueue(move || playback_session::save(&record));
+            .enqueue_latest(PersistenceKey::Playback, move || {
+                playback_session::save(&record)
+            });
     }
 
     async fn try_restore_playback_memory(&mut self) {
@@ -7847,10 +7858,20 @@ impl App {
         self.settings.reset_navigation();
         self.session_cookie = None;
         self.api.clear_cookie();
-        let _ = self.persistence.enqueue(session::clear_cookie);
+        let _ = self
+            .persistence
+            .enqueue_latest(PersistenceKey::Session, session::clear_cookie);
         self.clear_playback_memory();
-        let _ = self.persistence.enqueue(private_roam::clear);
+        let _ = self
+            .persistence
+            .enqueue_latest(PersistenceKey::PrivateRoam, private_roam::clear);
         self.browse.reset_pages();
+        let _ = self.cover_fetch_tx.send(None);
+        let _ = self.lyric_fetch_tx.send(None);
+        self.cover_fetch_generation = self.cover_fetch_generation.wrapping_add(1);
+        self.lyric_fetch_generation = self.lyric_fetch_generation.wrapping_add(1);
+        self.cover_fetch_inflight_url = None;
+        self.lyric_fetch_inflight_song_id = None;
         self.vip_audio_unlocked = false;
         self.config.audio_quality = self.config.audio_quality.clamp_for_vip(false);
 
@@ -8403,7 +8424,9 @@ impl App {
         };
         let _ = self
             .persistence
-            .enqueue(move || private_roam::save(&record));
+            .enqueue_latest(PersistenceKey::PrivateRoam, move || {
+                private_roam::save(&record)
+            });
     }
 
     async fn load_private_roam_memory(&mut self) {
@@ -8915,7 +8938,9 @@ impl App {
             let cookie = cookie.to_string();
             let _ = self
                 .persistence
-                .enqueue(move || session::save_cookie(&cookie));
+                .enqueue_latest(PersistenceKey::Session, move || {
+                    session::save_cookie(&cookie)
+                });
         }
         self.refresh_vip_audio_access().await;
         let _ = self.refresh_liked_song_cache().await;
@@ -10880,12 +10905,12 @@ mod tests {
 
     fn pending_toggle_future() -> LikeToggleFuture {
         let fut: LikeToggleTask = Box::pin(async { None });
-        fut.shared()
+        SharedTask::unstarted(fut)
     }
 
     fn pending_verify_future() -> LikeVerifyFuture {
         let fut: LikeVerifyTask = Box::pin(async { None });
-        fut.shared()
+        SharedTask::unstarted(fut)
     }
 
     /// 点击必须立刻改变显示值（乐观），并把请求排进派发队列。

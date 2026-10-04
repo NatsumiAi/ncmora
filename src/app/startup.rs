@@ -317,7 +317,10 @@ impl App {
                 self.startup.target = Page::Home;
             }
             StartupEvent::SessionRejected => {
-                let _ = self.persistence.enqueue(session::clear_cookie);
+                let _ = self.persistence.enqueue_latest(
+                    crate::data::persistence::PersistenceKey::Session,
+                    session::clear_cookie,
+                );
                 self.startup.target = Page::Login;
                 self.startup.init.collapse_to_done();
             }
