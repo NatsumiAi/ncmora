@@ -1,5 +1,5 @@
 use crate::tmplayer::app::state::{AppState, CoverSnapshot, Overlay, PlaybackState, RepeatMode};
-use crate::tmplayer::audio::cava::{CavaChannels, CavaConfig, CavaRunner};
+use crate::tmplayer::audio::cava::{CavaChannels, CavaConfig, CavaService};
 use crate::data::config::{AudioQuality, BarChannels, BarNumber, Config, VisualizeMode};
 use crate::data::theme_loader::ThemeLoader;
 use crate::tmplayer::ui::tui::{Tui, UiLayout};
@@ -60,7 +60,11 @@ fn map_host_repeat(mode: HostRepeatMode) -> RepeatMode {
     }
 }
 
-fn apply_host_config_sync(app: &mut AppState, config: Config, vip_audio_unlocked: bool) {
+async fn apply_host_config_sync(
+    app: &mut AppState,
+    config: Config,
+    vip_audio_unlocked: bool,
+) {
     let theme_changed = app.config.theme != config.theme;
     app.config = config;
     app.language = app.config.language;
@@ -72,7 +76,9 @@ fn apply_host_config_sync(app: &mut AppState, config: Config, vip_audio_unlocked
         .clamp_for_vip(vip_audio_unlocked);
     app.eq.bands_db = app.config.eq_bands_db;
     if theme_changed {
-        app.theme = ThemeLoader::load_or_default(&app.config.theme);
+        app.theme = ThemeLoader::load_async(&app.config.theme)
+            .await
+            .unwrap_or_default();
     }
     app.refresh_download_root();
 }
@@ -83,7 +89,7 @@ async fn save_and_sync_host_config(
 ) {
     host_bridge.apply_config_sync(app.config.clone()).await;
     let accepted = host_bridge.config_snapshot();
-    apply_host_config_sync(app, accepted, host_bridge.vip_audio_unlocked());
+    apply_host_config_sync(app, accepted, host_bridge.vip_audio_unlocked()).await;
 }
 
 async fn sync_eq_config(app: &mut AppState, host_bridge: &mut impl HostPlaybackBridge) {
@@ -279,7 +285,7 @@ async fn sync_from_host_bridge(
     let config_signature = host_bridge.config_signature();
     if last_config_signature.is_none_or(|sig| sig != config_signature) {
         let config = host_bridge.config_snapshot();
-        apply_host_config_sync(app, config, host_bridge.vip_audio_unlocked());
+        apply_host_config_sync(app, config, host_bridge.vip_audio_unlocked()).await;
         *last_config_signature = Some(config_signature);
         changed = true;
     }
@@ -308,11 +314,11 @@ pub async fn run(
 
     // Prefer cava for system-wide visualization (keeps our renderer/style; cava only provides bars).
     // If cava isn't installed, we leave the spectrum empty.
-    let mut cava: Option<CavaRunner> = None;
+    let cava = CavaService::new();
     let mut cava_cfg: Option<CavaConfig> = None;
 
     let mut last_spectrum = Instant::now();
-    let mut last_host_config_signature: Option<u64> = None;
+    let mut last_host_metadata_signature: Option<u64> = None;
     let mut needs_redraw = true;
     let mut last_draw_at = Instant::now()
         .checked_sub(Duration::from_millis(250))
@@ -323,12 +329,9 @@ pub async fn run(
     // 示波器始终读取宿主播放链路上的 PCM 抽头环。
     app.pcm_ring = Some(host_bridge.pcm_ring());
 
-    // Initialize cava with the current desired config (best-effort).
-    ensure_cava(
-        &mut cava,
-        &mut cava_cfg,
-        desired_cava_config(app, &last_layout),
-    );
+    let desired = desired_cava_config(app, &last_layout);
+    cava.set_desired(desired);
+    cava_cfg = desired;
 
     let _ = sync_from_host_bridge(
         app,
@@ -372,11 +375,11 @@ pub async fn run(
             }
         }
 
-        ensure_cava(
-            &mut cava,
-            &mut cava_cfg,
-            desired_cava_config(app, &last_layout),
-        );
+        let desired = desired_cava_config(app, &last_layout);
+        if cava_cfg != desired {
+            cava.set_desired(desired);
+            cava_cfg = desired;
+        }
 
         if app.config.visualize == VisualizeMode::Bars {
             let bars = desired_bar_count(app, &last_layout);
@@ -391,16 +394,19 @@ pub async fn run(
             if frame_start.duration_since(last_spectrum) >= period {
                 last_spectrum = frame_start;
                 state_changed = true;
-                match cava.as_ref() {
-                    Some(c) => {
-                        let (l, r) = c.latest_stereo_bars();
-                        app.spectrum.bars_left = l;
-                        app.spectrum.bars_right = r;
-                        let raw = c.latest_bars();
-                        app.spectrum.bars = app.spectrum_bar_smoother.apply(&raw);
-                    }
-                    None => clear_spectrum(app),
+                let snapshot = cava.latest();
+                let bars = desired_bar_count(app, &last_layout);
+                ensure_bar_buffers(app, bars);
+                if app.config.bar_channels == BarChannels::Stereo {
+                    let _ = snapshot.copy_stereo_into(
+                        &mut app.spectrum.bars_left,
+                        &mut app.spectrum.bars_right,
+                    );
+                } else {
+                    app.spectrum.bars_left.fill(0.0);
+                    app.spectrum.bars_right.fill(0.0);
                 }
+                let _ = snapshot.mono_into(&mut app.spectrum.bars);
             }
         } else if has_spectrum_data(app) {
             clear_spectrum(app);
@@ -452,6 +458,7 @@ pub async fn run(
 
     tui.exit()?;
     disable_raw_mode()?;
+    let _ = compio::runtime::spawn_blocking(move || cava.shutdown_blocking()).await;
 
     let exit = match app.exit_request {
         Some(exit) => exit,
@@ -1216,7 +1223,7 @@ async fn commit_download_path_edit(
     let raw = edit.buffer.trim().to_string();
     app.overlay = Overlay::DownloadSettingsModal;
 
-    match crate::app::download::parse_download_path(&raw) {
+    match crate::app::download::validate_download_path(&raw).await {
         Ok(crate::app::download::DownloadPathChoice::Disabled) => {
             app.config.download_path = Some(crate::app::download::DOWNLOAD_PATH_NULL.to_string());
             save_and_sync_host_config(app, host_bridge).await;
@@ -1227,7 +1234,6 @@ async fn commit_download_path_edit(
             save_and_sync_host_config(app, host_bridge).await;
             app.refresh_download_root();
         }
-        // 非法输入不弹提示：保留修改前的值，行里显示的就是那个旧值。
         Err(_) => {}
     }
 }
@@ -1334,42 +1340,11 @@ fn desired_cava_config(app: &AppState, layout: &UiLayout) -> Option<CavaConfig> 
     Some(CavaConfig {
         framerate_hz: app.config.spectrum_hz,
         bars: desired_bar_count(app, layout),
-        channels: CavaChannels::Mono,
-        reverse: app.config.bar_channel_reverse,
+        channels: app.config.bar_channels,
+        reverse: false,
     })
 }
 
-fn ensure_cava(
-    cava: &mut Option<CavaRunner>,
-    cfg: &mut Option<CavaConfig>,
-    desired: Option<CavaConfig>,
-) {
-    if cfg.as_ref() == desired.as_ref() {
-        return;
-    }
-
-    // Drop old process first to avoid short-lived overlap when recreating cava.
-    *cava = None;
-    *cfg = None;
-
-    let Some(desired) = desired else {
-        return;
-    };
-
-    match CavaRunner::start(desired) {
-        Ok(c) => {
-            *cava = Some(c);
-            *cfg = Some(desired);
-        }
-        Err(e) => {
-            if cfg.is_none() {
-                log::warn!("cava unavailable; leaving spectrum empty: {e}");
-            }
-            *cava = None;
-            *cfg = None;
-        }
-    }
-}
 
 fn ensure_bar_buffers(app: &mut AppState, bars: usize) {
     if app.spectrum.bars.len() != bars {
@@ -1405,11 +1380,9 @@ mod tests {
     fn every_settings_child_returns_to_the_settings_modal() {
         for child in [
             Overlay::BarSettingsModal,
-            Overlay::LocalAudioSettingsModal,
             Overlay::LyricsSettingsModal,
             Overlay::HelpModal,
             Overlay::AboutModal,
-            Overlay::AcoustIdModal,
         ] {
             assert_eq!(
                 settings_parent(child),

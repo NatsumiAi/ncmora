@@ -18,6 +18,8 @@ CNMPlayer 是一个运行在终端中的网易云音乐客户端（Rust + TUI）
 
 Rust 1.90 或更新版本；仓库在 `rust-toolchain.toml` 中固定 1.90.0。根 crate（`cnmplayer`）使用 edition 2024，vendored 的 `ncm-api` crate 使用 edition 2021。
 
+锁定依赖的编译器下限为 Rust 1.90：经 `icy_sixel` 和 `ratatui-image` 引入的 `quantette 0.5.1` 声明 `rust-version = "1.90"`。单看 edition 2024 只需要 1.85，不能把它当作整个依赖图的 MSRV。根 crate 与 vendored crate 共用一个 workspace lockfile。
+
 系统构建依赖 —— 与 CI 在 `ubuntu-24.04` 上安装的列表一致：
 
 ```bash
@@ -57,10 +59,11 @@ Cargo feature：`default = ["easter-egg"]` —— About 弹窗里的形象彩蛋
 | 路径 | 内容 |
 | --- | --- |
 | `src/main.rs` | 入口：终端初始化、资产根目录，以及交给应用程序。 |
-| `src/app/` | 应用核心：`mod.rs` 的共享状态、API/流式播放/播放器/下载服务、MPRIS 桥接，以及专门的控制器（`browse_controller.rs`、`download_controller.rs`、`input_controller.rs`、`playback_controller.rs`、`settings_controller.rs`、`startup_controller.rs`）。 |
-| `src/ui/` | 主程序与全屏 UI 面板：登录、首页、歌单、作者、搜索、设置、播放栏、歌词、加载、小窗口与主题模块。 |
+| `src/app/` | 应用核心：`mod.rs` 的共享状态、API/流式播放/播放器/下载服务、MPRIS 桥接、`controllers.rs` 中的 `SearchController`，以及专门的 browse/download/input/playback/settings/startup 控制器。 |
+| `src/ui/` | 主程序 UI 面板：登录、首页、歌单、作者、搜索、设置、播放栏、歌词、加载、小窗口与主题模块。 |
 | `src/data/` | 共享 `Config`，以及资产、原子持久化、会话、播放/私人漫游状态与主题加载。 |
 | `src/render/` | 封面与图形渲染，以及彩蛋形象的帧数据。 |
+| `src/tmplayer/` | 内置全屏播放 UI、渲染器与音频可视化辅助模块；播放由主程序负责，配置使用共享 `Config`。 |
 | `ncm-api-rs/` | 以 workspace path 依赖形式 vendored 的 `ncm-api` crate，来自 [imsyy/ncm-api-rs](https://github.com/imsyy/ncm-api-rs)；自带 `rustfmt.toml`、`clippy.toml` 与 `docs/API.md`。 |
 | `config/default.toml` | 默认配置模板。启动时程序会据此在资产根目录下写入并修复 `config/default.toml`。 |
 | `themes/` | TOML 配色主题：`system`、`latte`、`frappe`、`macchiato`、`mocha`。 |

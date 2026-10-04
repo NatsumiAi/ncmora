@@ -140,7 +140,9 @@ pub async fn run_fullscreen(
     host_bridge: &mut impl HostPlaybackBridge,
 ) -> Result<FullscreenExit> {
     let config = host_config.clone();
-    let theme = crate::data::theme_loader::ThemeLoader::load_or_default(&host_config.theme);
+    let theme = crate::data::theme_loader::ThemeLoader::load_async(&host_config.theme)
+        .await
+        .unwrap_or_default();
 
     let mut app = app::state::AppState::new(config, theme, host_config.language);
     app.eq.bands_db = app.config.eq_bands_db;
@@ -208,8 +210,6 @@ fn apply_bootstrap(app: &mut app::state::AppState, bootstrap: FullscreenBootstra
             cover_hash: None,
             lyrics: None,
         };
-        app.local_view_album_cover = None;
-        app.local_view_album_cover_hash = None;
         return;
     }
 

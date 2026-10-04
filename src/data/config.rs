@@ -647,10 +647,13 @@ impl Default for Config {
 impl Config {
     pub fn load_or_default() -> Result<Self> {
         assets::ensure_assets_ready()?;
-        let path = Self::default_path();
+        Self::load_from_path(&Self::default_path())
+    }
+
+    fn load_from_path(path: &std::path::Path) -> Result<Self> {
         if !path.exists() {
             let cfg = Self::default();
-            cfg.save()?;
+            cfg.save_to_path(path)?;
             return Ok(cfg);
         }
 
@@ -730,7 +733,7 @@ impl Config {
             || legacy_startup_folder_key_present
             || migrated_legacy_sidebar
         {
-            cfg.save()?;
+            cfg.save_to_path(path)?;
         }
 
         Ok(cfg)
@@ -738,9 +741,12 @@ impl Config {
 
     pub fn save(&self) -> Result<()> {
         assets::ensure_assets_ready()?;
-        let path = Self::default_path();
+        self.save_to_path(&Self::default_path())
+    }
+
+    fn save_to_path(&self, path: &std::path::Path) -> Result<()> {
         let raw = toml::to_string_pretty(self).context("serialize configuration")?;
-        atomic_file::write_atomic(&path, raw.as_bytes())
+        atomic_file::write_atomic(path, raw.as_bytes())
     }
 
     fn default_path() -> PathBuf {
@@ -814,5 +820,17 @@ mod tests {
                 toml::from_str(&format!("visualize = \"{}\"", raw)).unwrap();
             assert_eq!(parsed.visualize, expected);
         }
+    }
+
+    #[test]
+    fn corrupt_config_is_rejected_without_replacement() {
+        let dir = std::env::temp_dir().join(format!("cnmplayer-config-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("default.toml");
+        std::fs::write(&path, "not = [valid").unwrap();
+        assert!(super::Config::load_from_path(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not = [valid");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

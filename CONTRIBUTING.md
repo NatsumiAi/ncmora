@@ -27,6 +27,8 @@ to a terminal UI.
 
 Rust 1.90 or newer; the repository pins 1.90.0 in `rust-toolchain.toml`. The root crate (`cnmplayer`) uses edition 2024; the vendored `ncm-api` crate uses edition 2021.
 
+The locked dependency floor is Rust 1.90: `quantette 0.5.1` (through `icy_sixel` and `ratatui-image`) declares `rust-version = "1.90"`. Edition 2024 alone would only require 1.85; it is not the dependency MSRV. The root and vendored crate share one workspace lockfile.
+
 System build dependencies — the same list CI installs on `ubuntu-24.04`:
 
 ```bash
@@ -74,10 +76,11 @@ with `--no-default-features` to drop it.
 | Path | Contents |
 | --- | --- |
 | `src/main.rs` | Entry point: terminal setup, asset root, and hand-off to the application. |
-| `src/app/` | Application core: shared state in `mod.rs`, API/streaming/player/download services, MPRIS bridge, and focused controllers (`browse_controller.rs`, `download_controller.rs`, `input_controller.rs`, `playback_controller.rs`, `settings_controller.rs`, `startup_controller.rs`). |
-| `src/ui/` | Host and fullscreen UI panels: login, home, playlist, author, search, settings, player bar, lyrics, loading, small-window and theme modules. |
+| `src/app/` | Application core: shared state in `mod.rs`, API/streaming/player/download services, MPRIS bridge, `SearchController` in `controllers.rs`, and focused browse/download/input/playback/settings/startup controllers. |
+| `src/ui/` | Host UI panels: login, home, playlist, author, search, settings, player bar, lyrics, loading, small-window and theme modules. |
 | `src/data/` | Shared `Config` plus assets, atomic persistence, sessions, playback/private-roam state, and theme loading. |
 | `src/render/` | Cover and graphics rendering, plus the easter-egg mascot frames. |
+| `src/tmplayer/` | Embedded fullscreen playback UI, its renderers and audio visualization helpers; playback is owned by the host and configuration uses the shared `Config`. |
 | `ncm-api-rs/` | The `ncm-api` crate vendored from [imsyy/ncm-api-rs](https://github.com/imsyy/ncm-api-rs) as a workspace path dependency. It ships `rustfmt.toml`, `clippy.toml` and `docs/API.md`. |
 | `config/default.toml` | The default configuration template. At startup the app writes and repairs `config/default.toml` under the asset root from it. |
 | `themes/` | TOML color themes: `system`, `latte`, `frappe`, `macchiato`, `mocha`. |

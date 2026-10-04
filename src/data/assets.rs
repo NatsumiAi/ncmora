@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, OnceLock};
+use std::sync::LazyLock;
 
 const ENV_ASSET_DIR: &str = "CNMPLAYER_ASSET_DIR";
 
@@ -31,17 +31,17 @@ const THEME_ZENBURN_TOML: &str = include_str!("../../themes/zenburn.toml");
 const THEME_ZINC_DARK_TOML: &str = include_str!("../../themes/shadcn_zinc_dark.toml");
 const THEME_ZINC_LIGHT_TOML: &str = include_str!("../../themes/shadcn_zinc_light.toml");
 
-static ASSET_ROOT: OnceLock<PathBuf> = OnceLock::new();
+static ASSET_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
+    std::env::var_os(ENV_ASSET_DIR)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| STORAGE.config.clone())
+});
 static ASSETS_READY: LazyLock<Result<(), String>> = LazyLock::new(|| {
     ensure_all_assets(resolve_asset_root().as_ref()).map_err(|error| error.to_string())
 });
 
 pub fn resolve_asset_root() -> Cow<'static, PathBuf> {
-    Cow::Borrowed(ASSET_ROOT.get_or_init(|| {
-        std::env::var_os(ENV_ASSET_DIR)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| STORAGE.config.clone())
-    }))
+    Cow::Borrowed(&ASSET_ROOT)
 }
 
 pub fn resolve_asset_path(rel: &Path) -> PathBuf {
@@ -55,7 +55,7 @@ pub fn resolve_config_path() -> PathBuf {
 pub fn ensure_assets_ready() -> Result<&'static PathBuf> {
     ASSETS_READY
         .as_ref()
-        .map(|_| ASSET_ROOT.get().expect("asset root initialized"))
+        .map(|_| &*ASSET_ROOT)
         .map_err(|error| anyhow::anyhow!("{error}"))
 }
 

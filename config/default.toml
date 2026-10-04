@@ -1,4 +1,6 @@
 theme = "frappe"
+ui_fps = 30
+mpris_poll_ms = 100
 spectrum_hz = 60
 icon_mode = "auto"
 visualize = "bars"

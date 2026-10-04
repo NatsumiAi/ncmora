@@ -1,7 +1,8 @@
 use anyhow::{Result, anyhow};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use parking_lot::Mutex;
 use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 
 type Job = Box<dyn FnOnce() -> Result<()> + Send + 'static>;
 
@@ -15,23 +16,29 @@ enum Command {
 /// order, keeping the newest completed snapshot from being overwritten by an
 /// older write. `flush` is the shutdown barrier used by the owner at exit.
 pub struct PersistenceWorker {
-    tx: Sender<Command>,
+    tx: SyncSender<Command>,
     thread: Option<JoinHandle<()>>,
+    errors: Arc<Mutex<Option<String>>>,
 }
 
 impl PersistenceWorker {
-    pub fn spawn(thread_name: &'static str) -> Self {
-        let (tx, rx) = mpsc::channel();
+    pub fn spawn(thread_name: &'static str) -> Result<Self> {
+        let (tx, rx) = mpsc::sync_channel(128);
         let errors = Arc::new(Mutex::new(None));
         let worker_errors = errors.clone();
         let thread = thread::Builder::new()
             .name(thread_name.to_string())
-            .spawn(move || run(rx, worker_errors))
-            .expect("failed to spawn persistence worker");
-        Self {
+            .spawn(move || run(rx, worker_errors))?;
+        Ok(Self {
             tx,
             thread: Some(thread),
-        }
+            errors,
+        })
+    }
+
+    /// Observe the first background failure without consuming a flush barrier.
+    pub fn pending_error(&self) -> Option<String> {
+        self.errors.lock().clone()
     }
 
     pub fn enqueue<F>(&self, job: F) -> Result<()>
@@ -39,8 +46,8 @@ impl PersistenceWorker {
         F: FnOnce() -> Result<()> + Send + 'static,
     {
         self.tx
-            .send(Command::Job(Box::new(job)))
-            .map_err(|_| anyhow!("persistence worker stopped"))
+            .try_send(Command::Job(Box::new(job)))
+            .map_err(|error| anyhow!("persistence queue unavailable: {error}"))
     }
 
     pub fn flush(&self) -> Result<()> {
@@ -102,7 +109,7 @@ mod tests {
 
     #[test]
     fn flush_waits_for_ordered_jobs_and_reports_failures() {
-        let worker = PersistenceWorker::spawn("persistence-test");
+        let worker = PersistenceWorker::spawn("persistence-test").unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let first = seen.clone();
         worker

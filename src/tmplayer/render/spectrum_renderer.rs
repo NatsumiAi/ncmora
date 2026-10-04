@@ -18,8 +18,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
     if bars_h == 0 {
         return;
     }
-
     let bars = &app.spectrum.bars;
+    let bars_left = &app.spectrum.bars_left;
+    let bars_right = &app.spectrum.bars_right;
     let mono_count = bars.len().max(1);
     if app.spectrum_render_grid.len() != bars_h {
         app.spectrum_render_grid.resize_with(bars_h, Vec::new);
@@ -40,6 +41,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
 
     let draw_vals = build_display_vals(
         bars,
+        bars_left,
+        bars_right,
         draw_total,
         app.config.bar_channels,
         app.config.bar_channel_reverse,
@@ -192,41 +195,40 @@ pub(crate) fn compute_bar_layout(
 }
 
 fn build_display_vals(
-    data: &[f32],
+    mono: &[f32],
+    left: &[f32],
+    right: &[f32],
     draw_total: usize,
     mode: BarChannels,
     reverse: bool,
 ) -> Vec<f32> {
-    let data_len = data.len().max(1);
     if draw_total == 0 {
         return Vec::new();
     }
-
     match mode {
-        BarChannels::Mono => (0..draw_total)
-            .map(|i| {
-                if reverse {
-                    sample_val(data, data_len, draw_total, draw_total - 1 - i)
-                } else {
-                    sample_val(data, data_len, draw_total, i)
-                }
-            })
-            .collect(),
+        BarChannels::Mono => {
+            let data_len = mono.len().max(1);
+            (0..draw_total)
+                .map(|i| {
+                    let idx = if reverse { draw_total - 1 - i } else { i };
+                    sample_val(mono, data_len, draw_total, idx)
+                })
+                .collect()
+        }
         BarChannels::Stereo => {
             let per_side = (draw_total / 2).max(1);
-            let mut right: Vec<f32> = (0..per_side)
-                .map(|i| {
-                    if reverse {
-                        sample_val(data, data_len, per_side, per_side - 1 - i)
-                    } else {
-                        sample_val(data, data_len, per_side, i)
-                    }
-                })
-                .collect();
-            let mut left = right.clone();
-            left.reverse();
-            left.append(&mut right);
-            left
+            let left_len = left.len().max(1);
+            let right_len = right.len().max(1);
+            let mut values = Vec::with_capacity(draw_total);
+            for i in 0..per_side {
+                let idx = if reverse { per_side - 1 - i } else { i };
+                values.push(sample_val(left, left_len, per_side, per_side - 1 - idx));
+            }
+            for i in 0..per_side {
+                let idx = if reverse { per_side - 1 - i } else { i };
+                values.push(sample_val(right, right_len, per_side, idx));
+            }
+            values
         }
     }
 }

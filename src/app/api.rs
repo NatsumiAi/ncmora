@@ -428,10 +428,28 @@ impl ApiState {
         if bytes.is_empty() {
             return Err(anyhow!("cover image response was empty"));
         }
-        let validated = compio::runtime::spawn_blocking(move || load_from_memory(&bytes).map(|_| bytes))
-            .await
-            .map_err(|_| anyhow!("cover image validation task panicked"))?
-            .with_context(|| format!("invalid cover image: {url}"))?;
+        let validated = compio::runtime::spawn_blocking(move || -> Result<Vec<u8>> {
+            // Decoders can recover incomplete images. A cache entry must carry
+            // the format's terminal marker as well as successfully decode.
+            match image::guess_format(&bytes)? {
+                image::ImageFormat::Png => {
+                    if !bytes.ends_with(&[0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130]) {
+                        bail!("PNG cover is missing its terminal IEND chunk");
+                    }
+                }
+                image::ImageFormat::Jpeg => {
+                    if !bytes.ends_with(&[0xff, 0xd9]) {
+                        bail!("JPEG cover is missing its end-of-image marker");
+                    }
+                }
+                _ => bail!("unsupported cover image format"),
+            }
+            load_from_memory(&bytes)?;
+            Ok(bytes)
+        })
+        .await
+        .map_err(|_| anyhow!("cover image validation task panicked"))?
+        .with_context(|| format!("invalid cover image: {url}"))?;
         Ok(validated)
     }
 
@@ -499,5 +517,110 @@ pub fn error_for_status(resp: Response) -> Result<Response> {
         bail!("{url} {status} {reason}");
     } else {
         Ok(resp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiState;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn tiny_png() -> Vec<u8> {
+        use image::ImageEncoder;
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(&[0, 0, 0, 255], 1, 1, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        bytes
+    }
+
+    #[compio::test]
+    async fn cover_download_accepts_only_complete_valid_images() {
+        let png = tiny_png();
+        let length_header = format!("Content-Length: {}\r\n", png.len());
+        let cases: &[(&[u8], &str, bool)] = &[
+            (&png, &length_header, true),
+            (&png, "", true),
+            (b"not-an-image", "Content-Length: 12\r\n", false),
+            (&png[..20], &length_header, false),
+            (&png[..png.len() - 12], "", false),
+            (b"a\r\nabc", "Transfer-Encoding: chunked\r\n", false),
+        ];
+        for (index, (body, headers, expected_ok)) in cases.iter().enumerate() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let body = body.to_vec();
+            let headers = headers.to_string();
+            let server = compio::runtime::spawn_blocking(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut request = [0; 1024];
+                let _ = socket.read(&mut request);
+                write!(socket, "HTTP/1.1 200 OK\r\n{headers}Connection: close\r\n\r\n").unwrap();
+                socket.write_all(&body).unwrap();
+            });
+            let http = cyper::Client::builder().no_proxy().build().unwrap();
+            let api = ApiState::new(None, http).unwrap();
+            let result = api
+                .fetch_cover_bytes(&format!("http://{address}/cover-{index}"))
+                .await;
+            server.await.unwrap();
+            assert_eq!(result.is_ok(), *expected_ok, "case {index}: {result:?}");
+            if *expected_ok {
+                assert_eq!(result.unwrap(), png);
+            }
+        }
+    }
+
+    #[compio::test]
+    async fn cover_download_rejects_declared_oversize_before_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = compio::runtime::spawn_blocking(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = socket.read(&mut request);
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                super::MAX_COVER_IMAGE_BYTES + 1
+            )
+            .unwrap();
+        });
+        let http = cyper::Client::builder().no_proxy().build().unwrap();
+        let api = ApiState::new(None, http).unwrap();
+        assert!(api
+            .fetch_cover_bytes(&format!("http://{address}/oversize"))
+            .await
+            .is_err());
+        server.await.unwrap();
+    }
+
+    #[compio::test]
+    async fn cover_download_caps_body_without_content_length() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = compio::runtime::spawn_blocking(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = socket.read(&mut request);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            let block = [0; 8192];
+            for _ in 0..=(super::MAX_COVER_IMAGE_BYTES / block.len()) {
+                if socket.write_all(&block).is_err() {
+                    break;
+                }
+            }
+        });
+        let http = cyper::Client::builder().no_proxy().build().unwrap();
+        let api = ApiState::new(None, http).unwrap();
+        let error = api
+            .fetch_cover_bytes(&format!("http://{address}/unbounded"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("byte limit"));
+        server.await.unwrap();
     }
 }

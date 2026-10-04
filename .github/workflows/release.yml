@@ -93,6 +93,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.90.0
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
@@ -121,6 +122,8 @@ jobs:
     needs: [guard, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v4
         with:
@@ -139,11 +142,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Test root crate
-        run: cargo test --locked --bin cnmplayer --all-targets
+      - name: Test workspace default features
+        run: cargo test --workspace --locked --all-targets
 
-      - name: Test vendored ncm-api crate
-        run: cargo test --manifest-path ncm-api-rs/Cargo.toml --locked --all-targets
+      - name: Test workspace without default features
+        run: cargo test --workspace --locked --all-targets --no-default-features
 
       - uses: actions/download-artifact@v4
         with:
@@ -152,7 +155,9 @@ jobs:
           path: dist
 
       - name: Generate SHA256SUMS
-        run: sha256sum dist/*.tar.xz | sort -k2 > dist/SHA256SUMS
+        run: |
+          cd dist
+          sha256sum *.tar.xz > SHA256SUMS
 
       - uses: actions/upload-artifact@v4
         with:

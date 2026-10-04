@@ -1,5 +1,4 @@
 use crate::tmplayer::app::state::{AppState, Overlay};
-use crate::tmplayer::render::graphics_overlay::GraphicsOverlay;
 use crate::tmplayer::ui::components::control_buttons;
 use crate::tmplayer::ui::panels::{info_panel, playlist_panel, visual_panel};
 use crate::tmplayer::utils::input::Action;
@@ -28,13 +27,11 @@ pub struct UiLayout {
     /// 标题/爱心行（爱心贴该行右端）。
     pub info_meta: Rect,
 
-    pub info_cover_image: Rect,
 
     pub playlist_rect: Rect,
     pub playlist_inner: Rect,
     pub playlist_list_inner: Rect,
 
-    pub playlist_cover_image: Rect,
 
     pub spectrum_rect: Rect,
     /// 当前弹窗（若有）的条目行。
@@ -44,7 +41,6 @@ pub struct UiLayout {
 pub struct Tui {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     pub should_quit: bool,
-    graphics_overlay: GraphicsOverlay,
 }
 
 impl Tui {
@@ -55,7 +51,6 @@ impl Tui {
         Ok(Self {
             terminal,
             should_quit: false,
-            graphics_overlay: GraphicsOverlay::new(app.config.graphics_protocol),
         })
     }
 
@@ -79,9 +74,6 @@ impl Tui {
         Ok(())
     }
 
-    /// Terminal resize can clear/lose kitty graphic placements. Mark placements dirty so
-    /// the next draw will re-place images.
-    pub fn on_resize(&mut self) {}
 
     pub fn draw(&mut self, app: &mut AppState) -> Result<UiLayout> {
         if app.toast.as_ref().map(|(m, _)| m.as_str()) == Some("Bye") {
@@ -205,11 +197,6 @@ impl Tui {
                 Rect::default()
             };
 
-            // For kitty graphics, we draw into the inner area (optional border).
-            layout_out.info_cover_image = info_l.cover.inner(ratatui::layout::Margin {
-                horizontal: 1,
-                vertical: 1,
-            });
 
             // base styling
             f.render_widget(ratatui::widgets::Clear, size);
@@ -263,7 +250,6 @@ impl Tui {
                         let pl_layout = playlist_panel::compute_layout(r, app);
                         layout_out.playlist_inner = pl_layout.inner;
                         layout_out.playlist_list_inner = pl_layout.list_inner;
-                        layout_out.playlist_cover_image = pl_layout.cover_rect;
                         playlist_panel::render(f, r, app);
                     }
                 }
@@ -288,8 +274,6 @@ impl Tui {
                 Self::render_hint_in_border(f, app, bottom_row, layout_out.left);
             }
 
-            // Paint kitty images on top of ratatui widgets.
-            Self::paint_kitty_images(&mut self.graphics_overlay, f, app, &layout_out);
 
             // modals (top-most)
             match app.overlay {
@@ -299,9 +283,6 @@ impl Tui {
                 Overlay::BarSettingsModal => {
                     render_bar_settings_modal(f, size, app, &mut layout_out.modal_rows)
                 }
-                Overlay::LocalAudioSettingsModal => {
-                    render_local_audio_settings_modal(f, size, app, &mut layout_out.modal_rows)
-                }
                 Overlay::LyricsSettingsModal => {
                     render_lyrics_settings_modal(f, size, app, &mut layout_out.modal_rows)
                 }
@@ -309,7 +290,6 @@ impl Tui {
                     render_download_settings_modal(f, size, app, &mut layout_out.modal_rows)
                 }
                 Overlay::AboutModal => render_about_modal(f, size, app),
-                Overlay::AcoustIdModal => render_acoustid_modal(f, size, app),
                 Overlay::HelpModal => render_help_modal(f, size, app, &mut layout_out.modal_rows),
                 Overlay::EqModal => render_eq_modal(f, size, app),
                 _ => {}
@@ -375,54 +355,6 @@ impl Tui {
             .set_string(seg.x, seg.y, &content, border_style);
     }
 
-    fn paint_kitty_images(
-        graphics_overlay: &mut GraphicsOverlay,
-        f: &mut ratatui::Frame<'_>,
-        app: &mut AppState,
-        layout: &UiLayout,
-    ) {
-        let playlist_overlay_visible = app.overlay == Overlay::Playlist
-            || app.playlist_slide_x != app.playlist_slide_target_x
-            || layout.playlist_rect.width > 0;
-
-        let info_cover_bytes = if playlist_overlay_visible {
-            None
-        } else {
-            app.player.track.cover.as_deref()
-        };
-
-        let playlist_fully_expanded = app.overlay == Overlay::Playlist
-            && app.playlist_slide_x == 0
-            && app.playlist_slide_target_x == 0;
-
-        let playlist_cover_bytes = if playlist_fully_expanded {
-            app.local_view_album_cover.as_deref()
-        } else {
-            None
-        };
-
-        let info_rect = if layout.info_cover_image.width > 0 && layout.info_cover_image.height > 0 {
-            Some(layout.info_cover_image)
-        } else {
-            None
-        };
-
-        let playlist_rect =
-            if layout.playlist_cover_image.width > 0 && layout.playlist_cover_image.height > 0 {
-                Some(layout.playlist_cover_image)
-            } else {
-                None
-            };
-
-        graphics_overlay.paint(
-            app,
-            f,
-            info_cover_bytes,
-            playlist_cover_bytes,
-            info_rect,
-            playlist_rect,
-        );
-    }
 }
 
 fn centered_rect(size: Rect, width: u16, height: u16) -> Rect {
@@ -616,53 +548,6 @@ fn render_settings_modal(
     f.render_widget(Paragraph::new(""), bottom_cols[1]);
 }
 
-fn render_acoustid_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
-    let area = centered_rect(size, 60, 8);
-    f.render_widget(ratatui::widgets::Clear, area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(crate::tmplayer::ui::borders::SOLID_BORDER)
-        .title(lang_text(app, "AcoustID API 密钥", "AcoustID API Key"))
-        .style(
-            Style::default()
-                .fg(app.theme.color_subtext())
-                .bg(app.theme.color_surface()),
-        );
-    f.render_widget(block, area);
-
-    let inner = area.inner(ratatui::layout::Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
-
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::styled(
-        "",
-        Style::default()
-            .fg(app.theme.color_subtext())
-            .bg(app.theme.color_surface()),
-    ));
-    lines.push(Line::styled(
-        "",
-        Style::default().bg(app.theme.color_surface()),
-    ));
-    lines.push(Line::styled(
-        format!(
-            "{}: {}",
-            lang_text(app, "API 密钥", "API Key"),
-            app.acoustid_input
-        ),
-        Style::default()
-            .fg(app.theme.color_text())
-            .bg(app.theme.color_surface()),
-    ));
-
-    let p = Paragraph::new(lines)
-        .style(Style::default().bg(app.theme.color_surface()))
-        .wrap(Wrap { trim: true });
-    f.render_widget(p, inner);
-}
 
 fn render_bar_settings_modal(
     f: &mut ratatui::Frame,
@@ -1081,157 +966,6 @@ fn render_download_settings_modal(
     }
 }
 
-fn render_local_audio_settings_modal(
-    f: &mut ratatui::Frame,
-    size: Rect,
-    app: &mut AppState,
-    modal_rows: &mut ModalRows,
-) {
-    let area = centered_rect(size, 60, 12);
-    f.render_widget(ratatui::widgets::Clear, area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(crate::tmplayer::ui::borders::SOLID_BORDER)
-        .title(lang_text(app, "本地音频", "Local Audio"))
-        .style(
-            Style::default()
-                .fg(app.theme.color_subtext())
-                .bg(app.theme.color_surface()),
-        );
-    f.render_widget(block, area);
-
-    let inner = area.inner(ratatui::layout::Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
-
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::styled(
-        "",
-        Style::default()
-            .fg(app.theme.color_subtext())
-            .bg(app.theme.color_surface()),
-    ));
-    lines.push(Line::styled(
-        "",
-        Style::default().bg(app.theme.color_surface()),
-    ));
-
-    let lyrics_fetch_label = format!(
-        "{}: {}",
-        lang_text(app, "歌词/封面获取", "Lyrics/Cover Fetch"),
-        if app.config.lyrics_cover_fetch {
-            lang_text(app, "开", "On")
-        } else {
-            lang_text(app, "关", "Off")
-        }
-    );
-    let lyrics_download_label = format!(
-        "{}: {}",
-        lang_text(app, "歌词/封面下载", "Lyrics/Cover Download"),
-        if app.config.lyrics_cover_download {
-            lang_text(app, "开", "On")
-        } else {
-            lang_text(app, "关", "Off")
-        }
-    );
-    let fingerprint_label = if app.config.acoustid_api_key.trim().is_empty() {
-        format!(
-            "{}: {} ({})",
-            lang_text(app, "音频指纹", "Audio Fingerprint"),
-            lang_text(app, "关", "Off"),
-            lang_text(app, "需要 API 密钥", "API key required")
-        )
-    } else {
-        format!(
-            "{}: {}",
-            lang_text(app, "音频指纹", "Audio Fingerprint"),
-            if app.config.audio_fingerprint {
-                lang_text(app, "开", "On")
-            } else {
-                lang_text(app, "关", "Off")
-            }
-        )
-    };
-    let acoustid_label = format!(
-        "{}: {}",
-        lang_text(app, "AcoustID API", "AcoustID API"),
-        if app.config.acoustid_api_key.trim().is_empty() {
-            lang_text(app, "未设置", "Not set")
-        } else {
-            lang_text(app, "已设置", "Set")
-        }
-    );
-    let resume_label = format!(
-        "{}: {}",
-        lang_text(app, "记住上次进度", "Resume Last Position"),
-        if app.config.resume_last_position {
-            lang_text(app, "开", "On")
-        } else {
-            lang_text(app, "关", "Off")
-        }
-    );
-
-    let items = [
-        lyrics_fetch_label,
-        lyrics_download_label,
-        fingerprint_label,
-        acoustid_label,
-        resume_label,
-    ];
-
-    for (idx, text) in items.iter().enumerate() {
-        let disabled = match idx {
-            2 => app.config.acoustid_api_key.trim().is_empty(),
-            _ => false,
-        };
-
-        let style = if idx == app.local_audio_settings_selected {
-            if disabled {
-                Style::default()
-                    .fg(app.theme.color_subtext())
-                    .bg(app.theme.color_surface())
-            } else {
-                Style::default()
-                    .fg(app.theme.color_accent2())
-                    .add_modifier(Modifier::BOLD)
-            }
-        } else if disabled {
-            Style::default()
-                .fg(app.theme.color_subtext())
-                .bg(app.theme.color_surface())
-        } else {
-            Style::default()
-                .fg(app.theme.color_text())
-                .bg(app.theme.color_surface())
-        };
-        lines.push(Line::styled(format!("  {}", text), style));
-    }
-
-    let p = Paragraph::new(lines)
-        .style(Style::default().bg(app.theme.color_surface()))
-        .wrap(Wrap { trim: true });
-    f.render_widget(p, inner);
-
-    // 命中区：条目从 inner 的第 3 行起（上面两句是空行）。标签都短于弹窗宽度，
-    // 不会被 `Wrap` 折行，故行号与条目号一一对应。
-    for idx in 0..items.len() {
-        let offset = 2 + idx;
-        if offset >= inner.height as usize {
-            break;
-        }
-        modal_rows.push(
-            Rect {
-                x: inner.x,
-                y: inner.y + offset as u16,
-                width: inner.width,
-                height: 1,
-            },
-            idx,
-        );
-    }
-}
 
 fn render_about_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
     let area = centered_rect(size, 70, 22);
@@ -2251,9 +1985,7 @@ mod tests {
         for overlay in [
             Overlay::SettingsModal,
             Overlay::BarSettingsModal,
-            Overlay::LocalAudioSettingsModal,
             Overlay::AboutModal,
-            Overlay::AcoustIdModal,
             Overlay::HelpModal,
             Overlay::EqModal,
         ] {

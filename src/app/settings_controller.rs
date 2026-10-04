@@ -46,4 +46,18 @@ impl SettingsController {
         self.download_reset_armed = false;
         self.last_click = None;
     }
+
+    pub fn select(&mut self, index: usize, count: usize) {
+        self.selected = index.min(count.saturating_sub(1));
+    }
+
+    pub fn begin_download_path_edit(&mut self, value: String) {
+        let cursor = value.chars().count();
+        self.download_path_edit = Some(DownloadPathEdit { buffer: value, cursor, window_col: 0 });
+    }
+
+    pub fn cancel_download_path_edit(&mut self) {
+        self.download_path_edit = None;
+        self.download_reset_armed = false;
+    }
 }

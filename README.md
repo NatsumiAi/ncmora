@@ -142,9 +142,11 @@ paru -S cnmplayer-bin
 
 ### Prebuilt tarballs
 
-Every release publishes `CNMPlayer_vX.Y.Z_linux_amd64.tar.xz` and `CNMPlayer_vX.Y.Z_linux_aarch64.tar.xz` on the [Releases page](https://github.com/professor-lee/CNMPlayer/releases). Both are flat archives containing the `cnmplayer` binary and `LICENSE`:
+Every release publishes `CNMPlayer_vX.Y.Z_linux_amd64.tar.xz`, `CNMPlayer_vX.Y.Z_linux_aarch64.tar.xz` and `SHA256SUMS` on the [Releases page](https://github.com/professor-lee/CNMPlayer/releases). Both tarballs are flat archives containing the `cnmplayer` binary and `LICENSE`.
 
 ```bash
+# Download SHA256SUMS next to the tarball; verify the downloaded architecture.
+sha256sum --check --ignore-missing SHA256SUMS
 tar -xJf CNMPlayer_vX.Y.Z_linux_amd64.tar.xz
 ./cnmplayer
 ```
@@ -209,7 +211,7 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 
 ## Configuration
 
-`config/default.toml` is rewritten on startup whenever a known field is missing, the legacy `Alt+B` sidebar binding is found, or the saved visualizer is unavailable. A malformed file is replaced by the defaults, so keep a copy if you like to hand-edit it.
+`config/default.toml` is rewritten on startup when a defaulted field is missing, a legacy value needs migration, or the saved visualizer is unavailable. Invalid TOML or missing required fields produce an error without replacing the file; repair the reported configuration before restarting.
 
 | Key | Default | Values / notes |
 | --- | --- | --- |
@@ -347,7 +349,7 @@ Fullscreen page:
 - Image rendering: ratatui-image + chafa
 - Visualization: external `cava`, plus an internal PCM tap that feeds the oscilloscope and the LUFS meter
 - Linux media control: mpris-server
-- Fullscreen playback: shared application controllers and `src/ui/` panels
+- Fullscreen playback: embedded `src/tmplayer/` UI using host playback and shared configuration
 
 ## Development
 

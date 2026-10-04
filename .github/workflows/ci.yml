@@ -17,6 +17,8 @@ jobs:
     name: ${{ matrix.toolchain }} / ${{ matrix.feature_name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     strategy:
       fail-fast: false
       matrix:
@@ -52,17 +54,19 @@ jobs:
       - name: cargo check --locked --all-targets
         env:
           FEATURE_ARGS: ${{ matrix.feature_args }}
-        run: cargo check --locked --all-targets $FEATURE_ARGS
+        run: cargo check --workspace --locked --all-targets $FEATURE_ARGS
 
       - name: cargo test --locked --all-targets
         env:
           FEATURE_ARGS: ${{ matrix.feature_args }}
-        run: cargo test --locked --all-targets $FEATURE_ARGS
+        run: cargo test --workspace --locked --all-targets $FEATURE_ARGS
 
   quality:
     name: fmt and clippy
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v4
 
@@ -99,6 +103,8 @@ jobs:
     name: ncm-api tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v4
 

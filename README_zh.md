@@ -142,9 +142,11 @@ paru -S cnmplayer-bin
 
 ### 预编译包
 
-每个版本都会在 [Releases](https://github.com/professor-lee/CNMPlayer/releases) 发布 `CNMPlayer_vX.Y.Z_linux_amd64.tar.xz` 与 `CNMPlayer_vX.Y.Z_linux_aarch64.tar.xz`。两者都是平铺压缩包，内含 `cnmplayer` 可执行文件与 `LICENSE`：
+每个版本都会在 [Releases](https://github.com/professor-lee/CNMPlayer/releases) 发布 `CNMPlayer_vX.Y.Z_linux_amd64.tar.xz`、`CNMPlayer_vX.Y.Z_linux_aarch64.tar.xz` 与 `SHA256SUMS`。两种压缩包都是平铺结构，内含 `cnmplayer` 可执行文件与 `LICENSE`。
 
 ```bash
+# 把 SHA256SUMS 与下载的压缩包放在同一目录，校验已下载的架构。
+sha256sum --check --ignore-missing SHA256SUMS
 tar -xJf CNMPlayer_vX.Y.Z_linux_amd64.tar.xz
 ./cnmplayer
 ```
@@ -209,7 +211,7 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 
 ## 配置
 
-只要缺少任一已知字段、检测到旧的 `Alt+B` 侧边栏绑定或保存的可视化模式不可用，程序就会在启动时重写 `config/default.toml`。文件格式错误时会被默认值覆盖，喜欢手改配置的话建议留一份备份。
+默认字段缺失、旧值需要迁移或保存的可视化模式不可用时，程序会在启动时重写 `config/default.toml`。无效 TOML 或缺少必需字段会报错而不会替换原文件；请根据报错修复配置后再启动。
 
 | 配置项 | 默认值 | 取值 / 说明 |
 | --- | --- | --- |
@@ -347,7 +349,7 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 - 图像渲染：ratatui-image + chafa
 - 可视化：外部 `cava`，以及内部 PCM 抽头驱动的示波器、李萨如矢量模式与 LUFS 计量
 - Linux 媒体控制：mpris-server
-- 全屏播放：共享的应用控制器与 `src/ui/` 面板
+- 全屏播放：内置 `src/tmplayer/` UI，使用主程序播放链路与共享配置
 
 ## 开发
 

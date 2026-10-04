@@ -341,7 +341,11 @@ fn read_output(stdout: impl std::io::Read, cfg: CavaConfig, snapshot: Arc<Mutex<
                 let parsed = parse_ascii_line(&line, cfg.bars.clamp(1, MAX_BARS));
                 if parsed.count == 0 { continue; }
                 match cfg.channels {
-                    CavaChannels::Mono => publish_snapshot(&snapshot, parsed.first, parsed.first, parsed.bars, false),
+                    CavaChannels::Mono => {
+                        let mut mono = parsed.first;
+                        if cfg.reverse { mono[..parsed.bars].reverse(); }
+                        publish_snapshot(&snapshot, mono, mono, parsed.bars, false);
+                    }
                     CavaChannels::Stereo if parsed.count >= 2 => {
                         publish_snapshot(&snapshot, parsed.first, parsed.second, parsed.bars, cfg.reverse);
                         has_pending = false;

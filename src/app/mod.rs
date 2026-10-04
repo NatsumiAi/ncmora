@@ -4710,11 +4710,8 @@ impl App {
     pub(crate) fn refresh_playlist_downloads(&mut self) {
         let epoch = (self.browse.playlist.generation(), self.downloads.rows_epoch);
         let root = self.downloads.root.clone();
-        let tracks = &self.browse.playlist.tracks;
-        self.downloads.playlist_cache
-            .refresh(epoch, &mut self.downloads.manager, || {
-                playlist_download_rows(tracks, root.as_deref())
-            });
+        self.downloads
+            .refresh_playlist(epoch, &self.browse.playlist.tracks, root.as_deref());
     }
 
     /// 歌单页 / 专辑页某行的图标状态（先调 `refresh_playlist_downloads`）。
@@ -4726,11 +4723,8 @@ impl App {
     pub(crate) fn refresh_search_downloads(&mut self) {
         let epoch = (self.search.generation(), self.downloads.rows_epoch);
         let root = self.downloads.root.clone();
-        let results = &self.search.results();
-        self.downloads.search_cache
-            .refresh(epoch, &mut self.downloads.manager, || {
-                search_download_rows(results, root.as_deref())
-            });
+        self.downloads
+            .refresh_search(epoch, self.search.results(), root.as_deref());
     }
 
     /// 搜索页某行的图标状态（先调 `refresh_search_downloads`）。

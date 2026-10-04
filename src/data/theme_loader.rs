@@ -57,6 +57,14 @@ impl ThemeLoader {
         })
     }
 
+    /// Load a theme without running filesystem work on the compio reactor.
+    pub async fn load_async(name: &str) -> Result<Theme> {
+        let name = name.to_string();
+        compio::runtime::spawn_blocking(move || Self::load(&name))
+            .await
+            .map_err(|_| anyhow::anyhow!("theme loader task panicked"))?
+    }
+
     /// 选择的主题格式有问题时回退默认主题。
     pub fn load_or_default(name: &str) -> Theme {
         Self::load(name).unwrap_or_default()
@@ -79,6 +87,13 @@ impl ThemeLoader {
             keys.push("system".to_string());
         }
         keys
+    }
+
+    /// Scan the theme catalog without blocking the compio reactor.
+    pub async fn list_themes_async() -> Vec<String> {
+        compio::runtime::spawn_blocking(Self::list_themes)
+            .await
+            .unwrap_or_else(|_| vec!["system".to_string()])
     }
 }
 
@@ -161,37 +176,3 @@ fn derive_buff_hex(surface_hex: &str) -> String {
     )
 }
 
-fn inject_buff_entry(raw: &str, buff_hex: &str) -> String {
-    if raw.lines().any(|line| is_toml_key(line, "buff")) {
-        return raw.to_string();
-    }
-
-    let mut out = String::with_capacity(raw.len() + 24);
-    let mut inserted = false;
-
-    for line in raw.lines() {
-        out.push_str(line);
-        out.push('\n');
-        if !inserted && is_toml_key(line, "surface") {
-            out.push_str(&format!("buff = \"{}\"\n", buff_hex));
-            inserted = true;
-        }
-    }
-
-    if !inserted {
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str(&format!("buff = \"{}\"\n", buff_hex));
-    }
-
-    out
-}
-
-fn is_toml_key(line: &str, key: &str) -> bool {
-    let trimmed = line.trim_start();
-    if !trimmed.starts_with(key) {
-        return false;
-    }
-    trimmed[key.len()..].trim_start().starts_with('=')
-}

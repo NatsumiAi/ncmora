@@ -1,4 +1,3 @@
-use crate::data::config::GraphicsProtocol;
 use crate::tmplayer::app::state::{AppState, CoverSnapshot, Overlay};
 use crate::tmplayer::render::cover_cache::CoverKey;
 use crate::tmplayer::ui::borders::SOLID_BORDER;
@@ -273,8 +272,7 @@ pub fn render(f: &mut Frame, area: Rect, window_width: u16, app: &mut AppState) 
     if l.cover.width > 0 && l.cover.height > 0 {
         let show_border = app.config.album_border;
 
-        let kitty_enabled = app.config.graphics_protocol != GraphicsProtocol::Off
-            && app.player.track.cover.is_some();
+        let kitty_enabled = false;
 
         let dominant_bg = if let (Some(bytes), Some(hash)) = (
             app.player.track.cover.as_deref(),
@@ -650,17 +648,7 @@ fn cover_ascii_for_snapshot(
         let ascii = match cached {
             Some(s) => s,
             None => {
-                if let Some(folder) = snap.cover_folder.as_deref() {
-                    if let Some(s) = crate::tmplayer::playback::local_player::read_cover_ascii_cache(
-                        folder, hash, width, height,
-                    ) {
-                        app.cover_cache.borrow_mut().put(key, s.clone());
-                        return (s, app.theme.color_text());
-                    }
-                }
-                // Avoid heavy render on UI thread; enqueue background render and
-                // return a cheap placeholder for this frame.
-                app.queue_cover_ascii_render(key, bytes, '░', snap.cover_folder.clone());
+                app.queue_cover_ascii_render(key, bytes, '░');
                 fill_ascii(width, height, '░')
             }
         };

@@ -24,7 +24,7 @@ pub fn write_atomic_with_mode(path: &Path, contents: &[u8], mode: Option<u32>) -
     let effective_mode = mode.or_else(|| existing_mode(path));
 
     let mut temp = TempFile::create(parent, path, effective_mode)?;
-    let temp_path = temp.path.clone();
+    let temp_path = &temp.path;
     let result = (|| {
         temp.file
             .as_mut()
@@ -92,10 +92,22 @@ impl TempFile {
                 options.mode(mode);
             }
             match options.open(&path) {
-                Ok(file) => return Ok(Self {
-                    path,
-                    file: Some(file),
-                }),
+                Ok(file) => {
+                    let temp = Self {
+                        path,
+                        file: Some(file),
+                    };
+                    #[cfg(unix)]
+                    if let Some(mode) = mode {
+                        use std::os::unix::fs::PermissionsExt;
+                        temp.file
+                            .as_ref()
+                            .ok_or_else(|| anyhow::anyhow!("temporary file is closed"))?
+                            .set_permissions(fs::Permissions::from_mode(mode))
+                            .with_context(|| format!("chmod {}", temp.path.display()))?;
+                    }
+                    return Ok(temp);
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => {
                     return Err(error).with_context(|| format!("create {}", path.display()));
@@ -108,13 +120,13 @@ impl TempFile {
 
 impl Drop for TempFile {
     fn drop(&mut self) {
+        drop(self.file.take());
         let _ = fs::remove_file(&self.path);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::write_atomic;
     use std::fs;
 
     #[test]
@@ -153,6 +165,20 @@ mod tests {
             .unwrap()
             .flatten()
             .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp-")));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_cookie_mode_is_private_and_general_mode_is_preserved() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile_dir("permissions");
+        let path = dir.join("session.toml");
+        super::write_atomic_with_mode(&path, b"cookie", Some(0o600)).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        super::write_atomic(&path, b"updated").unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o640);
         let _ = fs::remove_dir_all(dir);
     }
 
