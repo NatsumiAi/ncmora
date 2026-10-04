@@ -2,7 +2,7 @@
 name = "cnmplayer"
 version = "0.6.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.93"
 description = "A Rust TUI client for NetEase Cloud Music"
 license = "AGPL-3.0-only"
 repository = "https://github.com/professor-lee/CNMPlayer"

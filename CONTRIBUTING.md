@@ -25,9 +25,9 @@ to a terminal UI.
 
 ## Development environment
 
-Rust 1.90 or newer; the repository pins 1.90.0 in `rust-toolchain.toml`. The root crate (`cnmplayer`) uses edition 2024; the vendored `ncm-api` crate uses edition 2021.
+Rust 1.93 or newer; the repository pins 1.93.0 in `rust-toolchain.toml`. The root crate (`cnmplayer`) uses edition 2024; the vendored `ncm-api` crate uses edition 2021.
 
-The locked dependency floor is Rust 1.90: `quantette 0.5.1` (through `icy_sixel` and `ratatui-image`) declares `rust-version = "1.90"`. Edition 2024 alone would only require 1.85; it is not the dependency MSRV. The root and vendored crate share one workspace lockfile.
+The locked dependencies require Rust 1.93: `compio-buf 0.8.3` calls the [`MaybeUninit` slice `assume_init_mut()` API](https://doc.rust-lang.org/stable/std/primitive.slice.html#method.assume_init_mut), stabilized in 1.93. A build with 1.90 failed at this call, even though dependency manifest declarations only indicated a 1.90 floor. Edition 2024 alone would only require 1.85; neither edition nor incomplete manifest declarations establish the real dependency MSRV. The root and vendored crate share one workspace lockfile.
 
 System build dependencies — the same list CI installs on `ubuntu-24.04`:
 
@@ -102,7 +102,7 @@ Formatting is `rustfmt`; the repository pins its own configuration:
 Linting is `cargo clippy --all-targets`; `ncm-api-rs/clippy.toml` relaxes
 `too-many-arguments-threshold` to 8 and `type-complexity-threshold` to 300.
 
-CI (`.github/workflows/ci.yml`) runs on pull requests targeting `main` / `develop` and on pushes to `develop`. It installs the system dependencies listed above on `ubuntu-24.04`, checks Rust 1.90 and stable with both default and `--no-default-features`, and runs fmt/clippy gates for the root and vendored crates.
+CI (`.github/workflows/ci.yml`) runs on pull requests targeting `main` / `develop` and on pushes to `develop`. It installs the system dependencies listed above on `ubuntu-24.04`, checks Rust 1.93 and stable with both default and `--no-default-features`, and runs fmt/clippy gates for the root and vendored crates.
 
 The equivalent local commands are:
 

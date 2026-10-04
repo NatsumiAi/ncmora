@@ -290,7 +290,8 @@ mod tests {
             let server = compio::runtime::spawn_blocking(move || {
                 let (mut socket, _) = listener.accept().unwrap();
                 let mut request = [0; 4096];
-                std::io::Read::read_exact(&mut socket, &mut request).unwrap();
+                let received = socket.read(&mut request).unwrap();
+                assert!(received > 0, "client sent its HTTP request");
                 std::io::Write::write_all(
                     &mut socket,
                     b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n",

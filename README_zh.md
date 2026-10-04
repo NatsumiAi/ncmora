@@ -361,7 +361,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-CI（`ci.yml`）会在 Rust 1.90 与 stable 上分别执行默认特性和 `--no-default-features` 的 check/test，并对根 crate 与 vendored crate 执行 fmt、clippy 门禁。
+CI（`ci.yml`）会在 Rust 1.93 与 stable 上分别执行默认特性和 `--no-default-features` 的 check/test，并对根 crate 与 vendored crate 执行 fmt、clippy 门禁。
 发版（`release.yml`）会在发布前执行根 crate 与 vendored crate 测试，随 `x86_64` 与 `aarch64` 压缩包发布 `SHA256SUMS`，并保留 tag、dispatch 空跑和 AUR 同步路径。
 
 ## 相关项目
