@@ -5477,9 +5477,7 @@ impl App {
             self.playback.playback_queue_cover = None;
             return;
         }
-        if self.playback.playback_queue_cover.is_some()
-            || self.cover_fetch_inflight_url.is_some()
-        {
+        if self.playback.playback_queue_cover.is_some() || self.cover_fetch_inflight_url.is_some() {
             return;
         }
         let generation = self.cover_fetch_generation.wrapping_add(1);
