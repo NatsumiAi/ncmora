@@ -6705,10 +6705,10 @@ impl App {
                 }
                 self.overlay = Some(Overlay::Settings);
             }
-            KeyCode::Char('t') | KeyCode::Char('T') => {
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
-                    self.close_overlay();
-                }
+            KeyCode::Char('t') | KeyCode::Char('T')
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                self.close_overlay();
             }
             // 空格等价于点击一次形象：重新计时即打断当前动画重头播放。
             #[cfg(feature = "easter-egg")]
@@ -7546,201 +7546,59 @@ impl App {
         }
     }
 
-    pub async fn build_fullscreen_bootstrap(&mut self) -> crate::tmplayer::FullscreenBootstrap {
+
+    pub fn build_fullscreen_bootstrap(&self) -> crate::tmplayer::FullscreenBootstrap {
         let mut bootstrap = crate::tmplayer::FullscreenBootstrap::default();
-
-        if self.playback.now_playing.is_none() {
+        let Some(now) = self.playback.now_playing.as_ref() else {
             return bootstrap;
+        };
+
+        bootstrap.playlist = self
+            .playback
+            .playback_queue
+            .iter()
+            .map(|track| crate::tmplayer::FullscreenPlaylistItemSeed {
+                id: Some(track.song_id.clone()),
+                title: track.title.clone(),
+                artist: track.artist.clone(),
+                album: track.album.clone(),
+                duration: Duration::from_millis(track.duration_ms.max(0) as u64),
+            })
+            .collect();
+        if bootstrap.playlist.is_empty() {
+            bootstrap.playlist.push(crate::tmplayer::FullscreenPlaylistItemSeed {
+                id: Some(now.song_id.clone()),
+                title: now.title.clone(),
+                artist: now.artist.clone(),
+                album: now.album.clone(),
+                duration: Duration::from_millis(now.duration_ms.max(0) as u64),
+            });
         }
 
-        // peek_shared_future(&self.playlist.cover_bytes).map(|x| Cow::Borrowed(x.as_slice()));
-        // Todo: fixme
-        let mut playlist_cover = None;
-
-        if playlist_cover.is_none() {
-            // 用播放队列的来源封面，而非最后访问的页面封面。
-            if let Some(cover_url) = self.playback.playback_queue_cover_url.clone() {
-                playlist_cover = self.fetch_cover_with_disk_cache(&cover_url).await
-            }
+        let active_idx = self
+            .playback
+            .playback_index
+            .unwrap_or(0)
+            .min(bootstrap.playlist.len().saturating_sub(1));
+        bootstrap.current_index = Some(active_idx);
+        bootstrap.playlist_cover = self
+            .playback
+            .playback_queue
+            .first()
+            .and_then(|track| track.cover.clone());
+        if bootstrap.playlist_cover.is_none() {
+            bootstrap.playlist_cover = now.cover.clone();
         }
-
-        // Prefer persistent now-playing queue so fullscreen follows actual playback state.
-        if !self.playback.playback_queue.is_empty() {
-            bootstrap.playlist = self
-                .playback
-                .playback_queue
-                .iter()
-                .map(|track| crate::tmplayer::FullscreenPlaylistItemSeed {
-                    id: Some(track.song_id.clone()),
-                    title: track.title.clone(),
-                    artist: track.artist.clone(),
-                    album: track.album.clone(),
-                    duration: Duration::from_millis(track.duration_ms.max(0) as u64),
-                })
-                .collect();
-            if !bootstrap.playlist.is_empty() {
-                bootstrap.current_index = self
-                    .playback
-                    .playback_index
-                    .map(|index| index.min(bootstrap.playlist.len() - 1));
-            }
-        }
-
-        // Keep fullscreen in true idle state when nothing is actually playing.
-        if bootstrap.playlist.is_empty()
-            && let Some(track) = self.playback.now_playing.as_ref()
-        {
-            bootstrap
-                .playlist
-                .push(crate::tmplayer::FullscreenPlaylistItemSeed {
-                    id: Some(track.song_id.clone()),
-                    title: track.title.clone(),
-                    artist: track.artist.clone(),
-                    album: track.album.clone(),
-                    duration: Duration::from_millis(track.duration_ms.max(0) as u64),
-                });
-            bootstrap.current_index = Some(0);
-        }
-
-        if !bootstrap.playlist.is_empty() {
-            let mut active_idx = bootstrap
-                .current_index
-                .unwrap_or(0)
-                .min(bootstrap.playlist.len() - 1);
-
-            if let Some(now) = self.playback.now_playing.as_ref()
-                && let Some(found) = bootstrap.playlist.iter().position(|item| {
-                    item.id
-                        .as_deref()
-                        .map(|id| id == now.song_id.as_str())
-                        .unwrap_or(false)
-                })
-            {
-                active_idx = found;
-            }
-            bootstrap.current_index = Some(active_idx);
-
-            let active = bootstrap.playlist[active_idx].clone();
-            let mut seed = crate::tmplayer::FullscreenTrackSeed {
-                playlist_index: Some(active_idx),
-                title: active.title,
-                artist: active.artist,
-                album: active.album,
-                duration: active.duration,
-                liked: self.playback.now_playing_liked,
-                cover: None,
-                lyrics: None,
-            };
-
-            if let Some(now) = self.playback.now_playing.as_ref() {
-                seed.title = now.title.clone();
-                seed.artist = now.artist.clone();
-                seed.album = now.album.clone();
-                seed.duration = Duration::from_millis(now.duration_ms.max(0) as u64);
-                seed.cover = now.cover.clone();
-                seed.lyrics = now.lyrics.clone();
-            }
-
-            let song_id = self
-                .playback
-                .now_playing
-                .as_ref()
-                .map(|track| track.song_id.clone())
-                .or_else(|| bootstrap.playlist[active_idx].id.clone());
-
-            if let Some(song_id) = song_id {
-                if let Ok(detail) = self.api.song_detail(&song_id).await
-                    && let Some(song) = detail
-                        .body
-                        .get("songs")
-                        .and_then(|value| value.as_array())
-                        .and_then(|items| items.first())
-                {
-                    if let Some(name) = song.get("name").and_then(|value| value.as_str()) {
-                        seed.title = name.to_string();
-                    }
-                    if let Some(artist) = parse_artists(song) {
-                        seed.artist = artist;
-                    }
-                    if let Some(album) = song.pointer("/al/name").and_then(|value| value.as_str()) {
-                        seed.album = album.to_string();
-                    }
-                    if let Some(duration_ms) = song.get("dt").and_then(|value| value.as_i64()) {
-                        seed.duration = Duration::from_millis(duration_ms.max(0) as u64);
-                    }
-
-                    if seed.cover.is_none()
-                        && let Some(cover_url) =
-                            song.pointer("/al/picUrl").and_then(|value| value.as_str())
-                        && let Some(bytes) = self.fetch_cover_with_disk_cache(cover_url).await
-                    {
-                        seed.cover = Some(bytes);
-                    }
-                }
-
-                if seed.cover.is_none() {
-                    let fallback_cover_url = self
-                        .playback
-                        .now_playing
-                        .as_ref()
-                        .and_then(|track| track.cover_url.clone());
-                    if let Some(cover_url) = fallback_cover_url.as_deref()
-                        && let Some(bytes) = self.fetch_cover_with_disk_cache(cover_url).await
-                    {
-                        seed.cover = Some(bytes);
-                    }
-                }
-
-                if seed.lyrics.is_none()
-                    && let Ok(lyric) = self.api.lyric(&song_id).await
-                    && let Some(raw_lrc) = lyric
-                        .body
-                        .pointer("/lrc/lyric")
-                        .and_then(|value| value.as_str())
-                {
-                    seed.lyrics =
-                        crate::tmplayer::playback::metadata::parse_lrc(raw_lrc).or_else(|| {
-                            crate::tmplayer::playback::metadata::parse_plain_lyrics(raw_lrc)
-                        });
-                }
-            }
-
-            if playlist_cover.is_none() {
-                let first_track = self
-                    .playback
-                    .playback_queue
-                    .first()
-                    .cloned()
-                    .or_else(|| self.playback.now_playing.clone());
-
-                if let Some(first_track) = first_track {
-                    playlist_cover = first_track.cover.clone();
-
-                    if playlist_cover.is_none()
-                        && let Some(cover_url) = first_track.cover_url.as_deref()
-                    {
-                        playlist_cover = self.fetch_cover_with_disk_cache(cover_url).await
-                    }
-
-                    if playlist_cover.is_none()
-                        && let Ok(detail) = self.api.song_detail(&first_track.song_id).await
-                        && let Some(song) = detail
-                            .body
-                            .get("songs")
-                            .and_then(|value| value.as_array())
-                            .and_then(|items| items.first())
-                        && let Some(cover_url) =
-                            song.pointer("/al/picUrl").and_then(|value| value.as_str())
-                    {
-                        playlist_cover = self.fetch_cover_with_disk_cache(cover_url).await
-                    }
-                }
-            }
-
-            bootstrap.playlist_cover = playlist_cover;
-            bootstrap.current_track = Some(seed);
-        }
-
+        bootstrap.current_track = Some(crate::tmplayer::FullscreenTrackSeed {
+            playlist_index: Some(active_idx),
+            title: now.title.clone(),
+            artist: now.artist.clone(),
+            album: now.album.clone(),
+            duration: Duration::from_millis(now.duration_ms.max(0) as u64),
+            liked: self.playback.now_playing_liked,
+            cover: now.cover.clone(),
+            lyrics: now.lyrics.clone(),
+        });
         bootstrap
     }
 

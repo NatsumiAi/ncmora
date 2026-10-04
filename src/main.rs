@@ -391,7 +391,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut Ap
         app.tick().await;
 
         if app.consume_fullscreen_launch_request() {
-            let bootstrap = app.build_fullscreen_bootstrap().await;
+            let bootstrap = app.build_fullscreen_bootstrap();
             launch_tmplayer_fullscreen(terminal, app, bootstrap).await?;
             continue;
         }
