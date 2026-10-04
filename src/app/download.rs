@@ -452,29 +452,29 @@ impl DownloadManager {
             });
         }
 
+        match self.known_state_of(&request.song_id, &request.target) {
+            None => return Err("正在检查下载文件，请稍候".to_string()),
+            Some(DownloadState::Done) => return Err("该歌曲已下载".to_string()),
+            Some(_) => {}
+        }
         self.api = api.clone();
         let shared = Arc::new(JobShared::default());
-        self.jobs.insert(
-            request.song_id.clone(),
-            JobHandle {
-                title: request.title.clone(),
-                level: request.level,
-                cancelling: false,
-                start_reported: false,
-                shared: shared.clone(),
-            },
-        );
-        self.disk_cache.remove(
-            &request
-                .target
-                .dir
-                .join(&request.target.base)
-                .display()
-                .to_string(),
-        );
+        let song_id = request.song_id.clone();
+        let key = request.target.dir.join(&request.target.base).display().to_string();
+        let job = JobHandle {
+            title: request.title.clone(),
+            level: request.level,
+            cancelling: false,
+            start_reported: false,
+            shared: shared.clone(),
+        };
+        // Dispatch is synchronous on this reactor: publish the job/version only
+        // after successful queue admission. Failure leaves no permanent busy slot.
+        self.dispatch(DownloadMessage { request, shared })?;
+        self.jobs.insert(song_id, job);
+        self.disk_cache.remove(&key);
         self.bump_version();
-
-        self.dispatch(DownloadMessage { request, shared })
+        Ok(())
     }
 
     /// 把消息送进队列；没有活着的任务就现起一个。
@@ -604,38 +604,44 @@ impl DownloadManager {
         events
     }
 
-    /// 图标三态：任务在途 → 下载中；否则查磁盘（带缓存）。
+    /// Rendering fallback; unknown disk status displays as not downloaded.
+    /// Actions must use [`Self::known_state_of`] and defer while it returns `None`.
     pub fn state_of(&mut self, song_id: &str, target: &DownloadTarget) -> DownloadState {
+        self.known_state_of(song_id, target).unwrap_or(DownloadState::NotDownloaded)
+    }
+
+    /// `None` means a bounded background disk lookup is pending, not an absent file.
+    pub fn known_state_of(&mut self, song_id: &str, target: &DownloadTarget) -> Option<DownloadState> {
         let key = target.dir.join(&target.base).display().to_string();
         self.state_of_key(song_id, &key, target)
     }
 
     /// 用预计算行查状态：key 不重建，命中缓存时零分配。
     pub fn state_of_row(&mut self, row: &DownloadRow) -> DownloadState {
-        self.state_of_key(&row.song_id, &row.key, &row.target)
+        self.state_of_key(&row.song_id, &row.key, &row.target).unwrap_or(DownloadState::NotDownloaded)
     }
 
-    fn state_of_key(&mut self, song_id: &str, key: &str, target: &DownloadTarget) -> DownloadState {
+    fn state_of_key(&mut self, song_id: &str, key: &str, target: &DownloadTarget) -> Option<DownloadState> {
         if let Some(job) = self.jobs.get(song_id) {
-            return if job.cancelling {
+            return Some(if job.cancelling {
                 DownloadState::NotDownloaded
             } else {
                 DownloadState::Downloading
-            };
+            });
         }
 
         if let Some(done) = self.disk_cache.get(key) {
-            return if *done {
+            return Some(if *done {
                 DownloadState::Done
             } else {
                 DownloadState::NotDownloaded
-            };
+            });
         }
 
         if self.disk_pending.len() < 256 && !self.disk_pending.contains_key(key) {
             self.disk_pending.insert(key.to_string(), target.clone());
         }
-        DownloadState::NotDownloaded
+        None
     }
 
     fn poll_disk_status(&mut self) {
@@ -1097,16 +1103,32 @@ mod tests {
         let target = DownloadTarget { dir: directory.clone(), base: "song".to_string() };
         compio::fs::write(target.file_path("mp3"), b"audio".to_vec()).await.0.unwrap();
         let api = ApiState::new(None, cyper::Client::builder().build().unwrap()).unwrap();
-        let mut manager = DownloadManager::new(api);
+        let mut manager = DownloadManager::new(api.clone());
         let row = DownloadRow::new("42".to_string(), target.clone());
         assert_eq!(manager.state_of_row(&row), DownloadState::NotDownloaded,
             "render-time lookup must not stat an uncached row");
+        let request = DownloadRequest {
+            song_id: "42".to_string(), level: AudioQuality::Exhigh,
+            title: "song".to_string(), artist: String::new(), album: String::new(),
+            target: target.clone(),
+        };
+        let initial_version = manager.version();
+        // Deliberately do not poll: the lookup stays unresolved deterministically.
+        assert_eq!(manager.known_state_of("42", &target), None);
+        assert!(manager.enqueue(&api, request.clone()).is_err());
+        assert!(!manager.is_busy("42"), "pending lookup must not admit a download job");
+        assert_eq!(manager.version(), initial_version);
+        assert_eq!(compio::fs::read(target.file_path("mp3")).await.unwrap(), b"audio");
         compio::time::timeout(Duration::from_secs(5), async {
             while manager.state_of_row(&row) != DownloadState::Done {
                 manager.poll();
                 compio::time::sleep(Duration::from_millis(1)).await;
             }
         }).await.unwrap();
+        assert_eq!(manager.known_state_of("42", &target), Some(DownloadState::Done));
+        assert!(manager.enqueue(&api, request).is_err());
+        assert!(!manager.is_busy("42"));
+        assert_eq!(compio::fs::read(target.file_path("mp3")).await.unwrap(), b"audio");
         compio::fs::remove_file(target.file_path("mp3")).await.unwrap();
         manager.clear_disk_cache();
         let version = manager.version();
