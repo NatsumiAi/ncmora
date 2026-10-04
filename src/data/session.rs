@@ -18,8 +18,9 @@ pub fn load_cookie() -> Result<Option<String>> {
     }
 
     let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-    let record: SessionRecord =
-        toml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
+    // 损坏的会话只代表本地登录状态失效：回到登录页，由下一次登录覆盖它。
+    // 文件读取权限/IO 错误仍然传播，避免把系统故障伪装成未登录。
+    let record: SessionRecord = toml::from_str(&raw).unwrap_or_default();
     let cookie = record.cookie.trim().to_string();
     if cookie.is_empty() {
         return Ok(None);
