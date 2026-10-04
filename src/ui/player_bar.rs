@@ -213,15 +213,9 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let download_state = app.current_download_state();
     let download_glyph = download_state
         .map(|state| crate::app::download::state_glyph(state, app.download_spinner_phase()));
-    let download_style = match download_state {
-        Some(crate::app::download::DownloadState::Downloading) => Style::default()
-            .fg(app.theme.color_accent2())
-            .add_modifier(Modifier::BOLD),
-        Some(crate::app::download::DownloadState::Done) => {
-            Style::default().fg(app.theme.color_accent3())
-        }
-        _ => Style::default().fg(app.theme.color_subtext()),
-    };
+    // 下载图标与折叠栏里除爱心以外的按钮同色（控制行 prev/play/next/mode 用的 text 色），
+    // 不按下载状态换色；状态由字形表达（转圈 / 对勾）。
+    let download_style = Style::default().fg(app.theme.color_text());
 
     let mut like_hit = None;
     let mut download_hit = None;
@@ -251,16 +245,13 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             HEART_UNLIKED
         };
-        if let Some(stripped) = head.strip_suffix(heart) {
-            head = stripped;
-            if let Some(glyph) = download_glyph
-                && let Some(stripped) = head.strip_suffix(glyph)
-                && let Some(stripped) = stripped.strip_suffix(' ')
-            {
-                head = stripped;
-                tail.push((glyph.to_string(), download_style));
-                tail.push((" ".to_string(), left_style));
-            }
+        let split = split_left_tail(head, heart, download_glyph);
+        head = split.head;
+        if let Some(glyph) = split.glyph {
+            tail.push((glyph.to_string(), download_style));
+            tail.push((" ".to_string(), left_style));
+        }
+        if split.heart.is_some() {
             tail.push((heart.to_string(), left_style));
         }
     }
@@ -484,6 +475,45 @@ fn compose_left_right_line(left: &str, right: &str, width: usize) -> String {
     format!("{left_text}{}{right}", " ".repeat(pad))
 }
 
+/// `compose_left_right_line` 尾段的拆分结果：`head` 之后依次是
+/// 「下载图标、空格、爱心」。
+struct LeftTail<'a> {
+    head: &'a str,
+    glyph: Option<char>,
+    heart: Option<&'a str>,
+}
+
+/// 从右端剥出「下载图标 + 空格 + 爱心」三段，供调用方各段独立上色。
+///
+/// 串是自左向右拼的，剥离必须自右向左：爱心 → 空格 → 图标。顺序写反时图标
+/// 会留在 `head` 里、被当成标题一起上色（曾静默回归：图标永远是字的颜色）。
+/// 尾巴上没有爱心（空标题/极窄列）时原样返回；有爱心但图标被裁掉时
+/// `glyph` 为 `None`。
+fn split_left_tail<'a>(line: &'a str, heart: &'a str, glyph: Option<char>) -> LeftTail<'a> {
+    let Some(stripped) = line.strip_suffix(heart) else {
+        return LeftTail {
+            head: line,
+            glyph: None,
+            heart: None,
+        };
+    };
+    if let Some(glyph) = glyph
+        && let Some(stripped) = stripped.strip_suffix(' ')
+        && let Some(stripped) = stripped.strip_suffix(glyph)
+    {
+        return LeftTail {
+            head: stripped,
+            glyph: Some(glyph),
+            heart: Some(heart),
+        };
+    }
+    LeftTail {
+        head: stripped,
+        glyph: None,
+        heart: Some(heart),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,5 +660,55 @@ mod tests {
         let clipped = control_hit_rects(row(0, row_w - 1), labels);
         assert!(clipped.mode.is_none(), "末段越界时不登记");
         assert!(clipped.prev.is_some(), "首段仍在区域内");
+    }
+
+    /// 尾段必须按「图标 / 空格 / 爱心」拆开，图标不能留在头段里
+    /// （留在头段就会被当成标题上色——图标颜色静默回归的根因）。
+    #[test]
+    fn left_tail_peels_the_glyph_out_of_the_head() {
+        let glyph = '\u{ec74}';
+        for heart in [HEART_LIKED, HEART_UNLIKED] {
+            let suffix = format!("{glyph} {heart}");
+            let line = compose_left_right_line("Title", &suffix, 20);
+            let split = split_left_tail(&line, heart, Some(glyph));
+
+            assert_eq!(split.glyph, Some(glyph), "图标自成一段：{line:?}");
+            assert_eq!(split.heart, Some(heart), "爱心自成一段：{line:?}");
+            assert!(
+                !split.head.contains(glyph),
+                "头段里不该再留图标：{:?}",
+                split.head
+            );
+            assert_eq!(
+                format!(
+                    "{}{}{}{}",
+                    split.head,
+                    split.glyph.unwrap(),
+                    ' ',
+                    split.heart.unwrap()
+                ),
+                line,
+                "拆出的三段必须原样拼回整串"
+            );
+        }
+    }
+
+    /// 图标被裁掉（只剩爱心）时不产生图标段；没有爱心时整串就是头段。
+    #[test]
+    fn left_tail_handles_missing_glyph_and_missing_heart() {
+        let heart = HEART_UNLIKED;
+        let glyph = '\u{ec74}';
+
+        let heart_only = compose_left_right_line("Title", heart, 20);
+        let split = split_left_tail(&heart_only, heart, Some(glyph));
+        assert_eq!(split.glyph, None, "画不下的图标不该凭空出现");
+        assert_eq!(split.heart, Some(heart));
+        assert_eq!(split.head, heart_only.strip_suffix(heart).unwrap());
+
+        let plain = "Title";
+        let split = split_left_tail(plain, heart, Some(glyph));
+        assert_eq!(split.head, plain, "没有爱心尾巴时原样返回");
+        assert_eq!(split.glyph, None);
+        assert_eq!(split.heart, None);
     }
 }
