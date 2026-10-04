@@ -336,6 +336,10 @@ Fullscreen page:
 - There is no dedicated album page; album search results and artist-page albums are shown with the playlist-page layout.
 - Native audio backends write warnings straight to stderr; CNMPlayer redirects fd 2 into `Player.stderr.log` so those messages cannot smear the TUI.
 - Prebuilt artifacts and AUR packages are produced for Linux `amd64` and `aarch64` only. MPRIS is Linux-only as well.
+- Background page and artwork reads are cancelled when their last UI owner is dropped. API responses and cover downloads have a 30-second deadline covering headers and the complete body; streaming playback also bounds header waiting to 30 seconds. Slow audio bodies remain cooperatively cancellable rather than imposing a total song-download deadline.
+- Cover and lyric workers each run one request and retain only the latest pending request; result mailboxes are bounded. Blocking cover validation admits at most two jobs, and cancellation does not release a job's slot before it actually finishes.
+- One persistence thread keeps at most 32 pending cache writes and four pending keyed snapshots (configuration, login session, playback memory and private roam). New snapshots replace older pending snapshots for the same key; flush barriers preserve ordering. Cache writes rejected at capacity are logged; this optional cache does not prevent displaying a fetched cover.
+- Seeking uses one worker and one latest pending target. Each track owns a separate playback queue, so a stale seek cannot affect the next track. A blocked filesystem/audio operation cannot be forcibly cancelled: it may delay completion or shutdown, but does not admit more workers.
 
 ## Tech Stack
 
