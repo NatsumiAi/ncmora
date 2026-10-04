@@ -32,6 +32,22 @@ impl PlaybackController {
         }
     }
 
+    /// 全屏入口与后续快照共用：来源封面未就绪时使用歌曲封面，不保留旧队列的图。
+    pub fn fullscreen_playlist_cover(&self) -> Option<&[u8]> {
+        self.playback_queue_cover
+            .as_deref()
+            .or_else(|| {
+                self.playback_queue
+                    .first()
+                    .and_then(|track| track.cover.as_deref())
+            })
+            .or_else(|| {
+                self.now_playing
+                    .as_ref()
+                    .and_then(|track| track.cover.as_deref())
+            })
+    }
+
     pub fn cycle_repeat_mode(&mut self) {
         self.playback_repeat_mode = self.playback_repeat_mode.next();
     }

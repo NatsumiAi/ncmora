@@ -407,15 +407,7 @@ fn render_search_row(
     let download_style = if focused {
         row_style
     } else {
-        let download_style = match download_state {
-            Some(crate::app::download::DownloadState::Done) => {
-                Style::default().fg(app.theme.color_accent3())
-            }
-            Some(crate::app::download::DownloadState::Downloading) => Style::default()
-                .fg(app.theme.color_accent2())
-                .add_modifier(Modifier::BOLD),
-            _ => Style::default().fg(app.theme.color_subtext()),
-        };
+        let download_style = Style::default().fg(app.theme.color_subtext());
         // 图标格与所在行同底色：斑马底在行样式上，这里补齐，
         // 避免图标格露出与行不同的背景。
         match zebra_bg {

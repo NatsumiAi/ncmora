@@ -3978,7 +3978,10 @@ impl App {
             current_index: self.playback.playback_index,
             now_playing: self.playback.now_playing.clone(),
             now_playing_liked: self.playback.now_playing_liked,
-            playlist_cover: self.playback.playback_queue_cover.clone(),
+            playlist_cover: self
+                .playback
+                .fullscreen_playlist_cover()
+                .map(|cover| cover.to_vec()),
             state: self.playback.playback_state,
             repeat_mode: self.playback.playback_repeat_mode,
             position: self.playback.audio_player.display_position(),
@@ -7657,17 +7660,10 @@ impl App {
             .unwrap_or(0)
             .min(bootstrap.playlist.len().saturating_sub(1));
         bootstrap.current_index = Some(active_idx);
-        bootstrap.playlist_cover = self.playback.playback_queue_cover.clone();
-        if bootstrap.playlist_cover.is_none() {
-            bootstrap.playlist_cover = self
-                .playback
-                .playback_queue
-                .first()
-                .and_then(|track| track.cover.clone());
-        }
-        if bootstrap.playlist_cover.is_none() {
-            bootstrap.playlist_cover = now.cover.clone();
-        }
+        bootstrap.playlist_cover = self
+            .playback
+            .fullscreen_playlist_cover()
+            .map(|cover| cover.to_vec());
         bootstrap.current_track = Some(crate::tmplayer::FullscreenTrackSeed {
             playlist_index: Some(active_idx),
             title: now.title.clone(),
@@ -7723,6 +7719,7 @@ impl App {
                 playback_repeat_mode_key(self.playback.playback_repeat_mode).to_string(),
             ),
             source_playlist_id: self.playback.playback_queue_source_id.clone(),
+            source_cover_url: self.playback.playback_queue_cover_url.clone(),
             updated_at: 0,
         };
 
@@ -7785,8 +7782,12 @@ impl App {
             self.playback.playback_repeat_mode = mode;
         }
 
-        self.playback
-            .replace_queue(queue, None, None, record.source_playlist_id.clone());
+        self.playback.replace_queue(
+            queue,
+            None,
+            record.source_cover_url,
+            record.source_playlist_id,
+        );
         let target = record
             .current_index
             .unwrap_or(0)

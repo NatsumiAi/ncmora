@@ -376,15 +376,7 @@ pub fn render(f: &mut Frame, area: Rect, window_width: u16, app: &mut AppState) 
             ""
         };
         let download_glyph = download_cells(meta_rect, app).and_then(|_| download_glyph(app));
-        let download_style = match app.download_state {
-            crate::tmplayer::DownloadIconState::Downloading => Style::default()
-                .fg(app.theme.color_accent2())
-                .add_modifier(Modifier::BOLD),
-            crate::tmplayer::DownloadIconState::Done => {
-                Style::default().fg(app.theme.color_accent3())
-            }
-            _ => Style::default().fg(app.theme.color_subtext()),
-        };
+        let download_style = Style::default().fg(app.theme.color_subtext());
 
         let right = match download_glyph {
             // 下载图标与爱心之间留一个空格（图标整体再左一位）。
