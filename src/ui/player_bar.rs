@@ -517,7 +517,6 @@ mod tests {
     use super::*;
     use crate::app::download::{DownloadState, state_glyph};
 
-
     fn row(x: u16, width: u16) -> Rect {
         Rect {
             x,

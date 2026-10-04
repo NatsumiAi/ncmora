@@ -435,7 +435,10 @@ fn read_output(stdout: impl std::io::Read, cfg: CavaConfig, snapshot: Arc<Mutex<
                         if cfg.reverse {
                             mono[..parsed.bars].reverse();
                         }
-                        publish_snapshot(&snapshot, mono, mono, parsed.bars, false);
+                        let mut current = snapshot.lock();
+                        current.bars = parsed.bars;
+                        current.left = mono;
+                        current.right = mono;
                     }
                     CavaChannels::Stereo if parsed.count >= 2 => {
                         publish_snapshot(
@@ -633,6 +636,18 @@ mod tests {
         assert_eq!(left[..3], [0.3, 0.2, 0.1]);
         assert_eq!(right[..3], [0.4, 0.5, 0.6]);
     }
+
+    #[test]
+    fn mono_snapshot_preserves_frequency_order_before_full_width_rendering() {
+        let snapshot = Arc::new(Mutex::new(CavaSnapshot::default()));
+        read_output(std::io::Cursor::new(b"100;200;400;900\n"),
+            CavaConfig { framerate_hz: 30, bars: 4, channels: CavaChannels::Mono, reverse: false },
+            snapshot.clone());
+        let mut mono = [0.0; 4];
+        assert_eq!(snapshot.lock().mono_into(&mut mono), 4);
+        assert_eq!(mono, [0.1, 0.2, 0.4, 0.9]);
+    }
+
 
     #[cfg(unix)]
     #[test]
