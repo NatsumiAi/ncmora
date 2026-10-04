@@ -5468,12 +5468,14 @@ impl App {
     fn maybe_schedule_queue_cover_fetch(&mut self) {
         let Some(url) = self.playback.playback_queue_cover_url.clone() else {
             self.playback.playback_queue_cover = None;
-            self.playback.playback_queue_cover = None;
             return;
         };
         let url = url.trim().to_string();
-        if url.is_empty()
-            || self.playback.playback_queue_cover.is_some()
+        if url.is_empty() {
+            self.playback.playback_queue_cover = None;
+            return;
+        }
+        if self.playback.playback_queue_cover.is_some()
             || self.cover_fetch_inflight_url.is_some()
         {
             return;
@@ -8351,8 +8353,13 @@ impl App {
                     .cover
                     .load(self.api.clone(), cover.clone());
             }
-            // 漫游没有固定的列表封面，其语义是「跟随当前播放歌曲」。
-            // 队列来源封面（全屏侧边栏用）同步更新，否则会停在换队列那一刻的旧封面。
+            // 漫游封面随当前歌曲变化；URL 变化时旧字节必须失效，
+            // 否则调度器会因已有缓存而永久跳过新封面下载。
+            if self.playback_queue_is_roam()
+                && self.playback.playback_queue_cover_url.as_deref() != Some(cover.as_str())
+            {
+                self.playback.playback_queue_cover = None;
+            }
             if self.playback_queue_is_roam() {
                 self.playback.playback_queue_cover_url = Some(cover);
             }
