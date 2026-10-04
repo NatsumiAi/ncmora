@@ -25,8 +25,9 @@ to a terminal UI.
 
 ## Development environment
 
-Rust: stable toolchain. The root crate (`cnmplayer`) uses edition 2024; the
-vendored `ncm-api` crate uses edition 2021.
+Rust 1.95 or newer; the repository pins 1.95.0 in `rust-toolchain.toml`. The root crate (`cnmplayer`) uses edition 2024; the vendored `ncm-api` crate uses edition 2021.
+
+The locked dependencies require Rust 1.95: `compio-driver 0.12.4` uses [`std::cfg_select!`](https://doc.rust-lang.org/stable/std/macro.cfg_select.html), stabilized in 1.95. Dependency manifest declarations suggested 1.90, but an actual 1.90 build failed at `compio-buf 0.8.3`'s `MaybeUninit` slice API and a 1.93 build failed at `cfg_select!`. Edition 2024 alone would only require 1.85; neither edition nor incomplete manifest declarations establish the real dependency MSRV. The root and vendored crate share one workspace lockfile.
 
 System build dependencies — the same list CI installs on `ubuntu-24.04`:
 
@@ -51,24 +52,21 @@ sudo pacman -S --needed base-devel cmake pkg-config alsa-lib chafa pipewire open
   must be installed to build, but playback goes through PipeWire and the ALSA
   path is not a supported runtime configuration.
 
-Runtime: PipeWire for audio — the ALSA backend is deprecated, do not test or
-document it — plus the chafa shared library, an optional `cava` binary for the
-`bars` visualizer (without it the default visualizer becomes the oscilloscope),
-and a Nerd Font is strongly recommended — some UI glyphs render as
-missing-glyph boxes otherwise.
+Runtime: PipeWire for audio — the ALSA backend is deprecated, do not test or document it — plus the chafa shared library and an optional `cava` binary for the `bars` visualizer. A Nerd Font is required for playback and navigation icons; the application uses Nerd glyphs directly.
 
 Commands:
 
 ```bash
-cargo run                            # development build
-cargo build --release                # release build
-cargo test                           # unit tests
-cargo check --locked --all-targets   # exactly what CI runs on pull requests
+cargo run                              # development build
+cargo build --release                  # release build
+cargo test --workspace --all-targets   # root and vendored crate tests
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 Useful environment variables while developing: `CNMPLAYER_ASSET_DIR` (asset root,
 `~/.config/cnmplayer` by default) and `TMPLAYER_CAVA` (explicit path to the cava
-binary).
+binary; the name is retained for compatibility).
 
 Cargo features: `default = ["easter-egg"]` — the mascot in the About modal. Build
 with `--no-default-features` to drop it.
@@ -77,13 +75,13 @@ with `--no-default-features` to drop it.
 
 | Path | Contents |
 | --- | --- |
-| `src/main.rs` | Entry point: terminal setup, asset root, hand-off to the app. |
-| `src/app/` | Host application core — `mod.rs` (state and logic), `startup.rs` (the startup chain), `api.rs`, `streaming.rs` (streaming and cache), `player.rs` (playback), `mpris_bridge.rs`. |
-| `src/ui/` | Host UI — one module per page or panel: `login.rs`, `home.rs`, `playlist.rs`, `author.rs`, `search.rs`, `search_box.rs`, `settings.rs`, `player_bar.rs`, `page_lyrics.rs`, `small_window.rs`, `loading.rs`, `theme.rs`. |
-| `src/data/` | Configuration and persistence — `config.rs`, `assets.rs`, `session.rs`, `playback_session.rs`, `private_roam.rs`, `theme_loader.rs`. |
+| `src/main.rs` | Entry point: terminal setup, asset root, and hand-off to the application. |
+| `src/app/` | Application core: shared state in `mod.rs`, API/streaming/player/download services, MPRIS bridge, `SearchController` in `controllers.rs`, and focused browse/download/input/playback/settings/startup controllers. |
+| `src/ui/` | Host UI panels: login, home, playlist, author, search, settings, player bar, lyrics, loading, small-window and theme modules. |
+| `src/data/` | Shared `Config` plus assets, atomic persistence, sessions, playback/private-roam state, and theme loading. |
 | `src/render/` | Cover and graphics rendering, plus the easter-egg mascot frames. |
-| `src/tmplayer/` | The embedded fullscreen playback page (TMPlayer), self-contained: `app/`, `ui/`, `audio/` (cava link, PCM tap, LUFS meter), `render/` (spectrum, oscilloscope), `playback/`, `data/`, `utils/`. |
-| `ncm-api-rs/` | The `ncm-api` crate vendored from [imsyy/ncm-api-rs](https://github.com/imsyy/ncm-api-rs) as a path dependency. It ships its own `rustfmt.toml` / `clippy.toml` and `docs/API.md`. |
+| `src/tmplayer/` | Embedded fullscreen playback UI, its renderers and audio visualization helpers; playback is owned by the host and configuration uses the shared `Config`. |
+| `ncm-api-rs/` | The `ncm-api` crate vendored from [imsyy/ncm-api-rs](https://github.com/imsyy/ncm-api-rs) as a workspace path dependency. It ships `rustfmt.toml`, `clippy.toml` and `docs/API.md`. |
 | `config/default.toml` | The default configuration template. At startup the app writes and repairs `config/default.toml` under the asset root from it. |
 | `themes/` | TOML color themes: `system`, `latte`, `frappe`, `macchiato`, `mocha`. |
 | `about/` | Content of the About modal — links, QQ group, braille art. |
@@ -104,21 +102,22 @@ Formatting is `rustfmt`; the repository pins its own configuration:
 Linting is `cargo clippy --all-targets`; `ncm-api-rs/clippy.toml` relaxes
 `too-many-arguments-threshold` to 8 and `type-complexity-threshold` to 300.
 
-CI (`.github/workflows/ci.yml`) runs on pull requests targeting `main` /
-`develop` and on pushes to `develop`. It installs the system dependencies listed
-above on `ubuntu-24.04` with the stable toolchain and runs exactly one command:
+CI (`.github/workflows/ci.yml`) runs on pull requests targeting `main` / `develop` and on pushes to `develop`. It installs the system dependencies listed above on `ubuntu-24.04`, checks Rust 1.95 and stable with both default and `--no-default-features`, and runs fmt/clippy gates for the root and vendored crates.
+
+The equivalent local commands are:
 
 ```bash
-cargo check --locked --all-targets
+cargo check --workspace --locked --all-targets
+cargo test --workspace --locked --all-targets
+cargo fmt --all -- --check
+cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
 ```
-
-It does **not** run `cargo fmt`, `cargo clippy` or `cargo test` — run those
-yourself before opening a pull request.
 
 Version bumps and packaging are not part of a normal pull request: releases are
 triggered by a `v*` tag, the tag must equal the version in `Cargo.toml`, and
-`release.yml` builds the amd64/aarch64 tarballs, creates the GitHub Release and
-syncs the AUR packages.
+`release.yml` tests both workspace crates before publishing amd64/aarch64 tarballs,
+their `SHA256SUMS`, and the AUR packages.
+
 
 ## TUI-specific requirements
 
@@ -129,18 +128,11 @@ A patch that "works on my machine" is not enough for a terminal UI.
   keyboard path is the reference behaviour when the two disagree. Mouse
   interaction is an optional layer on top of it — a convenience for
   non-essential features, never the only way to reach something.
-- **Basic functionality must work in a plain TTY.** `kmscon` is the reference
-  environment: no emulator-only escape sequences, no Nerd Font, and mouse
-  reporting may not be available at all. Login, browsing, playback control and
-  quitting must all stay usable there.
+- **Basic functionality must work in a plain TTY.** `KMSCON` is the reference environment: no emulator-only escape sequences, and mouse reporting may not be available at all. A Nerd Font must be installed for the icon set. Login, browsing, playback control and quitting must all stay usable.
 - **Rendering changes need rendering evidence.** For anything that changes what
   is drawn — layout, animation, cover art, visualizers, colors — attach a
   screenshot or a short recording to the pull request.
-- **State your environment**: terminal emulator (name and version), font,
-  terminal size, and whether a Nerd Font is installed. The UI draws icon glyphs
-  in several places, and most rendering problems are terminal-specific. When
-  you touch input handling, keys or keybinds, also try a bare TTY (`kmscon`):
-  that is where the keyboard-first baseline has to hold.
+- **State your environment**: terminal emulator (name and version), font, terminal size, and `TERM` value. The icon set is fixed to Nerd Font glyphs; there is no runtime font-capability probe. When you touch input handling, keys or keybinds, also try a bare `KMSCON`-style TTY.
 - **Cover the small-window thresholds.** Host content pages switch to the flat
   layout below the thresholds documented in README → *Small window mode*; verify
   at the boundary sizes, including the `Terminal too small` case.

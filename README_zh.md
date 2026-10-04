@@ -28,7 +28,7 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 同一个进程里有两套界面：
 
 - **主程序界面**：登录、首页推荐、歌单 / 作者 / 搜索页、可滑出的侧边栏，以及底部 5 行的折叠播放栏；
-- **内置全屏播放页**（TMPlayer）：封面、歌词、歌单浮层和 10 段均衡器。按全屏快捷键（默认 `Ctrl+F`）交给它，页内再按 `Ctrl+F` 或 `Esc` 返回主程序。
+- **全屏播放页**：封面、歌词、歌单浮层和 10 段均衡器。全屏快捷键（默认 `Ctrl+F`）进入该页面，再按 `Ctrl+F` 或 `Esc` 返回主程序。
 
 播放本身由主程序负责：带本地缓存的流式播放、播放记忆、私人漫游、按 VIP 权限裁剪的音质，以及由其它界面绘制的可视化（cava 频谱、真 PCM 示波器、李萨如矢量模式、LUFS 音量条）。
 
@@ -73,14 +73,14 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 
 ### 播放
 
-- 流式播放：边下边播，下载写入 `<缓存>/audio/<song_id>__<quality>.part`，完成后改名为 `.audio`；已缓存的文件直接读本地，进度条的已缓冲段就是下载进度
+- 流式播放：边下边播，下载写入 `<缓存>/audio/<song_id>__<quality>.<进程号>-<任务号>.part`，完整响应写入成功后改名为 `<song_id>__<quality>.audio`；独立临时文件避免取消旧任务影响新任务。已缓存的文件直接读本地，进度条的已缓冲段就是下载进度
 - 可跳转进度（进度条点击或全屏页内操作），跳转期间进度条有脉冲动画
 - 播放记忆（`playback_memory`）：队列、当前索引、循环模式与队列来源会在每次切歌时保存，登录后恢复——恢复的歌曲从头开始播放
 - 按 VIP 权限裁剪的音质（`audio_quality`）：从 `standard` 到 `jymaster` 共 9 档；非 VIP 账号会被限制到 `exhigh`
 - 10 段均衡器，±12 dB（`eq_bands_db`），在全屏 EQ 弹窗里调整，实时作用于播放
 - 收藏 / 取消收藏：全屏页与折叠播放栏都可操作
 - 循环模式：顺序 → 随机 → 列表循环 → 单曲循环
-- Linux 媒体控制（MPRIS，播放器名 `cnmplayer`），包含元数据与封面
+- Linux 媒体控制（MPRIS，播放器名 `cnmplayer`），包含元数据与封面；MPRIS 更新由主程序负责，全屏页没有独立轮询配置
 
 ### 下载
 
@@ -97,7 +97,8 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 - `hidden`（设置弹窗里显示「关闭」）——全屏页右侧整块收起：可视化与歌词都不画，歌曲信息区撑满整个终端宽度（边框铺满整宽，内容宽度上限为窗口的 1/3 并居中）
 - `lyrics`（显示「仅歌词」）——右侧只显示歌词，不画可视化；旧配置里的 `off` 仍按这一档读取
 - `bars`——cava 频谱条，需要外部 `cava` 可执行文件
-- `vector`——屏幕正交轴矢量示波器：横向 x 轴 = 左声道 L（向右为正）、纵向 y 轴 = 右声道 R（**向上恒为正**），用与示波器相同的盲文点阵逐点绘制，以面板中心为原点、不画坐标轴。缩放基准取本曲开播以来的最响段落（单调只增），峰值恰好撑满面板，仅切歌重新开始；单声道退化为右上 45° 对角线。暂停或突断静音时图形炸开：每个盲文点**恒亮**飞向可视化区域内的一个随机落点（急剧减速、先后停稳；粒子数上限 1200，超出的点一次性淡出后退役），停稳后尘埃按 **Astra Sparkle 星点闪烁**——codex CLI 输入框星空的同款确定性公式：每颗粒子以落点坐标哈希得到 4~7 s 的闪烁周期与相位偏移，亮度呈 sin¹² 尖峰脉冲、连续趋暗而不整点熄灭；位置与数量不变，直到恢复播放。恢复播放（或声音回来）时以清晰可见的汇聚流回归：先有点火错峰，再指数逼近当前图形（约 0.5 s，锚定搜索随时间扩张保证全部粒子回归，超出的落上即吸收）。渐弱不爆炸：图形随电平缩小直至消失。**不需要** cava
+- `vector`——李萨如矢量示波器：横向 x 轴 = 左声道 L，纵向 y 轴 = 右声道 R（**向上恒为正**），用与示波器相同的盲文点阵逐点绘制；缩放基准取本曲开播以来的最响段落，恰好撑满面板，仅切歌重新开始。暂停或突断静音时图形炸开成飞散的盲文点，停稳后轻微明灭，直到恢复播放。**不依赖** cava
+- 李萨如图从首个有效 PCM 窗口开始校准，首帧绘制前即使用该窗口峰值；之后基准只增不减，PCM 重置后的首个有效窗口重新校准。示波器暂停时会提交精确归零的收尾帧，无需额外按键。
 - 没有 cava 时默认改为 `oscilloscope`，切换设置时会跳过 `bars`，而不是让整项无法调整
 - 折叠播放栏绘制 10 格盲文迷你频谱，数据来自 cava；`lyrics` 与 `hidden` 两档不启动 cava，那里因此是空白。窄窗则用 400 ms Momentary LUFS 计量驱动双声道音量条（显示范围 −60…0 LUFS）
 
@@ -118,11 +119,11 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 
 ### 界面
 
-- 主题：`system`、`latte`、`frappe`（默认）、`macchiato`、`mocha`
+- 主题：从 `themes/*.toml` 动态加载——内置 20 款（默认 `frappe`，另有 `system`、Catppuccin 其余变体、`ayu_light`、`ayu_mirage`、`ocean`、`everforest_dark`、`everforest_light`、`monokai_pro`、`nord`、`rose_pine_moon`、`solarized_dark`、`solarized_light`、`tomorrow_light`、`tomorrow_night`、`zenburn`、`zinc_dark`、`zinc_light`）；自己丢一个 toml 进去即可加入循环。校验不过的文件会被跳过，选中的主题损坏时回退默认主题
 - 界面语言：`zh` / `en`
 - 启动：先出加载页（ASCII 标题 + 进度条，不显示文字），登录恢复、推荐加载等网络步骤在后台按步推进；登录态不可用时收尾后进入登录页
 - 透明背景、封面边框、提示行开关
-- 20 个可重绑快捷键，带冲突检测；`Ctrl+Alt+R` 恢复默认
+- 22 个可重绑快捷键，带冲突检测；`Ctrl+Alt+R` 恢复默认
 - about 弹窗含盲文形象画，里面还藏了一个彩蛋（`easter-egg` cargo feature，默认编入，可用 `--no-default-features` 剔除）
 
 ## 安装
@@ -142,9 +143,11 @@ paru -S cnmplayer-bin
 
 ### 预编译包
 
-每个版本都会在 [Releases](https://github.com/professor-lee/CNMPlayer/releases) 发布 `CNMPlayer_vX.Y.Z_linux_amd64.tar.xz` 与 `CNMPlayer_vX.Y.Z_linux_aarch64.tar.xz`。两者都是平铺压缩包，内含 `cnmplayer` 可执行文件与 `LICENSE`：
+每个版本都会在 [Releases](https://github.com/professor-lee/CNMPlayer/releases) 发布 `CNMPlayer_vX.Y.Z_linux_amd64.tar.xz`、`CNMPlayer_vX.Y.Z_linux_aarch64.tar.xz` 与 `SHA256SUMS`。两种压缩包都是平铺结构，内含 `cnmplayer` 可执行文件与 `LICENSE`。
 
 ```bash
+# 把 SHA256SUMS 与下载的压缩包放在同一目录，校验已下载的架构。
+sha256sum --check --ignore-missing SHA256SUMS
 tar -xJf CNMPlayer_vX.Y.Z_linux_amd64.tar.xz
 ./cnmplayer
 ```
@@ -172,7 +175,7 @@ sudo apt install -y build-essential cmake pkg-config \
 
 - Linux 上的 PipeWire 音频（ALSA 后端已弃用），以及运行时的 chafa 共享库
 - 可选的 `cava` 可执行文件，用于 `bars` 频谱
-- 强烈建议使用 Nerd Font：界面中有一些图标字形，没有这类字体时部分图标会显示为缺字方块
+- 播放与导航图标要求 Nerd Font；程序固定使用 Nerd Font 字形，不根据 `TERM` 猜测字体能力。
 
 ## cava
 
@@ -195,7 +198,7 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 首次启动后该目录下会有：
 
 - `config/default.toml`：程序、播放、快捷键与缓存配置
-- `themes/*.toml`：`system`、`catppuccin_latte`、`catppuccin_frappe`、`catppuccin_macchiato`、`catppuccin_mocha`
+- `themes/*.toml`：主题文件（key 取文件内 `name` 字段）；额外丢进来的 `.toml` 会自动变为可选
 - `auth/session.toml`：持久化登录 cookie
 - `playback/session.toml`：播放记忆的队列（`playback_memory` 开启时写入）
 - `private_roam/session.toml`：私人漫游列表、最后播放位置与缓存封面
@@ -209,14 +212,13 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 
 ## 配置
 
-只要缺少任一已知字段、检测到旧值（`graphics_protocol = "auto|sixel|kitty|iterm2"`、旧的 `Alt+B` 侧边栏绑定）或保存的可视化模式不可用，程序就会在启动时重写 `config/default.toml`。文件格式错误时会被默认值覆盖，喜欢手改配置的话建议留一份备份。
+默认字段缺失、旧值需要迁移或保存的可视化模式不可用时，程序会在启动时重写 `config/default.toml`。无效 TOML 或缺少必需字段会报错而不会替换原文件；请根据报错修复配置后再启动。
 
 | 配置项 | 默认值 | 取值 / 说明 |
 | --- | --- | --- |
-| `theme` | `frappe` | `system`、`latte`、`frappe`、`macchiato`、`mocha` |
+| `theme` | `frappe` | `themes/*.toml` 里的任意主题 key（内置 20 款，自动识别自定义文件）；选中的主题文件损坏时回退默认主题 |
 | `language` | `zh` | `zh`、`en` |
 | `visualize` | 有 cava 时为 `bars`，否则 `oscilloscope` | `hidden`（设置里显示「关闭」）、`lyrics`（「仅歌词」，旧的 `off` 同义）、`bars`、`oscilloscope`、`vector`；只有 `bars` 依赖 cava |
-| `graphics_protocol` | `halfblocks` | `off`、`halfblocks`；`off` 时封面用 ASCII 字符绘制 |
 | `transparent_background` | `true` | 使用终端背景 |
 | `album_border` | `true` | 全屏封面边框 |
 | `show_hints` | `true` | 内容页提示行，以及全屏页面板边框内的提示文字 |
@@ -240,11 +242,6 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 | `bars_gap` | `false` | 频谱条之间留出间隔 |
 | `ui_fps` | `30` | 全屏页帧率上限 |
 | `spectrum_hz` | `30`（仓库内模板写的是 `60`） | 频谱刷新率；主程序自己的 cava 会被限制在 1–30 Hz |
-| `mpris_poll_ms` | `100` | 全屏页的 MPRIS 轮询间隔 |
-| `kitty_cover_scale_percent` | `100` | 全屏封面缩放百分比 |
-| `lyrics_cover_fetch` / `lyrics_cover_download` | `false` | 为独立版 TMPlayer 预留 |
-| `audio_fingerprint` / `acoustid_api_key` | `false` / `""` | 为独立版 TMPlayer 预留 |
-| `resume_last_position` | `false` | 仅声明未实现：播放记忆恢复的是队列，不是播放位置 |
 | `cache.path` | 未设置 | 缓存目录覆盖（默认用系统缓存目录） |
 | `cache.clean_strategy` | `both` | `size`、`age`、`both` |
 | `cache.max_size_mb` | `500` | LRU 阶段的容量上限 |
@@ -334,12 +331,15 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 
 ## 注意事项
 
-- 没有命令行参数。可用的环境变量是 `CNMPLAYER_ASSET_DIR`（资产根目录）、`TMPLAYER_CAVA`（显式指定 cava）与 `COLORTERM` / `TERM`（颜色能力探测）。
-- `graphics_protocol` 当前只实现 `off` 与 `halfblocks`；旧的 `auto`、`sixel`、`kitty`、`iterm2` 会迁移为 `halfblocks`。
+- 没有命令行参数。可用的环境变量是 `CNMPLAYER_ASSET_DIR`（资产根目录）、`TMPLAYER_CAVA`（显式指定 cava，名称为兼容旧配置而保留）与 `COLORTERM` / `TERM`（颜色能力探测）。
+- 播放与导航图标要求 Nerd Font；CNMPlayer 不根据 `TERM` 猜测字形是否可用。
 - 没有独立的专辑页；专辑搜索结果与作者页里的专辑都以歌单页样式展示。
-- 部分配置项只由全屏页消费，或暂时只是占位：`ui_fps`、`mpris_poll_ms`、`kitty_cover_scale_percent`、`lyrics_cover_fetch`、`lyrics_cover_download`、`audio_fingerprint`、`acoustid_api_key`、`resume_last_position`。
 - 原生音频后端会把告警直接写到 stderr；CNMPlayer 把 fd 2 重定向到 `Player.stderr.log`，避免这些信息糊掉 TUI。
 - 预编译产物与 AUR 包只提供 Linux `amd64` 与 `aarch64`；MPRIS 同样仅 Linux 可用。
+- 页面与封面后台读取由 UI 持有，最后一个句柄释放时取消。API 回包与封面下载从响应头到完整 body 共用 30 秒 deadline；流式播放的响应头等待同样上限 30 秒。音频 body 不设整首下载总时限，仍可协作式取消，避免误杀慢速下载。
+- 封面与歌词 worker 各执行一个请求，只保留一个最新待处理请求，结果邮箱有界。阻塞式封面校验最多准入两个任务；取消等待者不会在底层任务结束前提前释放名额。
+- 单个持久化线程最多保留 32 个待处理缓存写入与四个按键合并的状态快照（配置、登录会话、播放记忆、私人漫游）。同键新快照替换旧快照，flush 屏障保持先后顺序。缓存写入满额时记录日志；可选缓存失败不阻止显示已获取的封面。
+- seek 由一个 worker 执行，只保留一个最新待处理目标。每首歌拥有独立播放队列，过期 seek 不会作用于下一首。阻塞的文件系统/音频操作无法强制取消，可能延迟完成或退出，但不会继续准入更多 worker。
 
 ## 技术栈
 
@@ -352,23 +352,23 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 - 图像渲染：ratatui-image + chafa
 - 可视化：外部 `cava`，以及内部 PCM 抽头驱动的示波器、李萨如矢量模式与 LUFS 计量
 - Linux 媒体控制：mpris-server
-- 全屏播放整合：TMPlayer
+- 全屏播放：内置 `src/tmplayer/` UI，使用主程序播放链路与共享配置
 
 ## 开发
 
 ```bash
-cargo run                 # 开发构建
-cargo build --release     # release 构建
-cargo test                # 单元测试
-cargo check --locked --all-targets   # CI 在 PR 上执行的内容
+cargo run                              # 开发构建
+cargo build --release                  # release 构建
+cargo test --workspace --all-targets   # 根 crate 与 vendored crate 测试
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-CI（`ci.yml`）在面向 `main` / `develop` 的 PR 以及推送到 `develop` 时执行 `cargo check --locked --all-targets`。
-发版（`release.yml`）由 `v*` tag 触发：先校验 tag 与 `Cargo.toml` 版本一致，再构建 `x86_64` 与 `aarch64` 两个压缩包、创建 GitHub Release，并同步 `cnmplayer` 与 `cnmplayer-bin` 两个 AUR 包。
+CI（`ci.yml`）会在 Rust 1.95 与 stable 上分别执行默认特性和 `--no-default-features` 的 check/test，并对根 crate 与 vendored crate 执行 fmt、clippy 门禁。
+发版（`release.yml`）会在发布前执行根 crate 与 vendored crate 测试，随 `x86_64` 与 `aarch64` 压缩包发布 `SHA256SUMS`，并保留 tag、dispatch 空跑和 AUR 同步路径。
 
 ## 相关项目
 
-- [TMPlayer](https://github.com/professor-lee/TMPlayer)：内置到 CNMPlayer 的全屏播放页实现
 - [ncm-api-rs](https://github.com/imsyy/ncm-api-rs)：vendored 在 `ncm-api-rs/` 目录中的网易云音乐 API 客户端
 
 ## 免责声明

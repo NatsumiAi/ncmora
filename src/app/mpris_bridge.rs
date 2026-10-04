@@ -28,11 +28,11 @@ mod imp {
     use crate::app::player::cleanup_cache_dir;
     use crate::launch;
     use mpris_server::{Metadata, PlaybackStatus, Player, Time, zbus};
+    use parking_lot::Mutex;
     use std::collections::hash_map::DefaultHasher;
     use std::fs;
     use std::hash::{Hash, Hasher};
     use std::sync::mpsc::{self as std_mpsc, Receiver, Sender};
-    use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
     pub struct MprisBridge {
@@ -43,14 +43,23 @@ mod imp {
     impl MprisBridge {
         pub fn new(cache_root: &Path, cache_policy: &CacheConfig) -> Self {
             let art_dir = cache_root.join("mpris_art");
-            let _ = fs::create_dir_all(&art_dir);
-            let _ = cleanup_cache_dir(&art_dir, cache_policy);
 
             let (tx, mut rx) = see::unsync::channel(None);
             let (event_tx, event_rx) = std_mpsc::channel::<MprisControlEvent>();
             let cache_policy = cache_policy.clone();
 
             let task = async move {
+                let startup_dir = art_dir.clone();
+                let startup_policy = cache_policy.clone();
+                if compio::runtime::spawn_blocking(move || {
+                    let _ = fs::create_dir_all(&startup_dir);
+                    let _ = cleanup_cache_dir(&startup_dir, &startup_policy);
+                })
+                .await
+                .is_err()
+                {
+                    log::warn!("mpris cache initialization task panicked");
+                }
                 let player = match Player::builder("cnmplayer")
                     .can_play(true)
                     .can_pause(true)
@@ -160,9 +169,16 @@ mod imp {
         player.set_position(time_from_duration(payload.position));
 
         if let Some(track) = payload.track {
-            player
-                .set_metadata(build_metadata(art_dir, cache_policy, &track))
-                .await?;
+            let art_dir = art_dir.to_path_buf();
+            let cache_policy = cache_policy.clone();
+            match compio::runtime::spawn_blocking(move || {
+                build_metadata(&art_dir, &cache_policy, &track)
+            })
+            .await
+            {
+                Ok(metadata) => player.set_metadata(metadata).await?,
+                Err(_) => log::warn!("mpris metadata export task panicked"),
+            }
         }
 
         Ok(())
@@ -202,28 +218,26 @@ mod imp {
             metadata.set_comment(Some([format!("song_id={}", track.song_id)]));
         }
 
-        if let Some(lyrics) = &track.lyrics {
-            if !lyrics.is_empty() {
-                let text = lyrics
-                    .iter()
-                    .map(|line| line.text.trim())
-                    .filter(|line| !line.is_empty())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !text.is_empty() {
-                    metadata.set_lyrics(Some(text));
-                }
+        if let Some(lyrics) = &track.lyrics
+            && !lyrics.is_empty()
+        {
+            let text = lyrics
+                .iter()
+                .map(|line| line.text.trim())
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !text.is_empty() {
+                metadata.set_lyrics(Some(text));
             }
         }
 
-        if let Some(bytes) = track.cover.as_deref() {
-            if !bytes.is_empty() {
-                if let Some(art_url) =
-                    persist_cover_as_file_url(art_dir, cache_policy, &track.song_id, bytes)
-                {
-                    metadata.set_art_url(Some(art_url));
-                }
-            }
+        if let Some(bytes) = track.cover.as_deref()
+            && !bytes.is_empty()
+            && let Some(art_url) =
+                persist_cover_as_file_url(art_dir, cache_policy, &track.song_id, bytes)
+        {
+            metadata.set_art_url(Some(art_url));
         }
 
         metadata
@@ -262,13 +276,11 @@ mod imp {
         const MIN_INTERVAL: Duration = Duration::from_secs(300);
         static LAST_RUN: Mutex<Option<Instant>> = Mutex::new(None);
 
-        let Ok(mut last) = LAST_RUN.lock() else {
+        let mut last = LAST_RUN.lock();
+        if let Some(at) = *last
+            && at.elapsed() < MIN_INTERVAL
+        {
             return;
-        };
-        if let Some(at) = *last {
-            if at.elapsed() < MIN_INTERVAL {
-                return;
-            }
         }
         *last = Some(Instant::now());
         drop(last);

@@ -28,7 +28,7 @@ CNMPlayer (Customized NetEase Music Player) is a NetEase Cloud Music client that
 A single process carries two UIs:
 
 - the **host UI** — login, home recommendations, playlist / artist / search pages, a sliding sidebar and a 5-row collapsed player bar;
-- the **embedded fullscreen playback page** (TMPlayer) — cover, lyrics, playlist overlay and a 10-band EQ. The fullscreen keybind (default `Ctrl+F`) hands playback over to it; inside, `Ctrl+F` or `Esc` returns to the host.
+- the **fullscreen playback page** — cover, lyrics, playlist overlay and a 10-band EQ. The fullscreen keybind (default `Ctrl+F`) opens it; inside, `Ctrl+F` or `Esc` returns to the host.
 
 Playback belongs to the host: streaming with a local cache, queue memory, private roam, VIP-aware audio quality, and the visualizers (cava bars, a real-PCM oscilloscope, a Lissajous vector mode, a LUFS VU meter) that the other UIs draw.
 
@@ -73,14 +73,14 @@ Artists and playlists are capped at the 5 most relevant hits and never paginate;
 
 ### Playback
 
-- Streaming: the song is downloaded while playing into `<cache>/audio/<song_id>__<quality>.part` and renamed to `.audio` once complete; a completed cache file is played straight from disk, and the buffered part of the progress bar is the download
+- Streaming: the song downloads into `<cache>/audio/<song_id>__<quality>.<pid>-<job_id>.part` and is renamed to `<song_id>__<quality>.audio` only after the complete response is written successfully. Independent temporary files prevent cancellation of an old task from affecting its replacement. Completed cache files play directly from disk; the buffered part of the progress bar shows download progress.
 - Seeking from the progress bar or inside the fullscreen page, with a pulse animation while the position catches up
 - Queue memory (`playback_memory`): queue, current index, repeat mode and the queue's origin list are saved on every track change and restored after login — the restored track starts from the beginning
 - VIP-aware audio quality (`audio_quality`): 9 levels from `standard` to `jymaster`; a non-VIP account is clamped to `exhigh`
 - 10-band EQ, ±12 dB (`eq_bands_db`), edited from the fullscreen EQ modal and applied to the live stream
 - Like / unlike from the fullscreen page and from the collapsed player bar
 - Repeat modes: sequence → shuffle → loop all → loop one
-- Linux media control (MPRIS, player name `cnmplayer`) with metadata and cover art
+- Linux media control (MPRIS, player name `cnmplayer`) with metadata and cover art; the host owns MPRIS updates and the fullscreen page has no independent polling setting
 
 ### Downloads
 
@@ -97,7 +97,8 @@ Artists and playlists are capped at the 5 most relevant hits and never paginate;
 - `hidden` (shown as "Off" in settings) — the whole right-hand side of the fullscreen page is collapsed: neither a visualizer nor the lyrics are drawn, and the song info panel stretches across the full terminal width (its border spans the full width, while the content inside is capped at 1/3 of the window and centred).
 - `lyrics` (shown as "Lyrics") — the right-hand side only shows the lyrics; no visualizer is drawn. The old `off` value still selects this mode.
 - `bars` — cava spectrum bars. Requires the external `cava` binary.
-- `vector` — a Lissajous-style vectorscope on screen-aligned orthogonal axes: the left channel L drives the horizontal x-axis (right = positive) and the right channel R the vertical y-axis (up = positive, always), drawn dot by dot with the same braille raster as the oscilloscope, centred on the panel origin with no axes drawn. The scale reference is the loudest moment seen since the track started (monotone, never shrinks), so the peak passage exactly fills the panel; only track changes restart it. Mono sources collapse to the honest up-right 45° diagonal. On pause or a sudden cut to silence the figure bursts apart: every braille dot flies, fully lit, to a random resting spot inside the visualization area (hard deceleration, settling in turn, at most 1200 particles — surplus dots fade out once and retire), then the settled dust twinkles in place like the codex CLI's **Astra Sparkle** starfield — the same deterministic formula: each dot hashes its resting spot into a 4–7 s period and phase offset, brightness pulsing as sin¹² spikes, dimming continuously towards zero without ever dropping the dot; positions and counts never change until playback resumes. When playback resumes (or sound returns) the dots gather back in a clearly visible stream: a short ignition stagger, then exponential homing onto the live figure (~0.5 s, expanding anchor search so every dot returns; surplus dots are absorbed on arrival). A gradual fade-out does **not** burst: the figure just shrinks with the level and disappears. It does **not** need cava.
+- `vector` — a Lissajous-style vectorscope: the left channel drives the horizontal axis and the right channel the vertical one (up = positive, always), drawn dot by dot with the same braille raster as the oscilloscope and scaled so the track's loudest moment so far fills the panel (only track changes restart it). On pause or a sudden cut to silence the figure bursts apart into drifting dots that settle and softly twinkle until playback resumes. Needs no cava
+- The vectorscope calibrates from the first valid PCM window before drawing that frame; its peak reference then only increases, and the first valid window after a PCM reset recalibrates it. Pausing the oscilloscope commits its exact settled frame without requiring another input event.
 - If cava is missing, the default becomes `oscilloscope` and cycling the setting skips `bars` instead of failing.
 - The collapsed player bar draws a 10-cell braille mini spectrum from cava; that spot stays blank in `lyrics` and `hidden` because cava is not started there. The narrow small window draws a stereo VU meter driven by a 400 ms momentary LUFS meter (display range −60…0 LUFS).
 
@@ -118,11 +119,11 @@ The flat player bar keeps its mouse targets (previous, play-pause, next, like, r
 
 ### Interface
 
-- Themes: `system`, `latte`, `frappe` (default), `macchiato`, `mocha`
+- Themes: loaded dynamically from `themes/*.toml` — 20 built-ins (`frappe` by default, plus `system`, the other Catppuccin variants, `ayu_light`, `ayu_mirage`, `ocean`, `everforest_dark`, `everforest_light`, `monokai_pro`, `nord`, `rose_pine_moon`, `solarized_dark`, `solarized_light`, `tomorrow_light`, `tomorrow_night`, `zenburn`, `zinc_dark`, `zinc_light`); drop in your own toml and it joins the cycle. Files that fail validation are skipped, and a broken selected theme falls back to the default
 - UI language: `zh` / `en`
 - Startup: a loading page (ASCII title plus progress bar, no text) appears first; login restore and recommendation fetches run in the background step by step, and an unusable saved session hands over to the login page
 - Transparent background, album-cover border and hint lines
-- 20 rebindable shortcuts with conflict detection; `Ctrl+Alt+R` restores the defaults
+- 22 rebindable shortcuts with conflict detection; `Ctrl+Alt+R` restores the defaults
 - About modal with braille art, and a hidden easter egg inside it (the `easter-egg` cargo feature, compiled in by default and removable with `--no-default-features`)
 
 ## Installation
@@ -142,9 +143,11 @@ paru -S cnmplayer-bin
 
 ### Prebuilt tarballs
 
-Every release publishes `CNMPlayer_vX.Y.Z_linux_amd64.tar.xz` and `CNMPlayer_vX.Y.Z_linux_aarch64.tar.xz` on the [Releases page](https://github.com/professor-lee/CNMPlayer/releases). Both are flat archives containing the `cnmplayer` binary and `LICENSE`:
+Every release publishes `CNMPlayer_vX.Y.Z_linux_amd64.tar.xz`, `CNMPlayer_vX.Y.Z_linux_aarch64.tar.xz` and `SHA256SUMS` on the [Releases page](https://github.com/professor-lee/CNMPlayer/releases). Both tarballs are flat archives containing the `cnmplayer` binary and `LICENSE`.
 
 ```bash
+# Download SHA256SUMS next to the tarball; verify the downloaded architecture.
+sha256sum --check --ignore-missing SHA256SUMS
 tar -xJf CNMPlayer_vX.Y.Z_linux_amd64.tar.xz
 ./cnmplayer
 ```
@@ -172,7 +175,7 @@ sudo apt install -y build-essential cmake pkg-config \
 
 - Linux with PipeWire for audio (the ALSA backend is deprecated), and the chafa shared library at runtime
 - An optional `cava` binary for the `bars` visualizer
-- A Nerd Font is strongly recommended: the UI uses icon glyphs in several places, and without such a font some icons may render as missing-glyph boxes
+- A Nerd Font is required for the playback and navigation icons; the application always uses the Nerd Font glyph set.
 
 ## cava
 
@@ -195,7 +198,7 @@ If `CNMPLAYER_ASSET_DIR` is set, that directory becomes the asset root instead.
 After the first start the root contains:
 
 - `config/default.toml` — application, playback, keybind and cache settings
-- `themes/*.toml` — `system`, `catppuccin_latte`, `catppuccin_frappe`, `catppuccin_macchiato`, `catppuccin_mocha`
+- `themes/*.toml` — the theme files (the key is the `name` field inside each file); any extra `.toml` dropped here becomes selectable
 - `auth/session.toml` — the persisted login cookie
 - `playback/session.toml` — the remembered queue (written while `playback_memory` is on)
 - `private_roam/session.toml` — the private-roam list, its last played position and the cached cover
@@ -209,14 +212,13 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 
 ## Configuration
 
-`config/default.toml` is rewritten on startup whenever a known field is missing, legacy values are found (`graphics_protocol = "auto|sixel|kitty|iterm2"`, the old `Alt+B` sidebar binding) or the saved visualizer is unavailable. A malformed file is replaced by the defaults, so keep a copy if you like to hand-edit it.
+`config/default.toml` is rewritten on startup when a defaulted field is missing, a legacy value needs migration, or the saved visualizer is unavailable. Invalid TOML or missing required fields produce an error without replacing the file; repair the reported configuration before restarting.
 
 | Key | Default | Values / notes |
 | --- | --- | --- |
-| `theme` | `frappe` | `system`, `latte`, `frappe`, `macchiato`, `mocha` |
+| `theme` | `frappe` | Any theme key from `themes/*.toml` (20 built-ins, custom files picked up); a broken file falls back to the default |
 | `language` | `zh` | `zh`, `en` |
 | `visualize` | cava present → `bars`, otherwise `oscilloscope` | `hidden` (shown as "Off" in settings), `lyrics` ("Lyrics"; the old `off` means the same), `bars`, `oscilloscope`, `vector`; only `bars` needs cava |
-| `graphics_protocol` | `halfblocks` | `off`, `halfblocks`; `off` draws covers as ASCII art |
 | `transparent_background` | `true` | Use the terminal background |
 | `album_border` | `true` | Border around the fullscreen cover |
 | `show_hints` | `true` | Hint line on the content pages and in the fullscreen page's panel border |
@@ -240,11 +242,6 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 | `bars_gap` | `false` | Leave a gap between bars |
 | `ui_fps` | `30` | Fullscreen page frame-rate cap |
 | `spectrum_hz` | `30` (shipped file says `60`) | Spectrum refresh rate; the host clamps its own cava to 1–30 Hz |
-| `mpris_poll_ms` | `100` | Fullscreen-side MPRIS poll interval |
-| `kitty_cover_scale_percent` | `100` | Fullscreen cover scale percentage |
-| `lyrics_cover_fetch` / `lyrics_cover_download` | `false` | Reserved for the standalone TMPlayer |
-| `audio_fingerprint` / `acoustid_api_key` | `false` / `""` | Reserved for the standalone TMPlayer |
-| `resume_last_position` | `false` | Declared but not implemented: playback memory restores the queue, not the position |
 | `cache.path` | unset | Cache directory override (defaults to the OS cache directory) |
 | `cache.clean_strategy` | `both` | `size`, `age`, `both` |
 | `cache.max_size_mb` | `500` | Size ceiling for the LRU pass |
@@ -334,12 +331,15 @@ Fullscreen page:
 
 ## Notes
 
-- There are no command line flags. The environment variables are `CNMPLAYER_ASSET_DIR` (asset root), `TMPLAYER_CAVA` (explicit cava binary) and `COLORTERM` / `TERM` (color capability detection).
-- `graphics_protocol` only implements `off` and `halfblocks`; the legacy `auto`, `sixel`, `kitty` and `iterm2` values are migrated to `halfblocks`.
+- There are no command line flags. The environment variables are `CNMPLAYER_ASSET_DIR` (asset root), `TMPLAYER_CAVA` (explicit cava binary, retained for compatibility) and `COLORTERM` / `TERM` (color capability detection).
+- A Nerd Font is required for the playback and navigation icons; CNMPlayer intentionally does not guess glyph availability from `TERM`.
 - There is no dedicated album page; album search results and artist-page albums are shown with the playlist-page layout.
-- Several settings are only consumed by the fullscreen page or are placeholders: `ui_fps`, `mpris_poll_ms`, `kitty_cover_scale_percent`, `lyrics_cover_fetch`, `lyrics_cover_download`, `audio_fingerprint`, `acoustid_api_key` and `resume_last_position`.
 - Native audio backends write warnings straight to stderr; CNMPlayer redirects fd 2 into `Player.stderr.log` so those messages cannot smear the TUI.
 - Prebuilt artifacts and AUR packages are produced for Linux `amd64` and `aarch64` only. MPRIS is Linux-only as well.
+- Background page and artwork reads are cancelled when their last UI owner is dropped. API responses and cover downloads have a 30-second deadline covering headers and the complete body; streaming playback also bounds header waiting to 30 seconds. Slow audio bodies remain cooperatively cancellable rather than imposing a total song-download deadline.
+- Cover and lyric workers each run one request and retain only the latest pending request; result mailboxes are bounded. Blocking cover validation admits at most two jobs, and cancellation does not release a job's slot before it actually finishes.
+- One persistence thread keeps at most 32 pending cache writes and four pending keyed snapshots (configuration, login session, playback memory and private roam). New snapshots replace older pending snapshots for the same key; flush barriers preserve ordering. Cache writes rejected at capacity are logged; this optional cache does not prevent displaying a fetched cover.
+- Seeking uses one worker and one latest pending target. Each track owns a separate playback queue, so a stale seek cannot affect the next track. A blocked filesystem/audio operation cannot be forcibly cancelled: it may delay completion or shutdown, but does not admit more workers.
 
 ## Tech Stack
 
@@ -352,23 +352,23 @@ Fullscreen page:
 - Image rendering: ratatui-image + chafa
 - Visualization: external `cava`, plus an internal PCM tap that feeds the oscilloscope and the LUFS meter
 - Linux media control: mpris-server
-- Fullscreen playback integration: TMPlayer
+- Fullscreen playback: embedded `src/tmplayer/` UI using host playback and shared configuration
 
 ## Development
 
 ```bash
-cargo run                 # development build
-cargo build --release     # release build
-cargo test                # unit tests
-cargo check --locked --all-targets   # what CI runs on pull requests
+cargo run                              # development build
+cargo build --release                  # release build
+cargo test --workspace --all-targets   # root and vendored crate tests
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-CI (`ci.yml`) runs `cargo check --locked --all-targets` on pull requests against `main` / `develop` and on pushes to `develop`.
-Release (`release.yml`) triggers on a `v*` tag: it verifies that the tag matches the `Cargo.toml` version, builds `x86_64` and `aarch64` tarballs, creates the GitHub Release and syncs the `cnmplayer` and `cnmplayer-bin` AUR packages.
+CI (`ci.yml`) runs check and test for default and `--no-default-features` on Rust 1.95 and stable, then runs fmt and clippy gates for both the root and vendored crates.
+Release (`release.yml`) runs the root and vendored test gates before publishing, publishes `SHA256SUMS` alongside the `x86_64` and `aarch64` tarballs, and preserves the tag, dispatch dry-run and AUR sync paths.
 
 ## Related Projects
 
-- [TMPlayer](https://github.com/professor-lee/TMPlayer): the fullscreen playback UI, embedded into CNMPlayer
 - [ncm-api-rs](https://github.com/imsyy/ncm-api-rs): the NetEase Cloud Music API client vendored in `ncm-api-rs/`
 
 ## Disclaimer

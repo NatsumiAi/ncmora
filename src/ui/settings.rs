@@ -116,7 +116,7 @@ fn draw_root_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
     ];
 
     let item_style = |idx: usize| {
-        if idx == app.settings_selected {
+        if idx == app.settings.selected {
             Style::default()
                 .fg(app.theme.color_accent2())
                 .add_modifier(Modifier::BOLD)
@@ -206,7 +206,7 @@ fn draw_playback_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
         BarChannels::Stereo => "Stereo",
     };
 
-    let items = vec![
+    let items = [
         format!(
             "{}: {}",
             l(app, "可视化", "Visualization"),
@@ -251,7 +251,7 @@ fn draw_playback_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
         .iter()
         .enumerate()
         .map(|(idx, text)| {
-            let style = if idx == app.settings_playback_selected {
+            let style = if idx == app.settings.playback_selected {
                 Style::default()
                     .fg(app.theme.color_accent2())
                     .add_modifier(Modifier::BOLD)
@@ -327,7 +327,7 @@ fn draw_lyrics_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
         .enumerate()
         .map(|(idx, text)| {
             let disabled = idx == 2 && !drag_enabled;
-            let style = if idx == app.settings_lyrics_selected {
+            let style = if idx == app.settings.lyrics_selected {
                 if disabled {
                     Style::default().fg(app.theme.color_subtext())
                 } else {
@@ -395,11 +395,11 @@ fn draw_download_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
     let buff = app.theme.color_buff();
     let surface = app.theme.color_surface();
 
-    let selected = app.settings_download_selected;
+    let selected = app.settings.download_selected;
     let quality = audio_quality_label(app, app.config.download_audio_quality);
     let path_prefix = format!("{}: ", l(app, "下载路径", "Download Path"));
     let path_display = app.download_display_path();
-    let reset_label = if app.download_reset_armed {
+    let reset_label = if app.settings.download_reset_armed {
         l(app, "确认恢复", "Confirm Restore")
     } else {
         l(app, "恢复默认", "Restore Defaults")
@@ -423,8 +423,12 @@ fn draw_download_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
     });
 
     let mut lines: Vec<Line> = Vec::with_capacity(crate::app::SETTINGS_DOWNLOAD_ITEMS);
-    for idx in 0..crate::app::SETTINGS_DOWNLOAD_ITEMS {
-        let style = row_styles[idx];
+    for (idx, style) in row_styles
+        .iter()
+        .copied()
+        .enumerate()
+        .take(crate::app::SETTINGS_DOWNLOAD_ITEMS)
+    {
         let spans: Vec<Span> = match idx {
             0 => vec![Span::styled(
                 format!("  {}: {}", l(app, "音质", "Audio Quality"), quality),
@@ -434,7 +438,7 @@ fn draw_download_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
                 let avail = usize::from(rows[1].width)
                     .saturating_sub(display_width(&path_prefix) + 2)
                     .max(1);
-                if let Some(edit) = app.download_path_edit.as_mut() {
+                if let Some(edit) = app.settings.download_path_edit.as_mut() {
                     // 编辑态：只有**路径值**这一段的底色变 buff（标签保持行样式），
                     // 光标所在字符反显；窗口只在光标撞到边界时才横向滚动。
                     let caret_col = caret_display_col(&edit.buffer, edit.cursor);
@@ -463,7 +467,7 @@ fn draw_download_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
                 }
             }
             _ => {
-                let style = if app.download_reset_armed {
+                let style = if app.settings.download_reset_armed {
                     Style::default().fg(warning).add_modifier(Modifier::BOLD)
                 } else {
                     style
@@ -604,12 +608,12 @@ fn draw_keybind_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
 
     let mut lines: Vec<Line> = (0..crate::app::SETTINGS_KEYBIND_ITEMS)
         .map(|idx| {
-            let is_rebinding = app.settings_keybind_rebinding == Some(idx);
+            let is_rebinding = app.settings.keybind_rebinding == Some(idx);
             let style = if is_rebinding {
                 Style::default()
                     .fg(app.theme.color_accent())
                     .add_modifier(Modifier::BOLD)
-            } else if idx == app.settings_keybind_selected {
+            } else if idx == app.settings.keybind_selected {
                 Style::default()
                     .fg(app.theme.color_accent2())
                     .add_modifier(Modifier::BOLD)
@@ -657,11 +661,18 @@ fn draw_keybind_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
     )));
 
     let focus_index = app
-        .settings_keybind_rebinding
-        .unwrap_or(app.settings_keybind_selected);
+        .settings
+        .keybind_rebinding
+        .unwrap_or(app.settings.keybind_selected);
     let visible_rows = rows[1].height as usize;
     let total_rows = lines.len();
-    let scroll = scroll_for_focus(total_rows, visible_rows, focus_index);
+    let scroll = scroll_for_focus(
+        app.settings.keybind_scroll,
+        total_rows,
+        visible_rows,
+        focus_index,
+    );
+    app.settings.keybind_scroll = scroll;
 
     frame.render_widget(
         Paragraph::new(lines)
@@ -670,7 +681,7 @@ fn draw_keybind_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
         rows[1],
     );
 
-    let hint = if let Some(index) = app.settings_keybind_rebinding {
+    let hint = if let Some(index) = app.settings.keybind_rebinding {
         format!(
             "{}: {}  {}",
             l(app, "正在重绑", "Rebinding"),
@@ -716,13 +727,26 @@ fn draw_keybind_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
     }
 }
 
-/// 让 `focus` 落在可视窗口内的滚动偏移（渲染与命中区共用同一算法）。
-fn scroll_for_focus(total: usize, visible_rows: usize, focus: usize) -> usize {
-    if visible_rows == 0 || focus < visible_rows {
+/// 与应用内列表一致的聚焦滚动：`scroll` 是当前偏移，**只在焦点行越过可视
+/// 窗口的上/下边界时**才挪到刚好把它露出来的位置，其余情况视口不动
+/// （渲染与命中区共用同一算法；主应用按键绑定页与全屏页按键提示弹窗共用）。
+pub(crate) fn scroll_for_focus(
+    scroll: usize,
+    total: usize,
+    visible_rows: usize,
+    focus: usize,
+) -> usize {
+    let max_scroll = total.saturating_sub(visible_rows);
+    if visible_rows == 0 {
         return 0;
     }
-
-    (focus + 1 - visible_rows).min(total.saturating_sub(visible_rows))
+    if focus < scroll {
+        focus.min(max_scroll)
+    } else if focus >= scroll + visible_rows {
+        (focus + 1 - visible_rows).min(max_scroll)
+    } else {
+        scroll.min(max_scroll)
+    }
 }
 
 /// 窗口内可见的条目：(条目序号, 相对行号)。渲染带同一 `scroll`，
@@ -1256,6 +1280,25 @@ fn l<'a>(app: &App, zh: &'a str, en: &'a str) -> &'a str {
     }
 }
 
+fn on_off(app: &App, enabled: bool) -> &'static str {
+    match app.config.language {
+        Language::Zh => {
+            if enabled {
+                "开"
+            } else {
+                "关"
+            }
+        }
+        Language::En => {
+            if enabled {
+                "On"
+            } else {
+                "Off"
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1316,22 +1359,42 @@ mod tests {
         let total = crate::app::SETTINGS_KEYBIND_ITEMS + 3;
 
         for visible_rows in 1..=total {
-            for focus in 0..crate::app::SETTINGS_KEYBIND_ITEMS {
-                let scroll = scroll_for_focus(total, visible_rows, focus);
-                let end = (scroll + visible_rows).min(total);
+            for start_scroll in 0..=total {
+                for focus in 0..crate::app::SETTINGS_KEYBIND_ITEMS {
+                    let scroll = scroll_for_focus(start_scroll, total, visible_rows, focus);
+                    let end = (scroll + visible_rows).min(total);
 
-                assert!(
-                    scroll <= focus && focus < end,
-                    "visible_rows={visible_rows} focus={focus} scroll={scroll}"
-                );
+                    assert!(
+                        scroll <= focus && focus < end,
+                        "visible_rows={visible_rows} start_scroll={start_scroll} \
+                         focus={focus} scroll={scroll}"
+                    );
+                }
             }
         }
     }
 
+    /// 应用内滚动语义：焦点还在窗口内时视口不动，越过边界才滚，
+    /// 且只滚到刚好把焦点行露出来（不持续把焦点钉在窗口底边）。
+    #[test]
+    fn keybind_scroll_only_moves_on_boundary_crossing() {
+        let total = crate::app::SETTINGS_KEYBIND_ITEMS + 3;
+
+        // 焦点在窗口 [4, 12) 内：视口不动。
+        assert_eq!(scroll_for_focus(4, total, 8, 6), 4);
+        assert_eq!(scroll_for_focus(4, total, 8, 11), 4);
+        // 越过下边界：只滚一格，焦点贴底。
+        assert_eq!(scroll_for_focus(4, total, 8, 12), 5);
+        // 越过上边界：只滚一格，焦点贴顶。
+        assert_eq!(scroll_for_focus(6, total, 8, 5), 5);
+        // 视口增长到装下全部内容：钳制回 0。
+        assert_eq!(scroll_for_focus(6, total, 30, 10), 0);
+    }
+
     #[test]
     fn scroll_is_zero_when_everything_fits() {
-        assert_eq!(scroll_for_focus(23, 23, 19), 0);
-        assert_eq!(scroll_for_focus(23, 40, 19), 0);
+        assert_eq!(scroll_for_focus(7, 23, 23, 19), 0);
+        assert_eq!(scroll_for_focus(7, 23, 40, 19), 0);
     }
 
     /// 命中区行号必须与渲染行号一致：条目 i 画在 `i - scroll` 行。
@@ -1355,24 +1418,5 @@ mod tests {
     #[test]
     fn scrolled_rows_is_empty_without_room() {
         assert!(scrolled_rows(crate::app::SETTINGS_KEYBIND_ITEMS, 0, 3).is_empty());
-    }
-}
-
-fn on_off(app: &App, enabled: bool) -> &'static str {
-    match app.config.language {
-        Language::Zh => {
-            if enabled {
-                "开"
-            } else {
-                "关"
-            }
-        }
-        Language::En => {
-            if enabled {
-                "On"
-            } else {
-                "Off"
-            }
-        }
     }
 }

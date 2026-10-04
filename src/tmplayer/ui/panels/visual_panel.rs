@@ -1,5 +1,5 @@
+use crate::data::config::VisualizeMode;
 use crate::tmplayer::app::state::{AppState, LyricLine};
-use crate::tmplayer::data::config::VisualizeMode;
 use crate::tmplayer::render::{oscilloscope_renderer, spectrum_renderer, vector_renderer};
 use crate::tmplayer::ui::borders::SOLID_BORDER;
 use ratatui::Frame;
@@ -120,12 +120,11 @@ fn centered_lyric_window(app: &AppState, visible_rows: usize) -> Vec<Line<'stati
     let pos_ms = app.player.position.as_millis() as u64;
     let current_idx = current_lyric_index(lines, pos_ms);
 
-    for row in 0..rows_count {
+    for (row, output) in rows.iter_mut().enumerate().take(rows_count) {
         let lyric_idx = current_idx as isize + row as isize - current_row as isize;
         if lyric_idx < 0 || lyric_idx >= lines.len() as isize {
             continue;
         }
-
         let lyric = &lines[lyric_idx as usize];
         let style = if lyric_idx as usize == current_idx {
             Style::default()
@@ -134,7 +133,7 @@ fn centered_lyric_window(app: &AppState, visible_rows: usize) -> Vec<Line<'stati
         } else {
             Style::default().fg(app.theme.color_subtext())
         };
-        rows[row] = Line::from(Span::styled(lyric.text.clone(), style));
+        *output = Line::from(Span::styled(lyric.text.clone(), style));
     }
 
     rows

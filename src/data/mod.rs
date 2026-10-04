@@ -1,5 +1,8 @@
 pub mod assets;
+pub mod atomic_file;
 pub mod config;
+pub mod icons;
+pub mod persistence;
 pub mod playback_session;
 pub mod private_roam;
 pub mod session;

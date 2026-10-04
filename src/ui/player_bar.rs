@@ -1,4 +1,5 @@
 use crate::app::{App, HitRect, PlaybackRuntimeState, PlayerBarHitTargets};
+use crate::data::icons::UiIcons;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
@@ -20,7 +21,9 @@ pub const PLAYER_BAR_HEIGHT: u16 = 5;
 
 /// 收藏爱心（Nerd Font PUA）：实心 = 已收藏，空心 = 未收藏。
 /// 用码位转义书写，免得复制粘贴时被编辑器换成别的字形。
+#[cfg(test)]
 const HEART_LIKED: &str = "\u{f004}";
+#[cfg(test)]
 const HEART_UNLIKED: &str = "\u{f08a}";
 
 /// 控制行 `{prev} {play} {next} {mode}` 的命中区。
@@ -143,22 +146,25 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         height: 1,
     };
 
-    let prev_label = "[]";
-    let play_label = if app.playback_state == PlaybackRuntimeState::Playing {
-        "[]"
-    } else {
-        "[]"
+    let icons = UiIcons::new();
+    let prev_label = icons.previous();
+    let play_label = icons.play_pause(app.playback.playback_state == PlaybackRuntimeState::Playing);
+    let next_label = icons.next();
+    let mode_symbol = match app.playback.playback_repeat_mode {
+        crate::app::PlaybackRepeatMode::Sequence => icons.sequence(),
+        crate::app::PlaybackRepeatMode::Shuffle => icons.shuffle(),
+        crate::app::PlaybackRepeatMode::LoopAll => icons.loop_all(),
+        crate::app::PlaybackRepeatMode::LoopOne => icons.loop_one(),
     };
-    let next_label = "[]";
-    let mode_symbol = app.playback_repeat_mode.symbol();
     let controls = format!("{prev_label} {play_label} {next_label} {mode_symbol}");
 
-    let spectrum =
-        if app.now_playing.is_some() && app.playback_state != PlaybackRuntimeState::Stopped {
-            app.main_spectrum_braille()
-        } else {
-            " ".repeat(10)
-        };
+    let spectrum = if app.playback.now_playing.is_some()
+        && app.playback.playback_state != PlaybackRuntimeState::Stopped
+    {
+        app.main_spectrum_braille()
+    } else {
+        " ".repeat(10)
+    };
 
     let controls_w = display_width(&controls) as u16;
     let spectrum_w = display_width(&spectrum).min(10) as u16;
@@ -189,7 +195,7 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         height: 1,
     };
 
-    let left_text = match app.now_playing.as_ref() {
+    let left_text = match app.playback.now_playing.as_ref() {
         Some(track) if !track.title.trim().is_empty() => {
             if app.now_playing_artist_text().trim().is_empty() {
                 track.title.clone()
@@ -200,7 +206,7 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         _ => String::new(),
     };
 
-    let left_style = if app.now_playing.is_some() {
+    let left_style = if app.playback.now_playing.is_some() {
         Style::default()
             .fg(app.theme.color_accent3())
             .add_modifier(Modifier::BOLD)
@@ -212,25 +218,15 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     // 免得两处各写一份宽度计算；下载图标（可用时）在它左侧隔一格。
     let download_state = app.current_download_state();
     let download_glyph = download_state
-        .map(|state| crate::app::download::state_glyph(state, app.download_spinner_phase()));
-    let download_style = match download_state {
-        Some(crate::app::download::DownloadState::Downloading) => Style::default()
-            .fg(app.theme.color_accent2())
-            .add_modifier(Modifier::BOLD),
-        Some(crate::app::download::DownloadState::Done) => {
-            Style::default().fg(app.theme.color_accent3())
-        }
-        _ => Style::default().fg(app.theme.color_subtext()),
-    };
+        .map(|state| crate::app::download::state_glyph(state, app.download_spinner_phase(), icons));
+    // 下载图标与折叠栏里除爱心以外的按钮同色（控制行 prev/play/next/mode 用的 text 色），
+    // 不按下载状态换色；状态由字形表达（转圈 / 对勾）。
+    let download_style = Style::default().fg(app.theme.color_text());
 
     let mut like_hit = None;
     let mut download_hit = None;
-    let left_render = if app.now_playing.is_some() {
-        let heart = if app.now_playing_liked {
-            HEART_LIKED
-        } else {
-            HEART_UNLIKED
-        };
+    let left_render = if app.playback.now_playing.is_some() {
+        let heart = icons.heart(app.playback.now_playing_liked);
         let suffix = match download_glyph {
             Some(glyph) => format!("{glyph} {heart}"),
             None => heart.to_string(),
@@ -245,22 +241,15 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
     let mut tail: Vec<(String, Style)> = Vec::new();
     let mut head = left_render.as_str();
-    if app.now_playing.is_some() {
-        let heart = if app.now_playing_liked {
-            HEART_LIKED
-        } else {
-            HEART_UNLIKED
-        };
-        if let Some(stripped) = head.strip_suffix(heart) {
-            head = stripped;
-            if let Some(glyph) = download_glyph
-                && let Some(stripped) = head.strip_suffix(glyph)
-                && let Some(stripped) = stripped.strip_suffix(' ')
-            {
-                head = stripped;
-                tail.push((glyph.to_string(), download_style));
-                tail.push((" ".to_string(), left_style));
-            }
+    if app.playback.now_playing.is_some() {
+        let heart = icons.heart(app.playback.now_playing_liked);
+        let split = split_left_tail(head, heart, download_glyph);
+        head = split.head;
+        if let Some(glyph) = split.glyph {
+            tail.push((glyph.to_string(), download_style));
+            tail.push((" ".to_string(), left_style));
+        }
+        if split.heart.is_some() {
             tail.push((heart.to_string(), left_style));
         }
     }
@@ -484,9 +473,49 @@ fn compose_left_right_line(left: &str, right: &str, width: usize) -> String {
     format!("{left_text}{}{right}", " ".repeat(pad))
 }
 
+/// `compose_left_right_line` 尾段的拆分结果：`head` 之后依次是
+/// 「下载图标、空格、爱心」。
+struct LeftTail<'a> {
+    head: &'a str,
+    glyph: Option<char>,
+    heart: Option<&'a str>,
+}
+
+/// 从右端剥出「下载图标 + 空格 + 爱心」三段，供调用方各段独立上色。
+///
+/// 串是自左向右拼的，剥离必须自右向左：爱心 → 空格 → 图标。顺序写反时图标
+/// 会留在 `head` 里、被当成标题一起上色（曾静默回归：图标永远是字的颜色）。
+/// 尾巴上没有爱心（空标题/极窄列）时原样返回；有爱心但图标被裁掉时
+/// `glyph` 为 `None`。
+fn split_left_tail<'a>(line: &'a str, heart: &'a str, glyph: Option<char>) -> LeftTail<'a> {
+    let Some(stripped) = line.strip_suffix(heart) else {
+        return LeftTail {
+            head: line,
+            glyph: None,
+            heart: None,
+        };
+    };
+    if let Some(glyph) = glyph
+        && let Some(stripped) = stripped.strip_suffix(' ')
+        && let Some(stripped) = stripped.strip_suffix(glyph)
+    {
+        return LeftTail {
+            head: stripped,
+            glyph: Some(glyph),
+            heart: Some(heart),
+        };
+    }
+    LeftTail {
+        head: stripped,
+        glyph: None,
+        heart: Some(heart),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::download::{DownloadState, state_glyph};
 
     fn row(x: u16, width: u16) -> Rect {
         Rect {
@@ -552,14 +581,15 @@ mod tests {
     /// 下载图标本身必须是 1 格宽（否则左列排版会漂）。
     #[test]
     fn download_glyphs_are_single_cell() {
-        use crate::app::download::{DownloadState, state_glyph};
+        use crate::data::icons::UiIcons;
+        let icons = UiIcons::new();
         let phase = Duration::from_millis(0);
         for state in [
             DownloadState::NotDownloaded,
             DownloadState::Downloading,
             DownloadState::Done,
         ] {
-            let glyph = state_glyph(state, phase);
+            let glyph = state_glyph(state, phase, icons);
             assert_eq!(
                 display_width(&glyph.to_string()),
                 1,
@@ -574,13 +604,13 @@ mod tests {
         for heart in [HEART_LIKED, HEART_UNLIKED] {
             assert_eq!(display_width(heart), 1, "爱心应为 1 格宽：{heart:?}");
         }
-        for mode in [
-            crate::app::PlaybackRepeatMode::Sequence,
-            crate::app::PlaybackRepeatMode::Shuffle,
-            crate::app::PlaybackRepeatMode::LoopAll,
-            crate::app::PlaybackRepeatMode::LoopOne,
+        let icons = UiIcons::new();
+        for symbol in [
+            icons.sequence(),
+            icons.shuffle(),
+            icons.loop_all(),
+            icons.loop_one(),
         ] {
-            let symbol = mode.symbol();
             assert_eq!(display_width(symbol), 1, "模式符号应为 1 格宽：{symbol:?}");
         }
     }
@@ -630,5 +660,55 @@ mod tests {
         let clipped = control_hit_rects(row(0, row_w - 1), labels);
         assert!(clipped.mode.is_none(), "末段越界时不登记");
         assert!(clipped.prev.is_some(), "首段仍在区域内");
+    }
+
+    /// 尾段必须按「图标 / 空格 / 爱心」拆开，图标不能留在头段里
+    /// （留在头段就会被当成标题上色——图标颜色静默回归的根因）。
+    #[test]
+    fn left_tail_peels_the_glyph_out_of_the_head() {
+        let glyph = '\u{ec74}';
+        for heart in [HEART_LIKED, HEART_UNLIKED] {
+            let suffix = format!("{glyph} {heart}");
+            let line = compose_left_right_line("Title", &suffix, 20);
+            let split = split_left_tail(&line, heart, Some(glyph));
+
+            assert_eq!(split.glyph, Some(glyph), "图标自成一段：{line:?}");
+            assert_eq!(split.heart, Some(heart), "爱心自成一段：{line:?}");
+            assert!(
+                !split.head.contains(glyph),
+                "头段里不该再留图标：{:?}",
+                split.head
+            );
+            assert_eq!(
+                format!(
+                    "{}{}{}{}",
+                    split.head,
+                    split.glyph.unwrap(),
+                    ' ',
+                    split.heart.unwrap()
+                ),
+                line,
+                "拆出的三段必须原样拼回整串"
+            );
+        }
+    }
+
+    /// 图标被裁掉（只剩爱心）时不产生图标段；没有爱心时整串就是头段。
+    #[test]
+    fn left_tail_handles_missing_glyph_and_missing_heart() {
+        let heart = HEART_UNLIKED;
+        let glyph = '\u{ec74}';
+
+        let heart_only = compose_left_right_line("Title", heart, 20);
+        let split = split_left_tail(&heart_only, heart, Some(glyph));
+        assert_eq!(split.glyph, None, "画不下的图标不该凭空出现");
+        assert_eq!(split.heart, Some(heart));
+        assert_eq!(split.head, heart_only.strip_suffix(heart).unwrap());
+
+        let plain = "Title";
+        let split = split_left_tail(plain, heart, Some(glyph));
+        assert_eq!(split.head, plain, "没有爱心尾巴时原样返回");
+        assert_eq!(split.glyph, None);
+        assert_eq!(split.heart, None);
     }
 }

@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::LazyLock;
+use std::time::Duration;
+
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 特殊状态码集合（视为 200）
 static SPECIAL_STATUS_CODES: LazyLock<std::collections::HashSet<i64>> =
@@ -36,6 +39,58 @@ fn header_value(s: &str) -> HeaderValue {
             .collect();
         HeaderValue::from_str(&safe).unwrap_or_else(|_| HeaderValue::from_static(""))
     })
+}
+
+fn api_endpoint(uri: &str) -> Result<&str> {
+    uri.strip_prefix("/api/")
+        .filter(|endpoint| !endpoint.is_empty())
+        .ok_or_else(|| {
+            NcmError::InvalidParam("API URI must start with /api/ and name an endpoint".to_string())
+        })
+}
+
+fn decode_response_body(bytes: &[u8], encrypted: bool) -> Result<Value> {
+    if encrypted {
+        crypto::eapi_res_decrypt_bytes(bytes)
+    } else {
+        serde_json::from_slice(bytes)
+            .map_err(|source| NcmError::response_decode("plain", bytes.len(), source))
+    }
+}
+
+fn response_from_body(status_code: i64, body: Value, cookie: Vec<String>) -> Result<ApiResponse> {
+    let mut status = body
+        .get("code")
+        .and_then(|c| {
+            c.as_i64()
+                .or_else(|| c.as_str().and_then(|s| s.parse().ok()))
+        })
+        .unwrap_or(status_code);
+
+    // Preserve protocol-specific status semantics and the original body.
+    if SPECIAL_STATUS_CODES.contains(&status) {
+        status = 200;
+    }
+    if !(100..600).contains(&status) {
+        status = 400;
+    }
+
+    let answer = ApiResponse {
+        status,
+        body,
+        cookie,
+    };
+    if status == 200 {
+        Ok(answer)
+    } else {
+        let msg = answer
+            .body
+            .get("msg")
+            .and_then(|m| m.as_str())
+            .unwrap_or("Unknown error")
+            .to_string();
+        Err(NcmError::from_api(status, msg))
+    }
 }
 
 /// 加密类型
@@ -76,7 +131,6 @@ pub struct RequestOption {
     pub crypto: CryptoType,
     pub cookie: Option<String>,
     pub ua: Option<String>,
-    pub proxy: Option<String>,
     pub real_ip: Option<String>,
     pub random_cn_ip: bool,
     pub e_r: Option<bool>,
@@ -136,13 +190,30 @@ impl ApiClient {
         self.device_id.as_deref().unwrap_or(&DEVICE_ID)
     }
 
-    /// 发起 API 请求 - 核心方法
+    /// 发起 API 请求；HTTP 发送到完整响应 body 共用 30 秒 deadline。
     pub async fn request(
         &self,
         uri: &str,
         data: Value,
         options: RequestOption,
     ) -> Result<ApiResponse> {
+        self.request_with_timeout(uri, data, options, NETWORK_TIMEOUT)
+            .await
+    }
+
+    async fn request_with_timeout(
+        &self,
+        uri: &str,
+        data: Value,
+        options: RequestOption,
+        timeout: Duration,
+    ) -> Result<ApiResponse> {
+        let endpoint = api_endpoint(uri)?;
+        if !data.is_object() {
+            return Err(NcmError::InvalidParam(
+                "API request data must be a JSON object".to_string(),
+            ));
+        }
         let mut headers = HeaderMap::new();
 
         // IP 伪装
@@ -232,6 +303,8 @@ impl ApiClient {
         } else {
             options.crypto.clone()
         };
+        let encrypted_response =
+            crypto_type == CryptoType::Eapi && options.e_r.unwrap_or(ENCRYPT_RESPONSE);
 
         let mut data = data;
         let url: String;
@@ -252,7 +325,7 @@ impl ApiClient {
 
                 data["csrf_token"] = Value::String(csrf_token);
                 encrypt_data = crypto::weapi(&data);
-                url = format!("{}/weapi/{}", ref_domain, &uri[5..]);
+                url = format!("{}/weapi/{}", ref_domain, endpoint);
             }
             CryptoType::Linuxapi => {
                 let ua = options
@@ -364,11 +437,10 @@ impl ApiClient {
                     let header_value = serde_json::to_value(&header_map).unwrap();
                     data["header"] = header_value;
 
-                    let e_r = options.e_r.unwrap_or(ENCRYPT_RESPONSE);
-                    data["e_r"] = Value::Bool(e_r);
+                    data["e_r"] = Value::Bool(encrypted_response);
 
                     encrypt_data = crypto::eapi(uri, &data);
-                    url = format!("{}/eapi/{}", api_domain, &uri[5..]);
+                    url = format!("{}/eapi/{}", api_domain, endpoint);
                 } else {
                     // api 明文
                     encrypt_data = if let Value::Object(map) = &data {
@@ -401,79 +473,200 @@ impl ApiClient {
             HeaderValue::from_static("application/x-www-form-urlencoded"),
         );
 
-        if options.proxy.is_some() {
-            return Err(NcmError::Unknown(
-                "proxy is no longer supported, configure proxy in the Client upfront".to_string(),
-            ));
-        }
+        // One budget covers connection, response headers and the entire body.
+        // Decode/business errors remain outside the network timeout boundary.
+        let (status_code, resp_cookies, bytes) = compio::time::timeout(timeout, async {
+            let response = self
+                .client
+                .post(&url)?
+                .headers(headers)
+                .body(body)
+                .send()
+                .await?;
 
-        let response = self
-            .client
-            .post(&url)?
-            .headers(headers)
-            .body(body)
-            .send()
-            .await?;
+            // 处理响应 cookie
+            let resp_cookies: Vec<String> = response
+                .headers()
+                .get_all("set-cookie")
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .map(|s| {
+                    // 移除 Domain 属性
+                    DOMAIN_REGEX.replace_all(s, "").to_string()
+                })
+                .collect();
 
-        // 处理响应 cookie
-        let resp_cookies: Vec<String> = response
-            .headers()
-            .get_all("set-cookie")
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .map(|s| {
-                // 移除 Domain 属性
-                DOMAIN_REGEX.replace_all(s, "").to_string()
-            })
-            .collect();
-
-        // 解析响应体
-        let e_r = options.e_r.unwrap_or(false);
-        let status_code = response.status().as_u16() as i64;
-
-        let body: Value = if crypto_type == CryptoType::Eapi && e_r {
+            let status_code = response.status().as_u16() as i64;
             let bytes = response.bytes().await?;
-            let hex_str = hex::encode_upper(&bytes);
-            crypto::eapi_res_decrypt(&hex_str).unwrap_or(Value::Null)
-        } else {
-            let text = response.text().await?;
-            serde_json::from_str(&text).unwrap_or(Value::String(text))
-        };
+            Ok::<_, NcmError>((status_code, resp_cookies, bytes))
+        })
+        .await
+        .map_err(|_| NcmError::Timeout { timeout })??;
+        let body = decode_response_body(&bytes, encrypted_response)?;
+        response_from_body(status_code, body, resp_cookies)
+    }
+}
 
-        let mut status = body
-            .get("code")
-            .and_then(|c| {
-                c.as_i64()
-                    .or_else(|| c.as_str().and_then(|s| s.parse().ok()))
-            })
-            .unwrap_or(status_code);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
-        // 特殊状态码视为 200
-        if SPECIAL_STATUS_CODES.contains(&status) {
-            status = 200;
+    #[compio::test]
+    async fn api_network_deadline_covers_headers_and_body() {
+        let timeout = Duration::from_millis(200);
+        for send_headers in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (release, wait_for_release) = mpsc::channel();
+            let server = compio::runtime::spawn_blocking(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = socket.read(&mut buffer).unwrap();
+                    assert_ne!(count, 0);
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                assert!(request.starts_with(b"POST /api/deadline HTTP/1.1\r\n"));
+                if send_headers {
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{",
+                        )
+                        .unwrap();
+                }
+                // Hold the connection open until the client returns; no busy loop.
+                let _ = wait_for_release.recv_timeout(Duration::from_secs(2));
+            });
+            let http = cyper::Client::builder().no_proxy().build().unwrap();
+            let api = ApiClient::new(None, http);
+            let result = compio::time::timeout(
+                Duration::from_secs(1),
+                api.request_with_timeout(
+                    "/api/deadline",
+                    serde_json::json!({}),
+                    RequestOption {
+                        crypto: CryptoType::Api,
+                        domain: Some(format!("http://{address}")),
+                        ..RequestOption::default()
+                    },
+                    timeout,
+                ),
+            )
+            .await;
+            let _ = release.send(());
+            server.await.unwrap();
+            let error = result
+                .expect("the request deadline must beat the watchdog")
+                .unwrap_err();
+            assert!(matches!(error, NcmError::Timeout { timeout: elapsed } if elapsed == timeout));
+            assert!(error.to_string().contains("complete response"));
         }
+    }
 
-        // 状态码范围检查
-        if !(100..600).contains(&status) {
-            status = 400;
+    #[test]
+    fn successful_response_preserves_status_body_and_cookies() {
+        let body = decode_response_body(b"{\"code\":200,\"data\":[1,2]}", false).unwrap();
+        let cookies = vec!["MUSIC_U=session; Path=/".to_string()];
+        let response = response_from_body(200, body.clone(), cookies.clone()).unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, body);
+        assert_eq!(response.cookie, cookies);
+    }
+
+    #[test]
+    fn api_uri_requires_nonempty_api_endpoint() {
+        assert_eq!(api_endpoint("/api/song/detail").unwrap(), "song/detail");
+        assert_eq!(api_endpoint("/api/歌曲").unwrap(), "歌曲");
+        for uri in [
+            "",
+            "/",
+            "/api",
+            "/api/",
+            "😀",
+            "/abc/endpoint",
+            "/eapi/test",
+            "https://music.163.com/api/test",
+        ] {
+            assert!(matches!(api_endpoint(uri), Err(NcmError::InvalidParam(_))));
         }
+    }
 
-        let answer = ApiResponse {
-            status,
-            body,
-            cookie: resp_cookies,
-        };
+    #[test]
+    fn malformed_plain_response_is_a_typed_error_with_bounded_context() {
+        let mut body = b"not-json SECRET".to_vec();
+        body.resize(16 * 1024, b'x');
+        let error = decode_response_body(&body, false).unwrap_err();
+        assert!(matches!(
+            &error,
+            NcmError::ResponseDecode {
+                format: "plain",
+                body_len: 16384,
+                ..
+            }
+        ));
+        let message = error.to_string();
+        assert!(!message.contains("SECRET"));
+        assert!(message.len() < 256);
+        assert!(matches!(
+            decode_response_body(b"", false),
+            Err(NcmError::ResponseDecode { .. })
+        ));
+    }
 
-        if status == 200 {
-            Ok(answer)
-        } else {
-            let msg = answer
-                .body
-                .get("msg")
-                .and_then(|m| m.as_str())
-                .unwrap_or("Unknown error")
-                .to_string();
-            Err(NcmError::from_api(status, msg))
+    #[test]
+    fn encrypted_response_decodes_fixed_vector_or_returns_error() {
+        let bytes = hex::decode("51B05E35C69B2F9FF4967735DED68881").unwrap();
+        assert_eq!(
+            decode_response_body(&bytes, true).unwrap(),
+            serde_json::json!({"code": 200})
+        );
+        assert!(matches!(
+            decode_response_body(&[0], true),
+            Err(NcmError::Crypto(_))
+        ));
+        let malformed = hex::decode("67E8E46C291AD4030FDF54CF200490C6").unwrap();
+        assert!(matches!(
+            decode_response_body(&malformed, true),
+            Err(NcmError::ResponseDecode { .. })
+        ));
+    }
+
+    #[test]
+    fn valid_json_body_shapes_are_preserved() {
+        for body in ["null", "\"body\"", "[1,2]", "{\"code\":502}"] {
+            assert_eq!(
+                decode_response_body(body.as_bytes(), false).unwrap(),
+                serde_json::from_str::<Value>(body).unwrap()
+            );
         }
+    }
+
+    #[test]
+    fn special_status_codes_preserve_original_response_body() {
+        for code in [201, 302, 400, 502, 800, 801, 802, 803] {
+            let body = serde_json::json!({"code": code});
+            let response = response_from_body(500, body.clone(), vec![]).unwrap();
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body, body);
+        }
+        let response = response_from_body(500, serde_json::json!({"code": "800"}), vec![]).unwrap();
+        assert_eq!(response.body["code"], "800");
+        assert_eq!(response.status, 200);
+        assert!(matches!(
+            response_from_body(200, serde_json::json!({"code": 301}), vec![]),
+            Err(NcmError::AuthRequired(_))
+        ));
+        assert!(matches!(
+            response_from_body(503, serde_json::json!({}), vec![]),
+            Err(NcmError::RateLimited(_))
+        ));
     }
 }

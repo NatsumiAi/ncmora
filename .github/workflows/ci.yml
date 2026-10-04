@@ -9,11 +9,32 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  check:
-    name: cargo check
+  build-and-test:
+    name: ${{ matrix.toolchain }} / ${{ matrix.feature_name }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: 1.95.0
+            feature_name: default
+            feature_args: ""
+          - toolchain: 1.95.0
+            feature_name: no-default-features
+            feature_args: --no-default-features
+          - toolchain: stable
+            feature_name: default
+            feature_args: ""
+          - toolchain: stable
+            feature_name: no-default-features
+            feature_args: --no-default-features
     steps:
       - uses: actions/checkout@v4
 
@@ -25,8 +46,73 @@ jobs:
             libasound2-dev libchafa-dev libpipewire-0.3-dev libssl-dev libglib2.0-dev libclang-dev
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.toolchain }}
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: cargo check --locked
-        run: cargo check --locked --all-targets
+      - name: cargo check --locked --all-targets
+        env:
+          FEATURE_ARGS: ${{ matrix.feature_args }}
+        run: cargo check --workspace --locked --all-targets $FEATURE_ARGS
+
+      - name: cargo test --locked --all-targets
+        env:
+          FEATURE_ARGS: ${{ matrix.feature_args }}
+        run: cargo test --workspace --locked --all-targets $FEATURE_ARGS
+
+  quality:
+    name: fmt and clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config \
+            libasound2-dev libchafa-dev libpipewire-0.3-dev libssl-dev libglib2.0-dev libclang-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check (root)
+        run: cargo fmt --all -- --check
+
+      - name: cargo fmt --check (ncm-api)
+        run: cargo fmt --manifest-path ncm-api-rs/Cargo.toml -- --check
+
+      - name: cargo clippy --all-targets --all-features (root)
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: cargo clippy --all-targets --no-default-features (root)
+        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
+
+      - name: cargo clippy --all-targets (ncm-api)
+        run: cargo clippy --manifest-path ncm-api-rs/Cargo.toml --locked --all-targets -- -D warnings
+
+  vendored-tests:
+    name: ncm-api tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo test --locked (ncm-api)
+        run: cargo test --manifest-path ncm-api-rs/Cargo.toml --locked --all-targets

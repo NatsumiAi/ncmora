@@ -32,15 +32,10 @@ impl ApiClient {
         let pure_hex = hex_string.replace(' ', "");
 
         let data = if is_req {
-            match eapi_req_decrypt(&pure_hex) {
-                Some((url, body)) => json!({ "url": url, "body": body }),
-                None => json!(null),
-            }
+            let (url, body) = eapi_req_decrypt(&pure_hex)?;
+            json!({ "url": url, "body": body })
         } else {
-            match eapi_res_decrypt(&pure_hex) {
-                Some(val) => val,
-                None => json!(null),
-            }
+            eapi_res_decrypt(&pure_hex)?
         };
 
         Ok(ApiResponse {
