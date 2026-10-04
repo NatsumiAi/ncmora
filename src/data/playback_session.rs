@@ -23,6 +23,9 @@ pub struct PlaybackSessionRecord {
     pub repeat_mode: Option<String>,
     #[serde(default)]
     pub source_playlist_id: Option<String>,
+    /// 歌单/专辑的来源封面；旧存档缺少时使用歌曲封面兜底。
+    #[serde(default)]
+    pub source_cover_url: Option<String>,
     pub updated_at: i64,
 }
 
@@ -67,4 +70,27 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn playback_memory_preserves_source_cover_and_accepts_older_records() {
+        let old = "updated_at = 0\nsource_playlist_id = 'playlist-42'\n";
+        let with_cover = format!("{old}source_cover_url = 'https://example.com/playlist.jpg'\n");
+        let record: PlaybackSessionRecord = toml::from_str(&with_cover).unwrap();
+        let saved: toml::Value = toml::from_str(&toml::to_string(&record).unwrap()).unwrap();
+        assert_eq!(
+            saved.get("source_cover_url").and_then(toml::Value::as_str),
+            Some("https://example.com/playlist.jpg"),
+        );
+        let old_record: PlaybackSessionRecord = toml::from_str(old).unwrap();
+        assert!(old_record.source_cover_url.is_none());
+        assert_eq!(
+            old_record.source_playlist_id.as_deref(),
+            Some("playlist-42")
+        );
+    }
 }
