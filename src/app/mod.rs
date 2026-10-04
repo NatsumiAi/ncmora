@@ -2953,7 +2953,7 @@ impl App {
                 now_playing_state: DownloadState::NotDownloaded,
                 root: download_root,
                 page_kind: PlaylistPageKind::Playlist,
-                pending_intent: None,
+                pending_intents: Default::default(),
             },
             graphics_picker: Picker::halfblocks(),
         };
@@ -4790,6 +4790,7 @@ impl App {
         let next =
             crate::app::download::resolve_download_root(self.config.download_path.as_deref());
         if next != self.downloads.root {
+            self.downloads.pending_intents.invalidate_root();
             self.downloads.root = next;
             self.downloads.manager.clear_disk_cache();
             // 行数据的目录部分变了：整页行数据重建。
@@ -4914,7 +4915,9 @@ impl App {
 
     /// 发起 / 取消下载（图标点击、两处快捷键共用这一条路径）。
     fn toggle_download(&mut self, candidate: DownloadCandidate) {
-        if self.downloads.manager.is_downloading(&candidate.song_id) {
+        if self.downloads.pending_intents.cancel(&candidate.song_id)
+            || self.downloads.manager.is_downloading(&candidate.song_id)
+        {
             self.downloads.manager.cancel(&candidate.song_id);
             self.set_runtime_status(format!(
                 "{}: {}",
@@ -4948,27 +4951,6 @@ impl App {
                 &candidate.album,
             ),
         };
-        match self
-            .downloads
-            .manager
-            .known_state_of(&candidate.song_id, &target)
-        {
-            None => {
-                self.downloads.pending_intent = Some(candidate);
-                self.set_runtime_status(self.lang_text(
-                    "正在检查已有下载，请稍候",
-                    "Checking existing downloads, please wait",
-                ));
-                return;
-            }
-            Some(DownloadState::Done) => {
-                self.set_runtime_status(self.lang_text("歌曲已下载", "Song already downloaded"));
-                return;
-            }
-            Some(DownloadState::Downloading) => return,
-            Some(DownloadState::NotDownloaded) => {}
-        }
-
         let level = self
             .config
             .download_audio_quality
@@ -4977,10 +4959,29 @@ impl App {
             song_id: candidate.song_id.clone(),
             level,
             title: candidate.title.clone(),
-            artist: candidate.artist.clone(),
-            album: candidate.album.clone(),
+            artist: candidate.artist,
+            album: candidate.album,
             target,
         };
+        let state = self.downloads.manager.known_state_of(&request.song_id, &request.target);
+        if !self.downloads.pending_intents.is_empty() || state.is_none() {
+            let origin = self.downloads.pending_intents.origin();
+            self.downloads.pending_intents.defer(origin, request);
+            self.set_runtime_status(self.lang_text(
+                "正在检查已有下载，请稍候",
+                "Checking existing downloads, please wait",
+            ));
+            return;
+        }
+        match state {
+            Some(DownloadState::Done) => {
+                self.set_runtime_status(self.lang_text("歌曲已下载", "Song already downloaded"));
+                return;
+            }
+            Some(DownloadState::Downloading) => return,
+            Some(DownloadState::NotDownloaded) => {}
+            None => unreachable!("unknown disk status was deferred"),
+        }
 
         let queued = self.downloads.manager.is_active();
         match self.downloads.manager.enqueue(&self.api, request) {
@@ -5055,8 +5056,33 @@ impl App {
                 }
             }
         }
-        if let Some(candidate) = self.downloads.pending_intent.take() {
-            self.toggle_download(candidate);
+        loop {
+            let request = {
+                let downloads = &mut self.downloads;
+                let manager = &mut downloads.manager;
+                downloads.pending_intents.take_ready(|request| {
+                    if manager.is_busy(&request.song_id) {
+                        Some(DownloadState::Downloading)
+                    } else {
+                        manager.known_state_of(&request.song_id, &request.target)
+                    }
+                })
+            };
+            let Some(request) = request else { break };
+            let status = format!(
+                "{}: {} ({})",
+                if self.downloads.manager.is_active() {
+                    self.lang_text("已加入下载队列", "Queued for download")
+                } else {
+                    self.lang_text("开始下载", "Downloading")
+                },
+                request.title,
+                request.level.as_api_level()
+            );
+            match self.downloads.manager.enqueue(&self.api, request) {
+                Ok(()) => self.set_runtime_status(status),
+                Err(message) => self.set_runtime_status(message),
+            }
         }
     }
 
@@ -7808,6 +7834,7 @@ impl App {
     }
 
     async fn logout_to_login(&mut self) {
+        self.downloads.pending_intents.invalidate_session();
         self.close_overlay();
         self.page = Page::Login;
         self.search_return_page = Page::Home;
