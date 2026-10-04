@@ -155,7 +155,9 @@ fn prepare(bytes: &[u8], width: u16, height: u16) -> Option<Buffer> {
     let area = Rect::new(0, 0, width, height);
     let mut buffer = Buffer::empty(area);
     let mut protocol = picker.new_resize_protocol(pixels);
-    StatefulImage::default().resize(Resize::Crop(None)).render(area, &mut buffer, &mut protocol);
+    StatefulImage::default()
+        .resize(Resize::Crop(None))
+        .render(area, &mut buffer, &mut protocol);
     Some(buffer)
 }
 
@@ -171,12 +173,19 @@ mod tests {
         use ratatui_image::picker::ProtocolType;
 
         for (image_width, image_height) in [(31, 17), (17, 31), (32, 32)] {
-            let image = DynamicImage::ImageRgba8(RgbaImage::from_fn(image_width, image_height, |x, y| {
-                Rgba([(x * 31 % 256) as u8, (y * 47 % 256) as u8,
-                    ((x + y) * 23 % 256) as u8, if (x + y) % 5 == 0 { 0 } else { 255 }])
-            }));
+            let image =
+                DynamicImage::ImageRgba8(RgbaImage::from_fn(image_width, image_height, |x, y| {
+                    Rgba([
+                        (x * 31 % 256) as u8,
+                        (y * 47 % 256) as u8,
+                        ((x + y) * 23 % 256) as u8,
+                        if (x + y) % 5 == 0 { 0 } else { 255 },
+                    ])
+                }));
             let mut encoded = Cursor::new(Vec::new());
-            image.write_to(&mut encoded, image::ImageFormat::Png).unwrap();
+            image
+                .write_to(&mut encoded, image::ImageFormat::Png)
+                .unwrap();
             for (width, height) in [(1, 1), (12, 6), (9, 7)] {
                 // Baseline 7961505 GraphicsOverlay Halfblocks path, with its
                 // query-free fallback Picker. Keep this independent of prepare().
@@ -195,15 +204,20 @@ mod tests {
                 };
                 let cropped = image.crop_imm(x, y, w, h).resize_exact(
                     u32::from(width) * u32::from(font.width),
-                    u32::from(height) * u32::from(font.height), FilterType::Triangle,
+                    u32::from(height) * u32::from(font.height),
+                    FilterType::Triangle,
                 );
                 let mut protocol = picker.new_resize_protocol(cropped);
                 let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-                terminal.draw(|frame| {
-                    frame.render_stateful_widget(
-                        StatefulImage::default().resize(Resize::Crop(None)), frame.area(), &mut protocol,
-                    );
-                }).unwrap();
+                terminal
+                    .draw(|frame| {
+                        frame.render_stateful_widget(
+                            StatefulImage::default().resize(Resize::Crop(None)),
+                            frame.area(),
+                            &mut protocol,
+                        );
+                    })
+                    .unwrap();
                 let actual = prepare(encoded.get_ref(), width, height).unwrap();
                 let expected = terminal.backend().buffer();
                 for y in 0..height {

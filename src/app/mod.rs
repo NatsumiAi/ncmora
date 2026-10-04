@@ -4023,7 +4023,12 @@ impl App {
     pub fn fullscreen_metadata_signature(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
         self.playback.playback_queue.len().hash(&mut hasher);
-        self.playback.playback_queue_cover.as_ref().map(Vec::len).unwrap_or(0).hash(&mut hasher);
+        self.playback
+            .playback_queue_cover
+            .as_ref()
+            .map(Vec::len)
+            .unwrap_or(0)
+            .hash(&mut hasher);
 
         for track in &self.playback.playback_queue {
             track.song_id.hash(&mut hasher);
@@ -5371,17 +5376,23 @@ impl App {
             return;
         }
 
-        let Some(now) = self.playback.now_playing.as_ref() else { return; };
+        let Some(now) = self.playback.now_playing.as_ref() else {
+            return;
+        };
         if now.song_id != result.song_id
             || now.cover_url.as_deref().map(str::trim) != Some(result.url.as_str())
             || now.cover.is_some()
-        { return; }
+        {
+            return;
+        }
         if let Some(now_mut) = self.playback.now_playing.as_mut() {
             now_mut.cover = Some(bytes.clone());
         }
         if let Some(index) = self.playback.playback_index
             && let Some(slot) = self.playback.playback_queue.get_mut(index)
-        { slot.cover = Some(bytes); }
+        {
+            slot.cover = Some(bytes);
+        }
     }
 
     fn maybe_schedule_now_playing_cover_fetch(&mut self) {
@@ -5439,20 +5450,26 @@ impl App {
             return;
         }
         let generation = self.cover_fetch_generation.wrapping_add(1);
-        if self.cover_fetch_tx.start_send(CoverFetchRequest {
-            song_id: String::new(),
-            url: url.clone(),
-            generation,
-        }).is_ok() {
+        if self
+            .cover_fetch_tx
+            .start_send(CoverFetchRequest {
+                song_id: String::new(),
+                url: url.clone(),
+                generation,
+            })
+            .is_ok()
+        {
             self.cover_fetch_generation = generation;
             self.cover_fetch_inflight_url = Some(url);
             self.cover_fetch_last_attempt_at = Some(Instant::now());
         }
     }
 
-
     fn tick_cover_fetch(&mut self) {
-        let needs_now = self.playback.now_playing.as_ref()
+        let needs_now = self
+            .playback
+            .now_playing
+            .as_ref()
             .map(|now| now.cover.is_none() && now.cover_url.is_some())
             .unwrap_or(false);
         let needs_queue = self.playback.playback_queue_cover_url.is_some()
@@ -5461,8 +5478,12 @@ impl App {
         while let Ok(result) = self.cover_fetch_rx.try_recv() {
             self.apply_cover_fetch_result(result);
         }
-        if needs_now { self.maybe_schedule_now_playing_cover_fetch(); }
-        if self.cover_fetch_inflight_url.is_none() { self.maybe_schedule_queue_cover_fetch(); }
+        if needs_now {
+            self.maybe_schedule_now_playing_cover_fetch();
+        }
+        if self.cover_fetch_inflight_url.is_none() {
+            self.maybe_schedule_queue_cover_fetch();
+        }
     }
 
     fn apply_lyric_fetch_result(&mut self, result: LyricFetchResult) {
@@ -7562,7 +7583,6 @@ impl App {
         }
     }
 
-
     pub fn build_fullscreen_bootstrap(&self) -> crate::tmplayer::FullscreenBootstrap {
         let mut bootstrap = crate::tmplayer::FullscreenBootstrap::default();
         let Some(now) = self.playback.now_playing.as_ref() else {
@@ -7582,13 +7602,15 @@ impl App {
             })
             .collect();
         if bootstrap.playlist.is_empty() {
-            bootstrap.playlist.push(crate::tmplayer::FullscreenPlaylistItemSeed {
-                id: Some(now.song_id.clone()),
-                title: now.title.clone(),
-                artist: now.artist.clone(),
-                album: now.album.clone(),
-                duration: Duration::from_millis(now.duration_ms.max(0) as u64),
-            });
+            bootstrap
+                .playlist
+                .push(crate::tmplayer::FullscreenPlaylistItemSeed {
+                    id: Some(now.song_id.clone()),
+                    title: now.title.clone(),
+                    artist: now.artist.clone(),
+                    album: now.album.clone(),
+                    duration: Duration::from_millis(now.duration_ms.max(0) as u64),
+                });
         }
 
         let active_idx = self
@@ -7599,7 +7621,10 @@ impl App {
         bootstrap.current_index = Some(active_idx);
         bootstrap.playlist_cover = self.playback.playback_queue_cover.clone();
         if bootstrap.playlist_cover.is_none() {
-            bootstrap.playlist_cover = self.playback.playback_queue.first()
+            bootstrap.playlist_cover = self
+                .playback
+                .playback_queue
+                .first()
                 .and_then(|track| track.cover.clone());
         }
         if bootstrap.playlist_cover.is_none() {
@@ -7677,7 +7702,10 @@ impl App {
             Ok(Ok(None)) => return,
             other => {
                 log::error!("playback memory could not be read: {other:?}");
-                self.set_runtime_status(self.lang_text("播放记忆读取失败，保留原文件", "Playback memory could not be read; original preserved"));
+                self.set_runtime_status(self.lang_text(
+                    "播放记忆读取失败，保留原文件",
+                    "Playback memory could not be read; original preserved",
+                ));
                 return;
             }
         };

@@ -378,135 +378,135 @@ pub async fn run(
 
     let loop_result: Result<()> = async {
         loop {
-        let frame_start = Instant::now();
-        let mut state_changed = false;
+            let frame_start = Instant::now();
+            let mut state_changed = false;
 
-        state_changed |= sync_from_host_bridge(
-            app,
-            host_bridge,
-            &mut last_host_metadata_signature,
-            &mut last_host_config_signature,
-        )
-        .await;
+            state_changed |= sync_from_host_bridge(
+                app,
+                host_bridge,
+                &mut last_host_metadata_signature,
+                &mut last_host_config_signature,
+            )
+            .await;
 
-        while event::poll(Duration::from_millis(0))? {
-            match event::read()? {
-                Event::Key(k) => {
-                    let action = map_key(k, app.overlay, &app.config);
-                    handle_action(app, host_bridge, action, &last_layout).await?;
-                    state_changed = true;
+            while event::poll(Duration::from_millis(0))? {
+                match event::read()? {
+                    Event::Key(k) => {
+                        let action = map_key(k, app.overlay, &app.config);
+                        handle_action(app, host_bridge, action, &last_layout).await?;
+                        state_changed = true;
+                    }
+                    Event::Mouse(m) => {
+                        let action = map_mouse(m);
+                        handle_action(app, host_bridge, action, &last_layout).await?;
+                        state_changed = true;
+                    }
+                    Event::Resize(_, _) => {
+                        state_changed = true;
+                    }
+                    _ => {}
                 }
-                Event::Mouse(m) => {
-                    let action = map_mouse(m);
-                    handle_action(app, host_bridge, action, &last_layout).await?;
-                    state_changed = true;
-                }
-                Event::Resize(_, _) => {
-                    state_changed = true;
-                }
-                _ => {}
             }
-        }
 
-        let desired = desired_cava_config(app, &last_layout);
-        if cava_cfg != desired {
-            cava.set_desired(desired);
-            cava_cfg = desired;
-            clear_spectrum(app);
-            last_cava_failure = None;
-            state_changed = true;
-        }
-        {
-            let failure = cava.failure();
-            if *failure != last_cava_failure {
-                if let Some(error) = failure.as_ref() {
-                    log::warn!("Fullscreen visualization unavailable: {error}");
-                    app.set_toast(format!("Visualization unavailable: {error}"));
-                    state_changed = true;
-                }
-                last_cava_failure.clone_from(&failure);
-            }
-        }
-
-        if app.config.visualize == VisualizeMode::Bars {
-            let bars = desired_bar_count(app, &last_layout);
-            ensure_bar_buffers(app, bars);
-        }
-
-        // 频谱采集。示波器不走这里 —— 它在渲染时直接读 PCM 抽头环。但残留的
-        // cava 数据会让 has_spectrum_tail_motion() 长期为真，暂停后仍按高帧率
-        // 空转，所以切走时必须清零。
-        if app.config.visualize.needs_cava() {
-            let period = Duration::from_millis((1000 / app.config.spectrum_hz.max(1)) as u64);
-            if frame_start.duration_since(last_spectrum) >= period {
-                last_spectrum = frame_start;
+            let desired = desired_cava_config(app, &last_layout);
+            if cava_cfg != desired {
+                cava.set_desired(desired);
+                cava_cfg = desired;
+                clear_spectrum(app);
+                last_cava_failure = None;
                 state_changed = true;
-                let snapshot = cava.latest();
+            }
+            {
+                let failure = cava.failure();
+                if *failure != last_cava_failure {
+                    if let Some(error) = failure.as_ref() {
+                        log::warn!("Fullscreen visualization unavailable: {error}");
+                        app.set_toast(format!("Visualization unavailable: {error}"));
+                        state_changed = true;
+                    }
+                    last_cava_failure.clone_from(&failure);
+                }
+            }
+
+            if app.config.visualize == VisualizeMode::Bars {
                 let bars = desired_bar_count(app, &last_layout);
                 ensure_bar_buffers(app, bars);
-                let mut left = [0.0; crate::tmplayer::audio::cava::MAX_BARS];
-                let mut right = [0.0; crate::tmplayer::audio::cava::MAX_BARS];
-                let mut mono = [0.0; crate::tmplayer::audio::cava::MAX_BARS];
-                if app.config.bar_channels == BarChannels::Stereo {
-                    let _ = snapshot.copy_stereo_into(&mut left, &mut right);
-                    app.spectrum_left_smoother
-                        .apply_in_place(&left[..bars], &mut app.spectrum.bars_left);
-                    app.spectrum_right_smoother
-                        .apply_in_place(&right[..bars], &mut app.spectrum.bars_right);
-                } else {
-                    app.spectrum.bars_left.fill(0.0);
-                    app.spectrum.bars_right.fill(0.0);
-                }
-                let _ = snapshot.mono_into(&mut mono);
-                app.spectrum_bar_smoother
-                    .apply_in_place(&mono[..bars], &mut app.spectrum.bars);
             }
-        } else if has_spectrum_data(app) {
-            clear_spectrum(app);
-            state_changed = true;
-        }
 
-        app.tick(frame_start);
-        state_changed |= tui.poll_cover_frames();
+            // 频谱采集。示波器不走这里 —— 它在渲染时直接读 PCM 抽头环。但残留的
+            // cava 数据会让 has_spectrum_tail_motion() 长期为真，暂停后仍按高帧率
+            // 空转，所以切走时必须清零。
+            if app.config.visualize.needs_cava() {
+                let period = Duration::from_millis((1000 / app.config.spectrum_hz.max(1)) as u64);
+                if frame_start.duration_since(last_spectrum) >= period {
+                    last_spectrum = frame_start;
+                    state_changed = true;
+                    let snapshot = cava.latest();
+                    let bars = desired_bar_count(app, &last_layout);
+                    ensure_bar_buffers(app, bars);
+                    let mut left = [0.0; crate::tmplayer::audio::cava::MAX_BARS];
+                    let mut right = [0.0; crate::tmplayer::audio::cava::MAX_BARS];
+                    let mut mono = [0.0; crate::tmplayer::audio::cava::MAX_BARS];
+                    if app.config.bar_channels == BarChannels::Stereo {
+                        let _ = snapshot.copy_stereo_into(&mut left, &mut right);
+                        app.spectrum_left_smoother
+                            .apply_in_place(&left[..bars], &mut app.spectrum.bars_left);
+                        app.spectrum_right_smoother
+                            .apply_in_place(&right[..bars], &mut app.spectrum.bars_right);
+                    } else {
+                        app.spectrum.bars_left.fill(0.0);
+                        app.spectrum.bars_right.fill(0.0);
+                    }
+                    let _ = snapshot.mono_into(&mut mono);
+                    app.spectrum_bar_smoother
+                        .apply_in_place(&mono[..bars], &mut app.spectrum.bars);
+                }
+            } else if has_spectrum_data(app) {
+                clear_spectrum(app);
+                state_changed = true;
+            }
 
-        if app.should_continuous_redraw() {
-            state_changed = true;
-        }
+            app.tick(frame_start);
+            state_changed |= tui.poll_cover_frames();
 
-        let target_fps = if app.should_continuous_redraw() {
-            app.active_render_fps()
-        } else {
-            app.idle_render_fps()
-        };
-        let frame_dt = fps_to_dt(target_fps);
+            if app.should_continuous_redraw() {
+                state_changed = true;
+            }
 
-        if state_changed {
-            needs_redraw = true;
-        }
+            let target_fps = if app.should_continuous_redraw() {
+                app.active_render_fps()
+            } else {
+                app.idle_render_fps()
+            };
+            let frame_dt = fps_to_dt(target_fps);
 
-        if app.should_continuous_redraw() && last_draw_at.elapsed() >= frame_dt {
-            needs_redraw = true;
-        }
+            if state_changed {
+                needs_redraw = true;
+            }
 
-        if needs_redraw {
-            last_layout = tui.draw(app)?;
-            last_draw_at = Instant::now();
-            needs_redraw = false;
-        }
+            if app.should_continuous_redraw() && last_draw_at.elapsed() >= frame_dt {
+                needs_redraw = true;
+            }
 
-        // frame pacing
-        // 使用异步 sleep 而非 std::thread::sleep：本应用跑在单线程 compio 运行时上，
-        // 阻塞式 sleep 会让 executor/proactor（含流媒体下载任务）在整个睡眠期间停摆，
-        // 导致全屏页切到未缓存的下一首时下载冻结、播放卡在歌曲开头。
-        // 异步 sleep 会把执行权交还给运行时，后台下载得以持续推进。
-        let elapsed = frame_start.elapsed();
-        if elapsed < frame_dt {
-            compio::time::sleep(frame_dt - elapsed).await;
-        }
+            if needs_redraw {
+                last_layout = tui.draw(app)?;
+                last_draw_at = Instant::now();
+                needs_redraw = false;
+            }
 
-        if tui.should_quit {
-            break;
-        }
+            // frame pacing
+            // 使用异步 sleep 而非 std::thread::sleep：本应用跑在单线程 compio 运行时上，
+            // 阻塞式 sleep 会让 executor/proactor（含流媒体下载任务）在整个睡眠期间停摆，
+            // 导致全屏页切到未缓存的下一首时下载冻结、播放卡在歌曲开头。
+            // 异步 sleep 会把执行权交还给运行时，后台下载得以持续推进。
+            let elapsed = frame_start.elapsed();
+            if elapsed < frame_dt {
+                compio::time::sleep(frame_dt - elapsed).await;
+            }
+
+            if tui.should_quit {
+                break;
+            }
         }
         Ok(())
     }
@@ -521,7 +521,6 @@ pub async fn run(
     exit_result?;
     raw_result?;
     cava_result?;
-
 
     let exit = match app.exit_request {
         Some(exit) => exit,

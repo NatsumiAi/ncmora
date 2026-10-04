@@ -2188,7 +2188,8 @@ mod tests {
             let first_cell = &first[(content.x, content.y)];
             let second_cell = &second[(content.x, content.y)];
             if (first_cell.fg == red || first_cell.bg == red)
-                && (second_cell.fg == blue || second_cell.bg == blue) {
+                && (second_cell.fg == blue || second_cell.bg == blue)
+            {
                 break;
             }
             assert!(
@@ -2214,7 +2215,9 @@ mod tests {
                     for y in content.top()..content.bottom() {
                         for x in content.left()..content.right() {
                             let dest_x = i32::from(x) + i32::from(dx);
-                            if dest_x >= i32::from(cover.left()) && dest_x < i32::from(cover.right()) {
+                            if dest_x >= i32::from(cover.left())
+                                && dest_x < i32::from(cover.right())
+                            {
                                 expected[(dest_x as u16, y)] = source[(x, y)].clone();
                             }
                         }
@@ -2222,7 +2225,10 @@ mod tests {
                 }
                 let mut actual = original;
                 paint_halfblock_cover(&mut actual, &mut halfblocks, cover, &app);
-                assert_eq!(actual, expected, "slide must preserve every chafa glyph/color and clip to the cover");
+                assert_eq!(
+                    actual, expected,
+                    "slide must preserve every chafa glyph/color and clip to the cover"
+                );
             }
         }
     }
