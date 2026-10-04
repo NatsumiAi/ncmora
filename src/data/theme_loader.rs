@@ -65,10 +65,6 @@ impl ThemeLoader {
             .map_err(|_| anyhow::anyhow!("theme loader task panicked"))?
     }
 
-    /// 选择的主题格式有问题时回退默认主题。
-    pub fn load_or_default(name: &str) -> Theme {
-        Self::load(name).unwrap_or_default()
-    }
 
     /// 扫描 `themes/*.toml`，返回通过格式校验的 key 列表（优先取文件内
     /// `name` 字段，缺省用文件名主干），按 key 排序去重；坏文件直接跳过，

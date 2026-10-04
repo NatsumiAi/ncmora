@@ -5,7 +5,7 @@ pub(crate) struct PlaybackController {
     pub audio_player: AudioPlayer,
     pub now_playing: Option<PlaybackTrack>,
     pub now_playing_liked: bool,
-    pub like_machine: LikeMachine,
+    pub(super) like_machine: LikeMachine,
     pub playback_queue: Vec<PlaybackTrack>,
     pub playback_queue_cover_url: Option<String>,
     pub playback_queue_source_id: Option<String>,

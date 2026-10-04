@@ -2373,18 +2373,6 @@ impl PlaybackRepeatMode {
         }
     }
 
-    /// 播放模式符号（Nerd Font PUA）。
-    ///
-    /// 用码位转义书写：直接粘贴字形会被复制/编辑流程吞掉，源码看不出异常，
-    /// 运行时却变成空串——播放栏会因此错位，并留下"点不动"的按钮。
-    pub fn symbol(self) -> &'static str {
-        match self {
-            Self::Sequence => "\u{f08f}",
-            Self::Shuffle => "\u{f074}",
-            Self::LoopAll => "\u{f0b6}",
-            Self::LoopOne => "\u{f01e}",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2742,12 +2730,6 @@ pub struct App {
     pub overlay: Option<Overlay>,
     pub login: LoginState,
     pub browse: BrowseController,
-    /// 侧边栏歌单的在途拉取（异步填充，不阻塞展开动画）。
-    home_sidebar_fetch: Option<HomeSidebarFetchFuture>,
-    /// 作者页的在途拉取（全屏页点作者名：页面先落地，数据由 `tick_author_fetch` 搬进来）。
-    author_fetch: Option<AuthorFetchFuture>,
-    /// 歌单页 / 专辑页的在途拉取（搜索页打开：页面先落地，数据由 `tick_playlist_fetch` 搬进来）。
-    playlist_fetch: Option<PlaylistFetchSlot>,
     /// 上次检查 stderr 日志体积的时刻。
     stderr_trim_checked_at: Option<Instant>,
     stderr_trim_inflight: Option<Receiver<()>>,
@@ -2892,9 +2874,6 @@ impl App {
             overlay: None,
             login: LoginState::default(),
             browse: BrowseController::default(),
-            home_sidebar_fetch: None,
-            author_fetch: None,
-            playlist_fetch: None,
             stderr_trim_checked_at: None,
             stderr_trim_inflight: None,
             home_sidebar_anim_span_cells: 24,
@@ -3311,7 +3290,7 @@ impl App {
     }
 
     async fn advance_search_focus(&mut self) {
-        if self.search.results().is_empty() {
+        if self.search.is_empty() {
             return;
         }
 
@@ -3502,11 +3481,11 @@ impl App {
             return true;
         }
         // 作者页数据在途：结果一到就上屏，别让 1s 空闲节流把它压住。
-        if self.author_fetch.is_some() {
+        if self.browse.author_fetch.is_some() {
             return true;
         }
         // 歌单页 / 专辑页同理。
-        if self.playlist_fetch.is_some() {
+        if self.browse.playlist_fetch.is_some() {
             return true;
         }
         // 下载中：图标要一直转（time-based 帧），别被 1s 空闲节流压成 1fps。
@@ -4199,12 +4178,12 @@ impl App {
         }
 
         // 异步填充：立刻返回，动画照常跑，数据由 tick 搬入。
-        if self.home_sidebar_fetch.is_none() {
+        if self.browse.home_sidebar_fetch.is_none() {
             self.browse.home_sidebar.loading = true;
             let fut = fetch_home_sidebar_playlists(self.api.clone(), self.config.language);
             let fut: Pin<Box<dyn Future<Output = Option<Result<HomeSidebarFetch, String>>>>> =
                 Box::pin(async move { Some(fut.await) });
-            self.home_sidebar_fetch = Some(shot_and_share(fut));
+            self.browse.home_sidebar_fetch = Some(shot_and_share(fut));
         }
     }
 
@@ -4236,10 +4215,10 @@ impl App {
 
     /// 搬运侧边栏歌单的异步结果（每帧调用，结果就绪才动状态）。
     fn tick_home_sidebar_fetch(&mut self) {
-        let Some(result) = peek_shared_future(&self.home_sidebar_fetch).cloned() else {
+        let Some(result) = peek_shared_future(&self.browse.home_sidebar_fetch).cloned() else {
             return;
         };
-        self.home_sidebar_fetch = None;
+        self.browse.home_sidebar_fetch = None;
         self.browse.home_sidebar.loading = false;
 
         match result {
@@ -4279,10 +4258,10 @@ impl App {
 
     /// 搬运作者页的在途拉取（每帧调用，结果就绪才动状态）。
     fn tick_author_fetch(&mut self) {
-        let Some(result) = peek_shared_future(&self.author_fetch).cloned() else {
+        let Some(result) = peek_shared_future(&self.browse.author_fetch).cloned() else {
             return;
         };
-        self.author_fetch = None;
+        self.browse.author_fetch = None;
 
         match result {
             Ok(fetch) => {
@@ -4310,14 +4289,14 @@ impl App {
 
     /// 搬运歌单页 / 专辑页的在途拉取（每帧调用，结果就绪才动状态）。
     fn tick_playlist_fetch(&mut self) {
-        let Some(slot) = self.playlist_fetch.as_ref() else {
+        let Some(slot) = self.browse.playlist_fetch.as_ref() else {
             return;
         };
         let Some(result) = peek_shared(&slot.future).cloned() else {
             return;
         };
         let kind = slot.kind;
-        self.playlist_fetch = None;
+        self.browse.playlist_fetch = None;
         self.downloads.page_kind = kind;
 
         match result {
@@ -4984,7 +4963,7 @@ impl App {
     /// 每帧搬运下载结果：完成 / 失败 / 取消都写状态行。
     fn tick_download(&mut self) {
         self.refresh_current_download_state();
-        for event in self.downloads.manager.poll() {
+        for event in self.downloads.poll() {
             match event {
                 DownloadEvent::Started { title, level } => {
                     self.set_runtime_status(format!(
@@ -5579,10 +5558,12 @@ impl App {
             return;
         }
 
-        self.playback.playback_queue = queue;
-        // 在换队列的此刻记下来源封面，之后浏览别的页面不会影响它。
-        self.playback.playback_queue_cover_url = source_cover_url;
-        self.playback.playback_queue_source_id = self.browse.playlist.id.clone();
+        self.playback.replace_queue(
+            queue,
+            None,
+            source_cover_url,
+            self.browse.playlist.id.clone(),
+        );
         let target = index.min(self.playback.playback_queue.len() - 1);
         self.play_queue_index(target, true).await;
     }
@@ -5702,7 +5683,7 @@ impl App {
         self.playlist_return_page = Page::Author;
         self.playlist_section_return_snapshot = None;
         // 这一页换成作者页分区：在途的占位拉取作废（同 `apply_playlist_fetch`）。
-        self.playlist_fetch = None;
+        self.browse.playlist_fetch = None;
         self.browse.playlist.id = self.browse.author
             .id
             .as_ref()
@@ -5812,7 +5793,7 @@ impl App {
             fallback_cover_url,
         );
         let fut: AuthorFetchTask = Box::pin(async move { Some(fut.await) });
-        self.author_fetch = Some(shot_and_share(fut));
+        self.browse.author_fetch = Some(shot_and_share(fut));
     }
 
     /// 搜索页打开专辑：立即落占位歌单页 + 派发后台拉取（结果由 `tick_playlist_fetch` 搬进来）。
@@ -5858,7 +5839,7 @@ impl App {
         );
         let fut: PlaylistFetchTask = Box::pin(async move { Some(fut.await) });
         self.downloads.page_kind = PlaylistPageKind::Album;
-        self.playlist_fetch = Some(PlaylistFetchSlot {
+        self.browse.playlist_fetch = Some(PlaylistFetchSlot {
             kind: PlaylistPageKind::Album,
             future: shot_and_share(fut),
         });
@@ -5903,7 +5884,7 @@ impl App {
         );
         let fut: PlaylistFetchTask = Box::pin(async move { Some(fut.await) });
         self.downloads.page_kind = PlaylistPageKind::Playlist;
-        self.playlist_fetch = Some(PlaylistFetchSlot {
+        self.browse.playlist_fetch = Some(PlaylistFetchSlot {
             kind: PlaylistPageKind::Playlist,
             future: shot_and_share(fut),
         });
@@ -5956,26 +5937,10 @@ impl App {
         match key.code {
             KeyCode::Esc => self.close_overlay(),
             KeyCode::Enter => self.execute_search_from_box().await,
-            KeyCode::Backspace => {
-                if self.input.search_box_cursor > 0 {
-                    self.input.search_box_cursor =
-                        remove_char_before(&mut self.input.search_box_input, self.input.search_box_cursor);
-                }
-            }
-            KeyCode::Delete => {
-                remove_char_at(&mut self.input.search_box_input, self.input.search_box_cursor);
-            }
-            KeyCode::Left => {
-                if self.input.search_box_cursor > 0 {
-                    self.input.search_box_cursor -= 1;
-                }
-            }
-            KeyCode::Right => {
-                let len = char_count(&self.input.search_box_input);
-                if self.input.search_box_cursor < len {
-                    self.input.search_box_cursor += 1;
-                }
-            }
+            KeyCode::Backspace => self.input.backspace(),
+            KeyCode::Delete => self.input.delete(),
+            KeyCode::Left => self.input.move_cursor(-1),
+            KeyCode::Right => self.input.move_cursor(1),
             KeyCode::Home => {
                 self.input.search_box_cursor = 0;
             }
@@ -5984,10 +5949,7 @@ impl App {
             }
             KeyCode::Char(ch) => {
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
-                    if char_count(&self.input.search_box_input) < MAX_INPUT_LEN {
-                        insert_char_at(&mut self.input.search_box_input, self.input.search_box_cursor, ch);
-                        self.input.search_box_cursor += 1;
-                    }
+                    self.input.insert(ch);
                 }
             }
             _ => {}
@@ -6063,7 +6025,7 @@ impl App {
 
         match overlay {
             Overlay::Settings => {
-                self.settings.selected = index;
+                self.settings.select(index, SETTINGS_ROOT_ITEMS);
                 if self.is_double_settings_click(overlay, index) {
                     self.activate_settings_root_item().await;
                 }
@@ -6336,11 +6298,7 @@ impl App {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| self.download_display_path());
-        self.settings.download_path_edit = Some(DownloadPathEdit {
-            cursor: current.chars().count(),
-            buffer: current,
-            window_col: 0,
-        });
+        self.settings.begin_download_path_edit(current);
     }
 
     fn download_path_edit_insert(&mut self, ch: char) {
@@ -6942,7 +6900,7 @@ impl App {
 
     async fn handle_playlist_key(&mut self, key: KeyEvent) {
         // 数据还在路上：占位页上的焦点/条目都没有意义，只留返回键。
-        if self.playlist_fetch.is_some() {
+        if self.browse.playlist_fetch.is_some() {
             if matches!(key.code, KeyCode::Esc | KeyCode::Left) {
                 self.page = self.playlist_return_page;
             }
@@ -6974,7 +6932,7 @@ impl App {
 
     async fn handle_author_key(&mut self, key: KeyEvent) {
         // 数据还在路上：占位页上的焦点/条目都没有意义，只留返回键。
-        if self.author_fetch.is_some() {
+        if self.browse.author_fetch.is_some() {
             if key.code == KeyCode::Esc {
                 self.page = self.author_return_page;
             }
@@ -7106,62 +7064,23 @@ impl App {
     fn begin_startup_loading(&mut self, target: Page) {
         self.page = Page::Loading;
         self.overlay = None;
-        self.startup.progress = 0.0;
-        self.startup.started_at = Some(Instant::now());
-        self.startup.complete_started_at = None;
-        self.startup.complete_requested = false;
-        self.startup.target = target;
+        self.startup.begin(target);
     }
 
     fn finish_startup_loading(&mut self) {
-        self.startup.complete_requested = true;
-        if self.startup.complete_started_at.is_none() {
-            self.startup.complete_started_at = Some(Instant::now());
-        }
+        self.startup.finish();
     }
 
     fn tick_startup_loading(&mut self) {
-        if self.page != Page::Loading {
-            return;
-        }
-
-        let Some(started_at) = self.startup.started_at else {
-            self.startup.started_at = Some(Instant::now());
-            return;
-        };
-
-        let elapsed = started_at.elapsed().as_secs_f32();
-        self.startup.progress = self.startup_loading_progress();
-
-        // 让位条件：数据齐了、进度条收尾 ramp 跑满、且满足最短可见时长。
-        // 少了 ramp 这一条，进度条会停在一半就消失。
-        let ramp_done = self.startup.complete_started_at
-            .map(|completed_at| {
-                completed_at.elapsed().as_secs_f32() >= STARTUP_LOADING_COMPLETE_RAMP_SECS
-            })
-            .unwrap_or(false);
-        if self.startup.complete_requested
-            && ramp_done
-            && elapsed >= STARTUP_LOADING_MIN_VISIBLE_SECS
-        {
-            self.page = self.startup.target;
-            self.startup.progress = 0.0;
-            self.startup.started_at = None;
-            self.startup.complete_started_at = None;
-            self.startup.complete_requested = false;
+        if self.page == Page::Loading {
+            if let Some(target) = self.startup.tick() {
+                self.page = target;
+            }
         }
     }
 
-    /// 加载页进度：后台初始化完成的步数 + 当前步的时间缓动。
     fn startup_loading_progress(&self) -> f32 {
-        startup_loading_progress(
-            self.startup.init.step_done(),
-            self.startup.init.step_total(),
-            self.startup.init.step_elapsed(),
-            self.startup.complete_started_at
-                .map(|completed_at| completed_at.elapsed().as_secs_f32()),
-            self.startup.complete_requested,
-        )
+        self.startup.current_progress()
     }
 
     pub fn startup_loading_progress_for_width(&self, _bar_width: u16) -> f32 {
@@ -7330,8 +7249,7 @@ impl App {
         if self.page != Page::Search {
             self.search_return_page = Page::Home;
         }
-        self.input.search_box_input = self.search.query.clone();
-        self.input.search_box_cursor = char_count(&self.input.search_box_input);
+        self.input.set_text(self.search.query.clone());
         self.input.search_box_anim_height = 0;
         self.input.search_box_anim_started_at = Some(Instant::now());
         self.overlay = Some(Overlay::SearchBox);
@@ -7342,8 +7260,7 @@ impl App {
         self.input.search_box_anim_height = 0;
         self.input.search_box_anim_started_at = None;
         self.settings.last_click = None;
-        self.settings.download_path_edit = None;
-        self.settings.download_reset_armed = false;
+        self.settings.cancel_download_path_edit();
         self.clear_settings_item_hits();
     }
 
@@ -7428,7 +7345,7 @@ impl App {
             artist_line,
         );
         let fut: AuthorFetchTask = Box::pin(async move { Some(fut.await) });
-        self.author_fetch = Some(shot_and_share(fut));
+        self.browse.author_fetch = Some(shot_and_share(fut));
     }
 
     /// 全屏页点了专辑名：立即落占位专辑页 + 派发后台拉取，结果由 `App::tick_playlist_fetch`
@@ -7469,7 +7386,7 @@ impl App {
         let fut = fetch_album_page_from_song(self.api.clone(), self.config.language, song_id);
         let fut: PlaylistFetchTask = Box::pin(async move { Some(fut.await) });
         self.downloads.page_kind = PlaylistPageKind::Album;
-        self.playlist_fetch = Some(PlaylistFetchSlot {
+        self.browse.playlist_fetch = Some(PlaylistFetchSlot {
             kind: PlaylistPageKind::Album,
             future: shot_and_share(fut),
         });
@@ -7816,10 +7733,7 @@ impl App {
             self.playback.playback_repeat_mode = mode;
         }
 
-        self.playback.playback_queue = queue;
-        self.playback.playback_queue_cover_url = None;
-        // 还原队列来源，使漫游的尾部追加/续播/封面跟随在重启后依然生效。
-        self.playback.playback_queue_source_id = record.source_playlist_id.clone();
+        self.playback.replace_queue(queue, None, None, record.source_playlist_id.clone());
         let target = record
             .current_index
             .unwrap_or(0)
@@ -7901,8 +7815,8 @@ impl App {
         self.search = SearchController::default();
         // 登出同样要作废在途拉取：它们带着上一账号的 cookie 落地，会把已清空的
         // 状态写回旧账号的数据（同 `apply_playlist_fetch` 的规则）。
-        self.playlist_fetch = None;
-        self.author_fetch = None;
+        self.browse.playlist_fetch = None;
+        self.browse.author_fetch = None;
         self.playlist_section_return_snapshot = None;
         self.startup.progress = 0.0;
         self.startup.started_at = None;
@@ -8185,17 +8099,9 @@ impl App {
     /// 落状态即宣告"这一页换成了新来源"：在途的那次拉取随之作废，否则它迟到时
     /// 会把刚打开的页面覆盖成被放弃的那一份（`tick_playlist_fetch` 只看句柄）。
     fn apply_playlist_fetch(&mut self, fetch: PlaylistFetch) {
-        self.playlist_fetch = None;
-        self.browse.playlist.id = Some(fetch.id);
-        self.browse.playlist.title = fetch.title;
-        self.browse.playlist.artist = fetch.artist;
-        self.browse.playlist.description = fetch.description;
-        self.browse.playlist.set_tracks(fetch.tracks);
-        if let Some(url) = fetch.cover_url {
-            self.browse.playlist.cover.load(self.api.clone(), url);
-        }
+        let liked = self.browse.apply_playlist(fetch, &self.api);
 
-        if let Some(liked) = fetch.liked {
+        if let Some(liked) = liked {
             if let Some(profile) = liked.profile {
                 self.apply_account_profile(profile);
             }
@@ -8228,7 +8134,7 @@ impl App {
         let cover_url = tracks.iter().find_map(|track| track.cover_url.clone());
 
         // 这一页换成每日推荐：在途的占位拉取作废（同 `apply_playlist_fetch`）。
-        self.playlist_fetch = None;
+        self.browse.playlist_fetch = None;
         self.browse.playlist.id = Some(HOME_DAILY_RECOMMEND_TILE_ID.to_string());
         self.browse.playlist.title = self
             .lang_text("每日推荐", "Daily Recommendations")
@@ -8271,7 +8177,7 @@ impl App {
         let focus_index = self.browse.private_roam.last_played_index;
 
         // 这一页换成私人漫游：在途的占位拉取作废（同 `apply_playlist_fetch`）。
-        self.playlist_fetch = None;
+        self.browse.playlist_fetch = None;
         self.browse.playlist.id = Some(HOME_PRIVATE_ROAM_TILE_ID.to_string());
         self.browse.playlist.title = self.lang_text("私人漫游", "Private Roam").to_string();
         self.browse.playlist.artist = self
@@ -8490,20 +8396,7 @@ impl App {
     ///
     /// 同 `apply_playlist_fetch`：新数据落地即在途拉取作废，免得迟到的旧结果覆盖它。
     fn apply_author_fetch(&mut self, fetch: AuthorFetch) {
-        self.author_fetch = None;
-        self.browse.author.id = Some(fetch.id);
-        self.browse.author.title = fetch.title;
-        self.browse.author.artist = fetch.artist;
-        self.browse.author.description = fetch.description;
-        if let Some(url) = fetch.cover_url {
-            self.browse.author.cover.load(self.api.clone(), url);
-        }
-        self.browse.author.set_tiles(fetch.tiles);
-        self.browse.author.hot_songs = fetch.hot_songs;
-        self.browse.author.albums = fetch.albums;
-        self.browse.author.eps = fetch.eps;
-        self.browse.author.singles = fetch.singles;
-        self.browse.author.focused_idx = 0;
+        self.browse.apply_author(fetch, &self.api);
     }
 
     /// 解析 `artist/*` 的回包（网络部分见 `fetch_artist_responses`）。

@@ -12,8 +12,8 @@ pub(crate) struct DownloadController {
     pub spinner_start: Instant,
     pub now_playing_state: DownloadState,
     pub root: Option<PathBuf>,
-    pub page_kind: PlaylistPageKind,
-    pub pending_intent: Option<super::DownloadCandidate>,
+    pub(super) page_kind: PlaylistPageKind,
+    pub(super) pending_intent: Option<super::DownloadCandidate>,
 }
 impl DownloadController {
     pub fn poll(&mut self) -> Vec<DownloadEvent> {

@@ -68,7 +68,7 @@ fn rsa_encrypt_no_padding(plaintext: &[u8; 16]) -> String {
 
     // Textbook RSA: c = m^e mod n
     let m = BoxedUint::from_be_slice(plaintext, public_key.n_bits_precision()).unwrap();
-    let c = m.pow_mod(&public_key.e(), &n);
+    let c = m.pow_mod(public_key.e(), &n);
 
     // 输出固定长度 hex（与模数等长，256 hex chars for 1024-bit key）
     let n_bytes = n.bits() / 8;
