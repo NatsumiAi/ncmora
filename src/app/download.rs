@@ -1140,7 +1140,8 @@ mod tests {
             }
         }).await.unwrap();
         assert_eq!(manager.state_of_row(&row), DownloadState::NotDownloaded);
-        compio::fs::remove_dir_all(directory).await.unwrap();
+        compio::runtime::spawn_blocking(move || std::fs::remove_dir_all(directory))
+            .await.unwrap().unwrap();
     }
 
     #[test]

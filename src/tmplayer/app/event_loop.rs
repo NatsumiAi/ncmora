@@ -1,6 +1,6 @@
-use crate::tmplayer::app::state::{AppState, CoverSnapshot, Overlay, PlaybackState, RepeatMode};
+use crate::tmplayer::app::state::{AppState, Overlay, PlaybackState, RepeatMode};
 use crate::tmplayer::audio::cava::{CavaChannels, CavaConfig, CavaService};
-use crate::data::config::{AudioQuality, BarChannels, BarNumber, Config, VisualizeMode};
+use crate::data::config::{BarChannels, BarNumber, Config, VisualizeMode};
 use crate::data::theme_loader::ThemeLoader;
 use crate::tmplayer::ui::tui::{Tui, UiLayout};
 use crate::tmplayer::utils::input::{Action, map_key, map_mouse};
@@ -309,16 +309,16 @@ pub async fn run(
     host_bridge: &mut impl HostPlaybackBridge,
 ) -> Result<crate::tmplayer::FullscreenExit> {
     enable_raw_mode()?;
-    let mut tui = Tui::new(app)?;
+    let mut tui = Tui::new()?;
     tui.enter()?;
 
     // Prefer cava for system-wide visualization (keeps our renderer/style; cava only provides bars).
     // If cava isn't installed, we leave the spectrum empty.
     let cava = CavaService::new();
-    let mut cava_cfg: Option<CavaConfig> = None;
 
     let mut last_spectrum = Instant::now();
     let mut last_host_metadata_signature: Option<u64> = None;
+    let mut last_host_config_signature: Option<u64> = None;
     let mut needs_redraw = true;
     let mut last_draw_at = Instant::now()
         .checked_sub(Duration::from_millis(250))
@@ -331,7 +331,7 @@ pub async fn run(
 
     let desired = desired_cava_config(app, &last_layout);
     cava.set_desired(desired);
-    cava_cfg = desired;
+    let mut cava_cfg = desired;
 
     let _ = sync_from_host_bridge(
         app,
@@ -466,6 +466,7 @@ pub async fn run(
         None => crate::tmplayer::FullscreenExit::BackToHost,
     };
     Ok(exit)
+}
 
 
 async fn handle_action(
@@ -1011,14 +1012,14 @@ async fn apply_settings_delta(
     match app.settings_selected {
         // Theme
         0 => {
-            let themes = ThemeLoader::list_themes();
+            let themes = ThemeLoader::list_themes_async().await;
             let cur = themes
                 .iter()
                 .position(|key| key.eq_ignore_ascii_case(app.config.theme.as_str()))
                 .unwrap_or(0) as i32;
             let next = (cur + delta).rem_euclid(themes.len() as i32) as usize;
             let key = &themes[next];
-            if let Ok(theme) = ThemeLoader::load(key) {
+            if let Ok(theme) = ThemeLoader::load_async(key).await {
                 app.theme = theme;
                 app.config.theme = key.clone();
                 save_and_sync_host_config(app, host_bridge).await;
@@ -1335,7 +1336,10 @@ fn desired_cava_config(app: &AppState, layout: &UiLayout) -> Option<CavaConfig> 
     Some(CavaConfig {
         framerate_hz: app.config.spectrum_hz,
         bars: desired_bar_count(app, layout),
-        channels: app.config.bar_channels,
+        channels: match app.config.bar_channels {
+            BarChannels::Mono => CavaChannels::Mono,
+            BarChannels::Stereo => CavaChannels::Stereo,
+        },
         reverse: false,
     })
 }
@@ -1362,6 +1366,10 @@ fn max_display_bars(width_cells: u16, gap: bool) -> usize {
     }
 }
 
+
+fn fps_to_dt(fps: u32) -> Duration {
+    Duration::from_secs_f64(1.0 / f64::from(fps.clamp(1, 120)))
+}
 
 // fallback bars removed (leave spectrum empty when unavailable)
 

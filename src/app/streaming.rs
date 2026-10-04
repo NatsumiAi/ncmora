@@ -289,7 +289,8 @@ mod tests {
                 assert!(result.is_err());
                 assert!(compio::fs::metadata(&final_path).await.is_err());
             }
-            compio::fs::remove_dir_all(directory).await.unwrap();
+            compio::runtime::spawn_blocking(move || std::fs::remove_dir_all(directory))
+                .await.unwrap().unwrap();
         }
     }
 

@@ -316,7 +316,7 @@ fn render_artist_card(
         };
         let draw_ascii = app.draw_ascii();
         let text_style = Style::default().fg(app.theme.color_text());
-        app.search.results()[item_idx].cover.render_rows(
+        app.search.cover_mut(item_idx).render_rows(
             frame,
             &mut app.graphics_picker,
             avatar_area,
@@ -439,6 +439,7 @@ fn render_search_row(
                 UiIcons::for_mode(app.config.icon_mode),
             )
             .to_string(),
+            download_style,
         ));
         spans.push(Span::styled(" ", row_style));
         app.push_search_item_download_hit(

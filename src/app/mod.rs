@@ -1,4 +1,5 @@
 mod api;
+pub(crate) mod controllers;
 pub(crate) mod download;
 mod mpris_bridge;
 pub(crate) mod player;
@@ -11,8 +12,7 @@ pub(crate) mod browse_controller;
 pub(crate) mod input_controller;
 pub(crate) mod download_controller;
 pub(crate) mod startup_controller;
-use crate::app::api::error_for_status;
-use crate::app::player::is_nonempty_file;
+use crate::app::player::{AudioPlayer, AudioPlayerState, cleanup_cache_dir, is_nonempty_file, resolve_cache_root};
 use crate::data::config::{AudioQuality, BarChannels, BarNumber, Language, VisualizeMode};
 use crate::data::config::{Config, GraphicsProtocol};
 use crate::data::playback_session;
@@ -3004,6 +3004,9 @@ impl App {
         self.persistence.flush().map_err(anyhow::Error::msg)
     }
     pub async fn tick(&mut self) {
+        if let Some(error) = self.persistence.pending_error() {
+            self.set_runtime_status(format!("{}: {error}", self.lang_text("保存失败", "Save failed")));
+        }
         self.tick_audio().await;
         self.tick_cover_fetch();
         self.tick_lyric_fetch();
@@ -6716,14 +6719,14 @@ impl App {
     async fn apply_settings_root_delta(&mut self, delta: i32) {
         match self.settings.selected {
             0 => {
-                let themes = ThemeLoader::list_themes();
+                let themes = ThemeLoader::list_themes_async().await;
                 let current = themes
                     .iter()
                     .position(|name| name.eq_ignore_ascii_case(self.config.theme.as_str()))
                     .unwrap_or(0);
                 let next = (current as i32 + delta).rem_euclid(themes.len() as i32) as usize;
                 let next_name = &themes[next];
-                if let Ok(theme) = ThemeLoader::load(next_name) {
+                if let Ok(theme) = ThemeLoader::load_async(next_name).await {
                     self.theme = theme;
                     self.config.theme = next_name.clone();
                     self.persist_config();

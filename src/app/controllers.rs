@@ -213,6 +213,10 @@ impl SearchController {
         &self.results
     }
 
+    pub fn cover_mut(&mut self, index: usize) -> &mut super::CoverFetchState {
+        &mut self.results[index].cover
+    }
+
     pub fn len(&self) -> usize {
         self.results.len()
     }

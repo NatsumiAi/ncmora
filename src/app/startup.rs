@@ -207,7 +207,6 @@ async fn run_startup_init(
                 });
             }
             Some(Ok(false)) => {
-                let _ = session::clear_cookie();
                 let _ = tx.send(StartupEvent::SessionRejected);
             }
             Some(Err(err)) => {
@@ -318,7 +317,7 @@ impl App {
                 self.startup.target = Page::Home;
             }
             StartupEvent::SessionRejected => {
-                // 存档的清除在后台上报「失效」时就已完成。
+                let _ = self.persistence.enqueue(session::clear_cookie);
                 self.startup.target = Page::Login;
                 self.startup.init.collapse_to_done();
             }
@@ -342,7 +341,7 @@ impl App {
                 if self.session_cookie.is_some() {
                     // 播放记忆恢复要写 App 状态，留在主循环做，算作最后一步。
                     self.try_restore_playback_memory().await;
-                    self.startup.complete_step();
+                    self.startup.init.complete_step();
                 }
                 self.finish_startup_loading();
             }

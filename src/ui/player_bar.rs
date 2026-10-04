@@ -512,6 +512,7 @@ fn split_left_tail<'a>(line: &'a str, heart: &'a str, glyph: Option<char>) -> Le
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::download::{DownloadState, state_glyph};
 
     fn row(x: u16, width: u16) -> Rect {
         Rect {

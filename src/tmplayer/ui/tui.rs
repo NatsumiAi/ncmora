@@ -45,7 +45,7 @@ pub struct Tui {
 }
 
 impl Tui {
-    pub fn new(app: &AppState) -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let stdout = io::stdout();
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;

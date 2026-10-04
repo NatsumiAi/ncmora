@@ -17,6 +17,7 @@ enum Command {
 #[derive(Clone)]
 pub struct PersistenceHandle {
     tx: SyncSender<Command>,
+    errors: Arc<Mutex<Option<String>>>,
 }
 
 impl PersistenceHandle {
@@ -24,9 +25,7 @@ impl PersistenceHandle {
     where
         F: FnOnce() -> Result<()> + Send + 'static,
     {
-        self.tx
-            .try_send(Command::Job(Box::new(job)))
-            .map_err(|error| anyhow!("persistence queue unavailable: {error}"))
+        submit(&self.tx, &self.errors, Box::new(job))
     }
 }
 
@@ -55,7 +54,7 @@ impl PersistenceWorker {
     }
 
     pub fn handle(&self) -> PersistenceHandle {
-        PersistenceHandle { tx: self.tx.clone() }
+        PersistenceHandle { tx: self.tx.clone(), errors: self.errors.clone() }
     }
 
     /// Observe the first background failure without consuming a flush barrier.
@@ -67,9 +66,7 @@ impl PersistenceWorker {
     where
         F: FnOnce() -> Result<()> + Send + 'static,
     {
-        self.tx
-            .try_send(Command::Job(Box::new(job)))
-            .map_err(|error| anyhow!("persistence queue unavailable: {error}"))
+        submit(&self.tx, &self.errors, Box::new(job))
     }
 
     pub fn flush(&self) -> Result<()> {
@@ -97,6 +94,17 @@ impl Drop for PersistenceWorker {
             let _ = thread.join();
         }
     }
+}
+
+fn submit(tx: &SyncSender<Command>, errors: &Arc<Mutex<Option<String>>>, job: Job) -> Result<()> {
+    tx.try_send(Command::Job(job)).map_err(|error| {
+        let message = format!("persistence queue unavailable: {error}");
+        let mut pending = errors.lock();
+        if pending.is_none() {
+            *pending = Some(message.clone());
+        }
+        anyhow!(message)
+    })
 }
 
 fn run(rx: Receiver<Command>, errors: Arc<Mutex<Option<String>>>) {
