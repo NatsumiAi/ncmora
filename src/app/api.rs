@@ -24,20 +24,23 @@ impl CoverValidationGate {
     }
 
     fn try_acquire(&self) -> Result<CoverValidationPermit<'_>> {
-        self.in_flight
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                if count < MAX_COVER_VALIDATIONS {
-                    Some(count + 1)
-                } else {
-                    None
-                }
-            })
-            .map_err(|_| {
-                anyhow!(
+        let mut count = self.in_flight.load(Ordering::Acquire);
+        loop {
+            if count >= MAX_COVER_VALIDATIONS {
+                bail!(
                     "cover image validation is busy ({MAX_COVER_VALIDATIONS} jobs already running)"
-                )
-            })?;
-        Ok(CoverValidationPermit { gate: self })
+                );
+            }
+            match self.in_flight.compare_exchange_weak(
+                count,
+                count + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(CoverValidationPermit { gate: self }),
+                Err(actual) => count = actual,
+            }
+        }
     }
 }
 
