@@ -1,20 +1,19 @@
 use crate::app::{SIDEBAR_ANIM_DURATION, cubic_bezier_y};
 use crate::data::config::Language;
-use crate::tmplayer::audio::smoother::Ema;
 use crate::data::config::{Config, VisualizeMode};
+use crate::tmplayer::audio::smoother::Ema;
 use crate::tmplayer::data::playlist::Playlist;
 use crate::tmplayer::render::cover_cache::CoverCache;
 use crate::tmplayer::render::cover_cache::CoverKey;
 use crate::tmplayer::render::cover_renderer::render_cover_ascii;
 use crate::ui::theme::Theme;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackState {
@@ -29,28 +28,6 @@ pub enum RepeatMode {
     Shuffle,
     LoopAll,
     LoopOne,
-}
-
-impl RepeatMode {
-    pub fn next(self) -> Self {
-        match self {
-            RepeatMode::Sequence => RepeatMode::Shuffle,
-            RepeatMode::Shuffle => RepeatMode::LoopAll,
-            RepeatMode::LoopAll => RepeatMode::LoopOne,
-            RepeatMode::LoopOne => RepeatMode::Sequence,
-        }
-    }
-
-    pub fn symbol(self) -> &'static str {
-        match self {
-            // 需求：使用 Nerd Font 图标
-            // 顺序播放 ，随机播放 ，列表循环 ，单曲循环 
-            RepeatMode::Sequence => "",
-            RepeatMode::Shuffle => "",
-            RepeatMode::LoopAll => "",
-            RepeatMode::LoopOne => "",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -128,7 +105,20 @@ pub struct CoverAnim {
     pub started_at: Instant,
     pub duration: Duration,
 }
-
+impl CoverAnim {
+    pub fn slide_offsets(&self, width: u16, now: Instant) -> (i16, i16) {
+        let width = width.min(i16::MAX as u16) as i16;
+        let progress = (now.saturating_duration_since(self.started_at).as_secs_f32()
+            / self.duration.as_secs_f32())
+        .clamp(0.0, 1.0);
+        let offset = (progress * f32::from(width)).round() as i16;
+        if self.dir < 0 {
+            (-offset, width - offset)
+        } else {
+            (offset, -width + offset)
+        }
+    }
+}
 
 impl Default for TrackMetadata {
     fn default() -> Self {
@@ -336,7 +326,6 @@ pub enum Overlay {
     EqModal,
 }
 
-
 #[derive(Debug)]
 pub struct AppState {
     pub config: Config,
@@ -351,9 +340,11 @@ pub struct AppState {
     pub playlist_view: Playlist,
     pub spectrum: SpectrumData,
     pub spectrum_bar_smoother: Ema,
+    pub spectrum_left_smoother: Ema,
+    pub spectrum_right_smoother: Ema,
     pub spectrum_render_grid: Vec<Vec<char>>,
 
-    /// 宿主播放链路上的 PCM 抽头环；无宿主（独立全屏）时为 None。
+    /// 宿主播放链路上的 PCM 抽头环；进入全屏事件循环时绑定。
     pub pcm_ring: Option<Arc<crate::tmplayer::audio::pcm_tap::PcmRing>>,
     /// 示波器的复用缓冲，渲染路径因此零分配。
     pub scope: crate::tmplayer::render::oscilloscope_renderer::ScopeScratch,
@@ -363,7 +354,6 @@ pub struct AppState {
     pub vector: crate::tmplayer::render::vector_renderer::VectorState,
 
     pub cover_cache: RefCell<CoverCache>,
-    pub cover_dominant_rgb_cache: RefCell<HashMap<u64, (u8, u8, u8)>>,
 
     cover_render_tx: Sender<CoverRenderRequest>,
     cover_render_rx: Receiver<CoverRenderResult>,
@@ -393,7 +383,6 @@ pub struct AppState {
 
     pub eq: EqSettings,
     pub eq_selected: usize,
-
 
     // Host-provided playlist cover shown in the playlist overlay.
     pub playlist_cover: Option<Vec<u8>>,
@@ -478,13 +467,14 @@ impl AppState {
             playlist_view: Playlist::default(),
             spectrum: SpectrumData::default(),
             spectrum_bar_smoother: Ema::new(0.35, 64),
+            spectrum_left_smoother: Ema::new(0.35, 64),
+            spectrum_right_smoother: Ema::new(0.35, 64),
             spectrum_render_grid: Vec::new(),
             pcm_ring: None,
             scope: Default::default(),
             scope_gain: ScopeGain::default(),
             vector: Default::default(),
             cover_cache: RefCell::new(CoverCache::new(20)),
-            cover_dominant_rgb_cache: RefCell::new(HashMap::new()),
             cover_render_tx,
             cover_render_rx,
             cover_render_inflight: RefCell::new(HashSet::new()),
@@ -504,10 +494,10 @@ impl AppState {
 
             eq: EqSettings::default(),
             eq_selected: 0,
-    playlist_cover: None,
-    playlist_cover_hash: None,
+            playlist_cover: None,
+            playlist_cover_hash: None,
 
-    cover_anim: None,
+            cover_anim: None,
             pending_system_cover_anim: None,
             toast: None,
             request_host_settings_open: false,
@@ -523,16 +513,6 @@ impl AppState {
             playlist_slide_started_at: None,
             last_frame: Instant::now(),
         }
-    }
-
-
-    pub fn cover_dominant_rgb(&self, hash: u64, bytes: &[u8]) -> Option<(u8, u8, u8)> {
-        if let Some(rgb) = self.cover_dominant_rgb_cache.borrow().get(&hash).copied() {
-            return Some(rgb);
-        }
-        let rgb = crate::tmplayer::render::dominant_color::dominant_rgb_from_image_bytes(bytes)?;
-        self.cover_dominant_rgb_cache.borrow_mut().insert(hash, rgb);
-        Some(rgb)
     }
 
     pub fn set_toast(&mut self, msg: impl Into<String>) {
@@ -563,12 +543,7 @@ impl AppState {
             crate::app::download::resolve_download_root(self.config.download_path.as_deref());
     }
 
-    pub fn queue_cover_ascii_render(
-        &self,
-        key: CoverKey,
-        bytes: &[u8],
-        placeholder: char,
-    ) {
+    pub fn queue_cover_ascii_render(&self, key: CoverKey, bytes: &[u8], placeholder: char) {
         if self.cover_cache.borrow().contains(key) {
             return;
         }
@@ -601,23 +576,22 @@ impl AppState {
             }
         }
 
-        if let Some(anim) = &self.cover_anim {
-            if now.duration_since(anim.started_at) >= anim.duration {
-                self.cover_anim = None;
-            }
+        if let Some(anim) = &self.cover_anim
+            && now.duration_since(anim.started_at) >= anim.duration
+        {
+            self.cover_anim = None;
         }
 
-
-        if let Some((_, _, at)) = &self.pending_system_cover_anim {
-            if now.duration_since(*at) > Duration::from_secs(2) {
-                self.pending_system_cover_anim = None;
-            }
+        if let Some((_, _, at)) = &self.pending_system_cover_anim
+            && now.duration_since(*at) > Duration::from_secs(2)
+        {
+            self.pending_system_cover_anim = None;
         }
 
-        if let Some((_, at)) = &self.toast {
-            if now.duration_since(*at) > Duration::from_millis(1500) {
-                self.toast = None;
-            }
+        if let Some((_, at)) = &self.toast
+            && now.duration_since(*at) > Duration::from_millis(1500)
+        {
+            self.toast = None;
         }
 
         self.tick_playlist_slide(now);
@@ -749,22 +723,18 @@ impl AppState {
 
     /// 示波器的包络动画（起振或回落）正在进行，需要持续重绘把它推完。
     fn scope_is_animating(&self) -> bool {
-        matches!(
-            self.config.visualize,
-            VisualizeMode::Oscilloscope
-        ) && self.scope_gain.is_animating()
+        matches!(self.config.visualize, VisualizeMode::Oscilloscope)
+            && self.scope_gain.is_animating()
     }
 
     /// 矢量模式的快动画（分散 / 回位）进行中，需要持续重绘把它推完。
     fn vector_is_animating(&self) -> bool {
-        self.config.visualize == VisualizeMode::Vector
-            && self.vector.is_animating()
+        self.config.visualize == VisualizeMode::Vector && self.vector.is_animating()
     }
 
     /// 矢量模式停稳后的尘埃按 Astra Sparkle 持续明灭，暂停下也要维持基础帧率重绘。
     fn vector_is_floating(&self) -> bool {
-        self.config.visualize == VisualizeMode::Vector
-            && self.vector.is_floating()
+        self.config.visualize == VisualizeMode::Vector && self.vector.is_floating()
     }
 
     pub fn start_cover_anim(
@@ -816,7 +786,7 @@ mod tests {
                 fall = 0.0;
             }
             prev = out;
-            out = mem * k + out;
+            out += mem * k;
             mem = out;
             out_series.push(out * (1.0 - k) / raw);
         }

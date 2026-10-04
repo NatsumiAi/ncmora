@@ -212,18 +212,18 @@ pub struct Storage {
 fn try_get_storage() -> Option<Storage> {
     let app = "cnmplayer";
     let base = BaseDirs::new()?;
-    let cache = base.cache_dir().join(&app);
-    let config = base.config_dir().join(&app);
+    let cache = base.cache_dir().join(app);
+    let config = base.config_dir().join(app);
     let storage = Storage { cache, config };
     Some(storage)
 }
 
 fn stroage_or_abort() -> Storage {
     let msg = "Failed to initialize workdir, abort!";
-    try_get_storage().expect(&msg)
+    try_get_storage().expect(msg)
 }
 
-pub static STORAGE: LazyLock<Storage> = LazyLock::new(|| stroage_or_abort());
+pub static STORAGE: LazyLock<Storage> = LazyLock::new(stroage_or_abort);
 
 /// 原生音频库（ALSA/PipeWire 等）绕过 log crate 直接写 stderr，而 TUI 画面走 stdout，
 /// 两者指向同一个 tty 时告警就会糊在画面上。这里把 fd 2 整体引向文件。
@@ -300,7 +300,9 @@ async fn main() -> Result<()> {
     let config = compio::runtime::spawn_blocking(Config::load_or_default)
         .await
         .map_err(|_| anyhow::anyhow!("configuration load task panicked"))??;
-    let theme = ThemeLoader::load_async(&config.theme).await.unwrap_or_default();
+    let theme = ThemeLoader::load_async(&config.theme)
+        .await
+        .unwrap_or_default();
     let mut app = App::new(config, theme)?;
 
     let mut terminal = init_terminal()?;
@@ -440,11 +442,11 @@ async fn launch_tmplayer_fullscreen(
 
     let config = app.config.clone();
     let mut bridge = AppFullscreenBridge { app };
-    let (exit, status_text) =
-        match tmplayer::run_fullscreen(&config, bootstrap, &mut bridge).await {
-            Ok(exit) => (Some(exit), String::new()),
-            Err(err) => (None, format!("TMPlayer 运行失败: {}", err)),
-        };
+    let (exit, status_text) = match tmplayer::run_fullscreen(&config, bootstrap, &mut bridge).await
+    {
+        Ok(exit) => (Some(exit), String::new()),
+        Err(err) => (None, format!("TMPlayer 运行失败: {}", err)),
+    };
 
     *terminal = init_terminal()?;
     app.resume_main_cava_after_fullscreen();

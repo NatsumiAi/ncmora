@@ -432,7 +432,8 @@ fn draw_home_sidebar_section(
         section,
     );
 
-    let section_focused = app.browse.home_sidebar.expanded && app.browse.home_sidebar.focused_section == section;
+    let section_focused =
+        app.browse.home_sidebar.expanded && app.browse.home_sidebar.focused_section == section;
     let section_title_style = if section_focused {
         Style::default()
             .fg(app.theme.color_accent2())
@@ -498,14 +499,18 @@ fn draw_home_sidebar_section(
         }
         let total = items.len();
         let focus_idx = if section_focused {
-            app.browse.home_sidebar.focused_index.min(total.saturating_sub(1))
+            app.browse
+                .home_sidebar
+                .focused_index
+                .min(total.saturating_sub(1))
         } else {
             0
         };
         let mut start = if total <= max_rows {
             0
         } else {
-            app.browse.home_sidebar
+            app.browse
+                .home_sidebar
                 .section_scroll_offset(section)
                 .min(total.saturating_sub(max_rows))
         };
@@ -518,7 +523,9 @@ fn draw_home_sidebar_section(
             }
             start = start.min(total.saturating_sub(max_rows));
         }
-        app.browse.home_sidebar.set_section_scroll_offset(section, start);
+        app.browse
+            .home_sidebar
+            .set_section_scroll_offset(section, start);
 
         for (visual_idx, item) in items.iter().skip(start).take(max_rows).enumerate() {
             let idx = start + visual_idx;

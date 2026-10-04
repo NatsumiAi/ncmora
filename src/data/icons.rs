@@ -20,7 +20,10 @@ static AUTO_ASCII: LazyLock<bool> = LazyLock::new(|| {
 });
 
 fn console_term(term: &str) -> bool {
-    matches!(term, "" | "linux" | "kmscon" | "dumb" | "vt100" | "vt102" | "cons25")
+    matches!(
+        term,
+        "" | "linux" | "kmscon" | "dumb" | "vt100" | "vt102" | "cons25"
+    )
 }
 #[derive(Debug, Clone, Copy)]
 pub struct UiIcons {
@@ -99,8 +102,8 @@ impl UiIcons {
             FRAMES[(tick % FRAMES.len() as u128) as usize]
         } else {
             const FRAMES: [char; 10] = [
-                '\u{280b}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283c}',
-                '\u{2834}', '\u{2826}', '\u{2827}', '\u{2807}', '\u{280f}',
+                '\u{280b}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}', '\u{2826}',
+                '\u{2827}', '\u{2807}', '\u{280f}',
             ];
             FRAMES[(tick % FRAMES.len() as u128) as usize]
         }

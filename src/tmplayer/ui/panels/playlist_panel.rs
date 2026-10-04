@@ -24,16 +24,29 @@ pub struct PlaylistPanelLayout {
 fn list_only_layout(inner: Rect) -> PlaylistPanelLayout {
     PlaylistPanelLayout {
         inner,
-        cover_area: Rect { x: inner.x, y: inner.y, width: inner.width, height: 0 },
+        cover_area: Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 0,
+        },
         cover_rect: Rect::default(),
-        separator_area: Rect { x: inner.x, y: inner.y, width: inner.width, height: 0 },
+        separator_area: Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 0,
+        },
         list_area: inner,
         list_inner: inner,
     }
 }
 
 pub fn compute_layout(area: Rect, app: &AppState) -> PlaylistPanelLayout {
-    let inner = area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+    let inner = area.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
     if app.playlist_cover.is_none()
         || inner.width < MIN_COVER_LAYOUT_WIDTH
         || inner.height < MIN_COVER_LAYOUT_HEIGHT
@@ -46,7 +59,12 @@ pub fn compute_layout(area: Rect, app: &AppState) -> PlaylistPanelLayout {
         .clamp(3.0, inner.height.saturating_sub(4) as f32) as u16;
     let sep_h = 1;
     let list_h = inner.height.saturating_sub(cover_h).saturating_sub(sep_h);
-    let cover_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: cover_h };
+    let cover_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: cover_h,
+    };
     let cover_rect = cover_rect_in_area(cover_area);
     let separator_area = Rect {
         x: inner.x,
@@ -60,7 +78,14 @@ pub fn compute_layout(area: Rect, app: &AppState) -> PlaylistPanelLayout {
         width: inner.width,
         height: list_h,
     };
-    PlaylistPanelLayout { inner, cover_area, cover_rect, separator_area, list_area, list_inner: list_area }
+    PlaylistPanelLayout {
+        inner,
+        cover_area,
+        cover_rect,
+        separator_area,
+        list_area,
+        list_inner: list_area,
+    }
 }
 
 fn cover_rect_in_area(area: Rect) -> Rect {
@@ -77,7 +102,10 @@ fn cover_rect_in_area(area: Rect) -> Rect {
 
 fn placeholder(width: u16, height: u16) -> String {
     let row = "█".repeat(width as usize);
-    std::iter::repeat_n(row, height as usize).collect::<Vec<_>>().join("\n") + "\n"
+    std::iter::repeat_n(row, height as usize)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }
 
 fn render_album_cover(f: &mut Frame, area: Rect, app: &mut AppState) {
@@ -89,7 +117,11 @@ fn render_album_cover(f: &mut Frame, area: Rect, app: &mut AppState) {
         return;
     };
     let hash = app.playlist_cover_hash.unwrap_or_else(|| hash_bytes(bytes));
-    let key = CoverKey { hash, width: cover.width, height: cover.height };
+    let key = CoverKey {
+        hash,
+        width: cover.width,
+        height: cover.height,
+    };
     let cached = app.cover_cache.borrow_mut().get(key);
     let ascii = cached.unwrap_or_else(|| {
         app.queue_cover_ascii_render(key, bytes, '█');
@@ -97,7 +129,11 @@ fn render_album_cover(f: &mut Frame, area: Rect, app: &mut AppState) {
     });
     f.render_widget(
         Paragraph::new(ascii)
-            .style(Style::default().fg(app.theme.color_text()).bg(app.theme.color_surface()))
+            .style(
+                Style::default()
+                    .fg(app.theme.color_text())
+                    .bg(app.theme.color_surface()),
+            )
             .wrap(Wrap { trim: false }),
         cover,
     );
@@ -115,8 +151,11 @@ fn render_separator(f: &mut Frame, area: Rect, app: &AppState) {
     };
     let dashes = usize::from(line_area.width).saturating_sub(2);
     f.render_widget(
-        Paragraph::new(format!("├{}┤", "─".repeat(dashes)))
-            .style(Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface())),
+        Paragraph::new(format!("├{}┤", "─".repeat(dashes))).style(
+            Style::default()
+                .fg(app.theme.color_subtext())
+                .bg(app.theme.color_surface()),
+        ),
         line_area,
     );
 }
@@ -135,38 +174,68 @@ fn render_playlist_list(f: &mut Frame, area: Rect, app: &mut AppState) {
     if visible > 0 && total > visible {
         start = start.min(total - visible);
     }
-    let end = if visible == 0 { 0 } else { (start + visible).min(total) };
+    let end = if visible == 0 {
+        0
+    } else {
+        (start + visible).min(total)
+    };
     app.playlist_list_scroll = start;
     app.playlist_list_rows = visible;
 
     let mut lines = Vec::new();
     if total == 0 {
-        lines.push(Line::styled("(empty)", Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface())));
+        lines.push(Line::styled(
+            "(empty)",
+            Style::default()
+                .fg(app.theme.color_subtext())
+                .bg(app.theme.color_surface()),
+        ));
     } else {
         for i in start..end {
             let item = &app.playlist_view.items[i];
             let raw = format!("{:02}. {}", i + 1, item.title);
-            let mut style = Style::default().fg(app.theme.color_text()).bg(app.theme.color_surface());
+            let mut style = Style::default()
+                .fg(app.theme.color_text())
+                .bg(app.theme.color_surface());
             if i == app.playlist_view.selected {
-                style = Style::default().fg(app.theme.color_base()).bg(app.theme.color_accent()).add_modifier(Modifier::BOLD);
+                style = Style::default()
+                    .fg(app.theme.color_base())
+                    .bg(app.theme.color_accent())
+                    .add_modifier(Modifier::BOLD);
             } else if app.playlist_view.current == Some(i) {
-                style = style.fg(app.theme.color_accent3()).add_modifier(Modifier::BOLD);
+                style = style
+                    .fg(app.theme.color_accent3())
+                    .add_modifier(Modifier::BOLD);
             }
-            lines.push(Line::styled(clip_with_ellipsis(&raw, area.width as usize), style));
+            lines.push(Line::styled(
+                clip_with_ellipsis(&raw, area.width as usize),
+                style,
+            ));
         }
     }
-    f.render_widget(Paragraph::new(lines).style(Style::default().bg(app.theme.color_surface())), area);
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(app.theme.color_surface())),
+        area,
+    );
 }
 
 fn clip_with_ellipsis(text: &str, max_width: usize) -> String {
-    if max_width == 0 { return String::new(); }
-    if text.width() <= max_width { return text.to_string(); }
-    if max_width <= 3 { return ".".repeat(max_width); }
+    if max_width == 0 {
+        return String::new();
+    }
+    if text.width() <= max_width {
+        return text.to_string();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
     let mut out = String::new();
     let mut used = 0;
     for ch in text.chars() {
         let width = ch.width().unwrap_or(0);
-        if used + width > max_width - 3 { break; }
+        if used + width > max_width - 3 {
+            break;
+        }
         out.push(ch);
         used += width;
     }
@@ -188,7 +257,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
         Block::default()
             .borders(Borders::ALL)
             .border_set(SOLID_BORDER)
-            .style(Style::default().fg(app.theme.color_subtext()).bg(app.theme.color_surface()))
+            .style(
+                Style::default()
+                    .fg(app.theme.color_subtext())
+                    .bg(app.theme.color_surface()),
+            )
             .title(format!("Playlist ({} tracks)", app.playlist_view.len())),
         area,
     );

@@ -28,11 +28,11 @@ mod imp {
     use crate::app::player::cleanup_cache_dir;
     use crate::launch;
     use mpris_server::{Metadata, PlaybackStatus, Player, Time, zbus};
+    use parking_lot::Mutex;
     use std::collections::hash_map::DefaultHasher;
     use std::fs;
     use std::hash::{Hash, Hasher};
     use std::sync::mpsc::{self as std_mpsc, Receiver, Sender};
-    use parking_lot::Mutex;
     use std::time::{Duration, Instant};
 
     pub struct MprisBridge {
@@ -54,7 +54,10 @@ mod imp {
                 if compio::runtime::spawn_blocking(move || {
                     let _ = fs::create_dir_all(&startup_dir);
                     let _ = cleanup_cache_dir(&startup_dir, &startup_policy);
-                }).await.is_err() {
+                })
+                .await
+                .is_err()
+                {
                     log::warn!("mpris cache initialization task panicked");
                 }
                 let player = match Player::builder("cnmplayer")
@@ -170,7 +173,9 @@ mod imp {
             let cache_policy = cache_policy.clone();
             match compio::runtime::spawn_blocking(move || {
                 build_metadata(&art_dir, &cache_policy, &track)
-            }).await {
+            })
+            .await
+            {
                 Ok(metadata) => player.set_metadata(metadata).await?,
                 Err(_) => log::warn!("mpris metadata export task panicked"),
             }
@@ -213,28 +218,26 @@ mod imp {
             metadata.set_comment(Some([format!("song_id={}", track.song_id)]));
         }
 
-        if let Some(lyrics) = &track.lyrics {
-            if !lyrics.is_empty() {
-                let text = lyrics
-                    .iter()
-                    .map(|line| line.text.trim())
-                    .filter(|line| !line.is_empty())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !text.is_empty() {
-                    metadata.set_lyrics(Some(text));
-                }
+        if let Some(lyrics) = &track.lyrics
+            && !lyrics.is_empty()
+        {
+            let text = lyrics
+                .iter()
+                .map(|line| line.text.trim())
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !text.is_empty() {
+                metadata.set_lyrics(Some(text));
             }
         }
 
-        if let Some(bytes) = track.cover.as_deref() {
-            if !bytes.is_empty() {
-                if let Some(art_url) =
-                    persist_cover_as_file_url(art_dir, cache_policy, &track.song_id, bytes)
-                {
-                    metadata.set_art_url(Some(art_url));
-                }
-            }
+        if let Some(bytes) = track.cover.as_deref()
+            && !bytes.is_empty()
+            && let Some(art_url) =
+                persist_cover_as_file_url(art_dir, cache_policy, &track.song_id, bytes)
+        {
+            metadata.set_art_url(Some(art_url));
         }
 
         metadata
@@ -274,10 +277,10 @@ mod imp {
         static LAST_RUN: Mutex<Option<Instant>> = Mutex::new(None);
 
         let mut last = LAST_RUN.lock();
-        if let Some(at) = *last {
-            if at.elapsed() < MIN_INTERVAL {
-                return;
-            }
+        if let Some(at) = *last
+            && at.elapsed() < MIN_INTERVAL
+        {
+            return;
         }
         *last = Some(Instant::now());
         drop(last);

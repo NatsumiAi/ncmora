@@ -17,10 +17,9 @@ pub fn load_cookie() -> Result<Option<String>> {
         return Ok(None);
     }
 
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path.display()))?;
-    let record: SessionRecord = toml::from_str(&raw)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let record: SessionRecord =
+        toml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
     let cookie = record.cookie.trim().to_string();
     if cookie.is_empty() {
         return Ok(None);

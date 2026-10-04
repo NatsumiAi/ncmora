@@ -25,7 +25,8 @@ pub fn write_atomic_with_mode(path: &Path, contents: &[u8], mode: Option<u32>) -
 
     let mut temp = TempFile::create(parent, path, effective_mode)?;
     let temp_path = &temp.path;
-    let result = (|| {
+
+    (|| {
         temp.file
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("temporary file is closed"))?
@@ -37,8 +38,7 @@ pub fn write_atomic_with_mode(path: &Path, contents: &[u8], mode: Option<u32>) -
             .sync_all()
             .with_context(|| format!("sync {}", temp_path.display()))?;
         drop(temp.file.take());
-        fs::rename(&temp_path, path)
-            .with_context(|| format!("replace {}", path.display()))?;
+        fs::rename(temp_path, path).with_context(|| format!("replace {}", path.display()))?;
         #[cfg(unix)]
         {
             let directory = File::open(parent)
@@ -48,8 +48,7 @@ pub fn write_atomic_with_mode(path: &Path, contents: &[u8], mode: Option<u32>) -
                 .with_context(|| format!("sync {}", parent.display()))?;
         }
         Ok(())
-    })();
-    result
+    })()
 }
 
 #[cfg(unix)]
@@ -114,7 +113,10 @@ impl TempFile {
                 }
             }
         }
-        Err(anyhow::anyhow!("could not create unique temporary for {}", target.display()))
+        Err(anyhow::anyhow!(
+            "could not create unique temporary for {}",
+            target.display()
+        ))
     }
 }
 
@@ -138,10 +140,12 @@ mod tests {
 
         assert!(super::write_atomic(&path, b"new").is_err());
         assert_eq!(fs::read_to_string(path.join("sentinel")).unwrap(), "old");
-        assert!(fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp-")));
+        assert!(
+            fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp-"))
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -161,10 +165,12 @@ mod tests {
         }
         let value = fs::read_to_string(&*path).unwrap();
         assert!(value.starts_with("value-"));
-        assert!(fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp-")));
+        assert!(
+            fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp-"))
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -175,10 +181,16 @@ mod tests {
         let dir = tempfile_dir("permissions");
         let path = dir.join("session.toml");
         super::write_atomic_with_mode(&path, b"cookie", Some(0o600)).unwrap();
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
         super::write_atomic(&path, b"updated").unwrap();
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o640);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

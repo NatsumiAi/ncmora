@@ -1,6 +1,6 @@
 use crate::app::App;
-use crate::data::icons::UiIcons;
 use crate::data::config::Language;
+use crate::data::icons::UiIcons;
 use crate::ui::page_lyrics;
 use crate::ui::player_bar;
 use ratatui::Frame;
@@ -121,8 +121,11 @@ fn draw_playlist_header(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let description_line_limit =
-        intro_line_limit(&app.browse.playlist.description, info_area.width, cover_line_limit);
+    let description_line_limit = intro_line_limit(
+        &app.browse.playlist.description,
+        info_area.width,
+        cover_line_limit,
+    );
     let available_extra = info_area.height.saturating_sub(3);
     let spacer_height = u16::from(description_line_limit > 0 && available_extra >= 2);
     let description_height = available_extra

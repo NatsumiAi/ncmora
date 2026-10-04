@@ -31,10 +31,9 @@ pub fn load() -> Result<Option<PrivateRoamRecord>> {
         return Ok(None);
     }
 
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path.display()))?;
-    let record: PrivateRoamRecord = toml::from_str(&raw)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let record: PrivateRoamRecord =
+        toml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
     if record.tracks.is_empty() && record.last_played_cover_url.is_none() {
         return Ok(None);
     }

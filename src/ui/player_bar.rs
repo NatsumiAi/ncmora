@@ -158,12 +158,13 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     let controls = format!("{prev_label} {play_label} {next_label} {mode_symbol}");
 
-    let spectrum =
-        if app.playback.now_playing.is_some() && app.playback.playback_state != PlaybackRuntimeState::Stopped {
-            app.main_spectrum_braille()
-        } else {
-            " ".repeat(10)
-        };
+    let spectrum = if app.playback.now_playing.is_some()
+        && app.playback.playback_state != PlaybackRuntimeState::Stopped
+    {
+        app.main_spectrum_braille()
+    } else {
+        " ".repeat(10)
+    };
 
     let controls_w = display_width(&controls) as u16;
     let spectrum_w = display_width(&spectrum).min(10) as u16;
@@ -529,7 +530,11 @@ mod tests {
         let line = compose_left_right_line("Title", "v [*]", 12);
         assert!(line.ends_with("v [*]"));
         assert_eq!(display_width(&line), 12);
-        assert!(right_suffix_hits(row(0, 2), heart_text, Some(icons.download())).1.is_none());
+        assert!(
+            right_suffix_hits(row(0, 2), heart_text, Some(icons.download()))
+                .1
+                .is_none()
+        );
     }
 
     fn row(x: u16, width: u16) -> Rect {

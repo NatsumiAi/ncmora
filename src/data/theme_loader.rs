@@ -65,7 +65,6 @@ impl ThemeLoader {
             .map_err(|_| anyhow::anyhow!("theme loader task panicked"))?
     }
 
-
     /// 扫描 `themes/*.toml`，返回通过格式校验的 key 列表（优先取文件内
     /// `name` 字段，缺省用文件名主干），按 key 排序去重；坏文件直接跳过，
     /// 不让主题循环崩掉。目录不可读时兜底 `system`。
@@ -171,4 +170,3 @@ fn derive_buff_hex(surface_hex: &str) -> String {
         b.saturating_add(10)
     )
 }
-

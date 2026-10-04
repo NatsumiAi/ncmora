@@ -41,7 +41,8 @@ impl StartupController {
             self.init.step_done(),
             self.init.step_total(),
             self.init.step_elapsed(),
-            self.complete_started_at.map(|time| time.elapsed().as_secs_f32()),
+            self.complete_started_at
+                .map(|time| time.elapsed().as_secs_f32()),
             self.complete_requested,
         )
     }
@@ -52,9 +53,11 @@ impl StartupController {
             return None;
         };
         self.progress = self.current_progress();
-        let ramp_done = self.complete_started_at
-            .is_some_and(|time| time.elapsed().as_secs_f32() >= super::STARTUP_LOADING_COMPLETE_RAMP_SECS);
-        if self.complete_requested && ramp_done
+        let ramp_done = self.complete_started_at.is_some_and(|time| {
+            time.elapsed().as_secs_f32() >= super::STARTUP_LOADING_COMPLETE_RAMP_SECS
+        });
+        if self.complete_requested
+            && ramp_done
             && started_at.elapsed().as_secs_f32() >= super::STARTUP_LOADING_MIN_VISIBLE_SECS
         {
             self.progress = 0.0;

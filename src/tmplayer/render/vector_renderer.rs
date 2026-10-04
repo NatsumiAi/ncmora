@@ -1440,7 +1440,7 @@ mod tests {
         let st = circle_state(0.8);
         assert_eq!(st.phase, Phase::Active);
         assert!(st.grid.iter().any(|&bits| bits != 0));
-        assert!(st.pixel_alpha.iter().any(|&alpha| alpha == 1.0));
+        assert!(st.pixel_alpha.contains(&1.0));
     }
 
     /// 粒子上限：高密度图形孵化时按步长抽样，粒子数不超过上限。
@@ -1473,7 +1473,7 @@ mod tests {
             .filter(|p| !matches!(p.twinkle, Twinkle::Dying { .. }))
             .count();
         assert!(
-            kept <= MAX_PARTICLES && kept >= MAX_PARTICLES * 9 / 10,
+            (MAX_PARTICLES * 9 / 10..=MAX_PARTICLES).contains(&kept),
             "抽样保留 {kept} 应接近且不超过上限"
         );
         assert_eq!(

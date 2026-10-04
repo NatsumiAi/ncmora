@@ -100,4 +100,3 @@ fn parse_lrc_time_tag(tag: &str) -> Option<u64> {
 
     Some(mm * 60_000 + ss * 1_000 + ms)
 }
-

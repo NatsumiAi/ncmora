@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use compio::io::{AsyncWrite, AsyncWriteExt};
 use directories::{BaseDirs, UserDirs};
 use futures::StreamExt;
-use futures::channel::mpsc::{TryRecvError, UnboundedReceiver, UnboundedSender, unbounded};
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -36,7 +36,6 @@ const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// 超时即终止该任务（半成品已清理），队列继续下一个；读流阶段仍用
 /// [`CANCEL_POLL_INTERVAL`] 切片（慢速但活着的下载不该被误杀）。
 const NET_PHASE_TIMEOUT: Duration = Duration::from_secs(30);
-
 
 /// 下载按钮/图标三态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,7 +131,9 @@ pub async fn validate_download_path(raw: &str) -> Result<DownloadPathChoice, Dow
             .map_err(|_| DownloadPathError::NotWritable)?;
         let close = file.close().await;
         let remove = compio::fs::remove_file(&probe).await;
-        close.and(remove).map_err(|_| DownloadPathError::NotWritable)?;
+        close
+            .and(remove)
+            .map_err(|_| DownloadPathError::NotWritable)?;
     }
     Ok(choice)
 }
@@ -232,8 +233,7 @@ impl DownloadTarget {
         AUDIO_EXTENSIONS
             .iter()
             .map(|ext| self.file_path(ext))
-            .find(|path| std::fs::metadata(path)
-                .is_ok_and(|meta| meta.is_file() && meta.len() > 0))
+            .find(|path| std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() > 0))
     }
 }
 
@@ -397,7 +397,8 @@ struct DownloadMessage {
     shared: Arc<JobShared>,
 }
 
-/// 下载任务表 + 落盘状态缓存。
+type DiskLookupResult = (u64, Vec<(String, bool)>);
+type DiskLookupReceiver = std::sync::mpsc::Receiver<DiskLookupResult>;
 ///
 /// 全局只有一个下载任务（`loop_downloads`）：`enqueue` 只把请求塞进队列，
 /// 队列按先来后到顺序执行——同一时刻最多一个在写盘，取消在途任务后下一个
@@ -413,7 +414,7 @@ pub struct DownloadManager {
     disk_cache: HashMap<String, bool>,
     /// At most one 256-row blocking batch and one pending batch, never UI stat calls.
     disk_pending: HashMap<String, DownloadTarget>,
-    disk_lookup: Option<std::sync::mpsc::Receiver<(u64, Vec<(String, bool)>)>>,
+    disk_lookup: Option<DiskLookupReceiver>,
     disk_epoch: u64,
     /// 任务表 / 磁盘缓存的变化计数：行内 memo 据此决定是否重算状态。
     version: u64,
@@ -460,7 +461,12 @@ impl DownloadManager {
         self.api = api.clone();
         let shared = Arc::new(JobShared::default());
         let song_id = request.song_id.clone();
-        let key = request.target.dir.join(&request.target.base).display().to_string();
+        let key = request
+            .target
+            .dir
+            .join(&request.target.base)
+            .display()
+            .to_string();
         let job = JobHandle {
             title: request.title.clone(),
             level: request.level,
@@ -607,21 +613,32 @@ impl DownloadManager {
     /// Rendering fallback; unknown disk status displays as not downloaded.
     /// Actions must use [`Self::known_state_of`] and defer while it returns `None`.
     pub fn state_of(&mut self, song_id: &str, target: &DownloadTarget) -> DownloadState {
-        self.known_state_of(song_id, target).unwrap_or(DownloadState::NotDownloaded)
+        self.known_state_of(song_id, target)
+            .unwrap_or(DownloadState::NotDownloaded)
     }
 
     /// `None` means a bounded background disk lookup is pending, not an absent file.
-    pub fn known_state_of(&mut self, song_id: &str, target: &DownloadTarget) -> Option<DownloadState> {
+    pub fn known_state_of(
+        &mut self,
+        song_id: &str,
+        target: &DownloadTarget,
+    ) -> Option<DownloadState> {
         let key = target.dir.join(&target.base).display().to_string();
         self.state_of_key(song_id, &key, target)
     }
 
     /// 用预计算行查状态：key 不重建，命中缓存时零分配。
     pub fn state_of_row(&mut self, row: &DownloadRow) -> DownloadState {
-        self.state_of_key(&row.song_id, &row.key, &row.target).unwrap_or(DownloadState::NotDownloaded)
+        self.state_of_key(&row.song_id, &row.key, &row.target)
+            .unwrap_or(DownloadState::NotDownloaded)
     }
 
-    fn state_of_key(&mut self, song_id: &str, key: &str, target: &DownloadTarget) -> Option<DownloadState> {
+    fn state_of_key(
+        &mut self,
+        song_id: &str,
+        key: &str,
+        target: &DownloadTarget,
+    ) -> Option<DownloadState> {
         if let Some(job) = self.jobs.get(song_id) {
             return Some(if job.cancelling {
                 DownloadState::NotDownloaded
@@ -672,11 +689,13 @@ impl DownloadManager {
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             self.disk_lookup = Some(rx);
             compio::runtime::spawn_blocking(move || {
-                let rows = pending.into_iter()
+                let rows = pending
+                    .into_iter()
                     .map(|(key, target)| (key, target.existing_file().is_some()))
                     .collect();
                 let _ = tx.send((epoch, rows));
-            }).detach();
+            })
+            .detach();
         }
     }
 
@@ -695,19 +714,12 @@ impl DownloadManager {
 /// 就不再发起），随后写盘并回填结果。取消在途任务会立刻中断当前写盘，
 /// 队列里的下一个紧接着开始。
 async fn loop_downloads(mut rx: UnboundedReceiver<DownloadMessage>, mut api: ApiState) {
-    loop {
-        // 队列空（或发送端已关）就释放这个任务；下次 enqueue 会另起一个。
-        let message = match rx.try_recv() {
-            Ok(message) => message,
-            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
-        };
-
+    while let Ok(message) = rx.try_recv() {
         let DownloadMessage { request, shared } = message;
         if shared.cancelled.load(Ordering::SeqCst) {
             *shared.outcome.lock() = Some(Err(TaskError::Cancelled));
             continue;
         }
-
         shared.started.store(true, Ordering::SeqCst);
         let result = download_task(&mut api, request, &shared).await;
         *shared.outcome.lock() = Some(result);
@@ -885,7 +897,9 @@ async fn stream_to_file(
         return Err(TaskError::Failed(err.to_string()));
     }
     if downloaded == 0 || expected.is_some_and(|total| downloaded != total) {
-        return Err(TaskError::Failed("下载内容为空或 Content-Length 不符".to_string()));
+        return Err(TaskError::Failed(
+            "下载内容为空或 Content-Length 不符".to_string(),
+        ));
     }
     Ok(())
 }
@@ -917,7 +931,13 @@ async fn write_metadata(
     }
     let path = path.to_path_buf();
     compio::runtime::spawn_blocking(move || {
-        write_tags_blocking(&path, extension, &metadata, cover.as_deref(), lyrics.as_deref())
+        write_tags_blocking(
+            &path,
+            extension,
+            &metadata,
+            cover.as_deref(),
+            lyrics.as_deref(),
+        )
     })
     .await
     .map_err(|_| anyhow::anyhow!("tag writer task panicked"))?
@@ -951,10 +971,10 @@ async fn fetch_song_metadata(api: &ApiState, request: &DownloadRequest) -> SongM
         return metadata;
     };
 
-    if let Some(name) = song.get("name").and_then(|value| value.as_str()) {
-        if !name.trim().is_empty() {
-            metadata.title = name.to_string();
-        }
+    if let Some(name) = song.get("name").and_then(|value| value.as_str())
+        && !name.trim().is_empty()
+    {
+        metadata.title = name.to_string();
     }
     let artists = song
         .get("ar")
@@ -971,10 +991,10 @@ async fn fetch_song_metadata(api: &ApiState, request: &DownloadRequest) -> SongM
     if !artists.is_empty() {
         metadata.artists = artists;
     }
-    if let Some(album) = song.pointer("/al/name").and_then(|value| value.as_str()) {
-        if !album.trim().is_empty() {
-            metadata.album = album.to_string();
-        }
+    if let Some(album) = song.pointer("/al/name").and_then(|value| value.as_str())
+        && !album.trim().is_empty()
+    {
+        metadata.album = album.to_string();
     }
     metadata.album_cover_url = song
         .pointer("/al/picUrl")
@@ -1097,39 +1117,67 @@ mod tests {
 
     #[compio::test]
     async fn row_status_is_loaded_by_poll_and_invalidated_after_root_change() {
-        let directory = std::env::temp_dir().join(format!(
-            "cnmplayer-download-status-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("cnmplayer-download-status-{}", std::process::id()));
         compio::fs::create_dir_all(&directory).await.unwrap();
-        let target = DownloadTarget { dir: directory.clone(), base: "song".to_string() };
-        compio::fs::write(target.file_path("mp3"), b"audio".to_vec()).await.0.unwrap();
+        let target = DownloadTarget {
+            dir: directory.clone(),
+            base: "song".to_string(),
+        };
+        compio::fs::write(target.file_path("mp3"), b"audio".to_vec())
+            .await
+            .0
+            .unwrap();
         let api = ApiState::new(None, cyper::Client::builder().build().unwrap()).unwrap();
         let mut manager = DownloadManager::new(api.clone());
         let row = DownloadRow::new("42".to_string(), target.clone());
-        assert_eq!(manager.state_of_row(&row), DownloadState::NotDownloaded,
-            "render-time lookup must not stat an uncached row");
+        assert_eq!(
+            manager.state_of_row(&row),
+            DownloadState::NotDownloaded,
+            "render-time lookup must not stat an uncached row"
+        );
         let request = DownloadRequest {
-            song_id: "42".to_string(), level: AudioQuality::Exhigh,
-            title: "song".to_string(), artist: String::new(), album: String::new(),
+            song_id: "42".to_string(),
+            level: AudioQuality::Exhigh,
+            title: "song".to_string(),
+            artist: String::new(),
+            album: String::new(),
             target: target.clone(),
         };
         let initial_version = manager.version();
         // Deliberately do not poll: the lookup stays unresolved deterministically.
         assert_eq!(manager.known_state_of("42", &target), None);
         assert!(manager.enqueue(&api, request.clone()).is_err());
-        assert!(!manager.is_busy("42"), "pending lookup must not admit a download job");
+        assert!(
+            !manager.is_busy("42"),
+            "pending lookup must not admit a download job"
+        );
         assert_eq!(manager.version(), initial_version);
-        assert_eq!(compio::fs::read(target.file_path("mp3")).await.unwrap(), b"audio");
+        assert_eq!(
+            compio::fs::read(target.file_path("mp3")).await.unwrap(),
+            b"audio"
+        );
         compio::time::timeout(Duration::from_secs(5), async {
             while manager.state_of_row(&row) != DownloadState::Done {
                 manager.poll();
                 compio::time::sleep(Duration::from_millis(1)).await;
             }
-        }).await.unwrap();
-        assert_eq!(manager.known_state_of("42", &target), Some(DownloadState::Done));
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            manager.known_state_of("42", &target),
+            Some(DownloadState::Done)
+        );
         assert!(manager.enqueue(&api, request).is_err());
         assert!(!manager.is_busy("42"));
-        assert_eq!(compio::fs::read(target.file_path("mp3")).await.unwrap(), b"audio");
-        compio::fs::remove_file(target.file_path("mp3")).await.unwrap();
+        assert_eq!(
+            compio::fs::read(target.file_path("mp3")).await.unwrap(),
+            b"audio"
+        );
+        compio::fs::remove_file(target.file_path("mp3"))
+            .await
+            .unwrap();
         manager.clear_disk_cache();
         let version = manager.version();
         assert_eq!(manager.state_of_row(&row), DownloadState::NotDownloaded);
@@ -1138,10 +1186,14 @@ mod tests {
                 manager.poll();
                 compio::time::sleep(Duration::from_millis(1)).await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert_eq!(manager.state_of_row(&row), DownloadState::NotDownloaded);
         compio::runtime::spawn_blocking(move || std::fs::remove_dir_all(directory))
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[test]
@@ -1237,9 +1289,15 @@ mod tests {
         let nerd = UiIcons::for_mode(IconMode::Nerd);
         let ascii = UiIcons::for_mode(IconMode::Ascii);
         let phase = Duration::ZERO;
-        assert_eq!(state_glyph(DownloadState::NotDownloaded, phase, nerd), '\u{ec74}');
+        assert_eq!(
+            state_glyph(DownloadState::NotDownloaded, phase, nerd),
+            '\u{ec74}'
+        );
         assert_eq!(state_glyph(DownloadState::Done, phase, nerd), '\u{f00c}');
-        assert_eq!(state_glyph(DownloadState::Downloading, phase, nerd), '\u{280b}');
+        assert_eq!(
+            state_glyph(DownloadState::Downloading, phase, nerd),
+            '\u{280b}'
+        );
         assert_eq!(state_glyph(DownloadState::NotDownloaded, phase, ascii), 'v');
         assert_eq!(state_glyph(DownloadState::Done, phase, ascii), '+');
         assert!(state_glyph(DownloadState::Downloading, phase, ascii).is_ascii());

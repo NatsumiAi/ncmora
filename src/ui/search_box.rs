@@ -15,7 +15,9 @@ pub fn draw_search_box_overlay(frame: &mut Frame, app: &App) {
         return;
     }
 
-    let visible_h = app.input.search_box_anim_height
+    let visible_h = app
+        .input
+        .search_box_anim_height
         .min(TARGET_HEIGHT)
         .min(size.height);
     if visible_h == 0 {

@@ -1,5 +1,6 @@
 use crate::tmplayer::app::state::{AppState, Overlay};
 use crate::tmplayer::ui::components::control_buttons;
+use crate::tmplayer::ui::panels::info_panel::{download_cells, heart_cells};
 use crate::tmplayer::ui::panels::{info_panel, playlist_panel, visual_panel};
 use crate::tmplayer::utils::input::Action;
 use anyhow::Result;
@@ -27,11 +28,9 @@ pub struct UiLayout {
     /// 标题/爱心行（爱心贴该行右端）。
     pub info_meta: Rect,
 
-
     pub playlist_rect: Rect,
     pub playlist_inner: Rect,
     pub playlist_list_inner: Rect,
-
 
     pub spectrum_rect: Rect,
     /// 当前弹窗（若有）的条目行。
@@ -75,7 +74,9 @@ impl Tui {
         )?;
         Ok(())
     }
-
+    pub fn poll_cover_frames(&mut self) -> bool {
+        self.halfblocks.poll()
+    }
 
     pub fn draw(&mut self, app: &mut AppState) -> Result<UiLayout> {
         if app.toast.as_ref().map(|(m, _)| m.as_str()) == Some("Bye") {
@@ -100,7 +101,6 @@ impl Tui {
             return Ok(layout_out);
         }
 
-        self.halfblocks.poll();
         self.terminal.draw(|f| {
             let size = f.area();
             layout_out.full = size;
@@ -141,8 +141,7 @@ impl Tui {
             };
 
             // 「关闭」档位把右侧区（可视化 + 歌词）整块收起，歌曲信息区独占整宽。
-            let show_right =
-                app.config.visualize != crate::data::config::VisualizeMode::Hidden;
+            let show_right = app.config.visualize != crate::data::config::VisualizeMode::Hidden;
             let (left, right) = if show_right {
                 let cols = Layout::default()
                     .direction(Direction::Horizontal)
@@ -200,7 +199,6 @@ impl Tui {
                 Rect::default()
             };
 
-
             // base styling
             f.render_widget(ratatui::widgets::Clear, size);
 
@@ -215,15 +213,10 @@ impl Tui {
                 visual_panel::render(f, lyric_row, spectrum_row, app);
             }
             if app.config.graphics_protocol == crate::data::config::GraphicsProtocol::Halfblocks
-                && app.cover_anim.is_none()
                 && app.overlay != Overlay::Playlist
                 && app.playlist_slide_x == app.playlist_slide_target_x
-                && let (Some(bytes), Some(hash)) = (
-                    app.player.track.cover.as_deref(), app.player.track.cover_hash,
-                )
             {
-                let cover = info_l.cover.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
-                self.halfblocks.paint(f.buffer_mut(), cover, hash, bytes);
+                paint_halfblock_cover(f.buffer_mut(), &mut self.halfblocks, info_l.cover, app);
             }
 
             // playlist overlay slides in/out over left
@@ -288,14 +281,15 @@ impl Tui {
                 Self::render_hint_in_border(f, app, bottom_row, layout_out.left);
             }
 
-
             if app.config.graphics_protocol == crate::data::config::GraphicsProtocol::Halfblocks
                 && app.overlay == Overlay::Playlist
                 && app.playlist_slide_x == 0
                 && app.playlist_slide_target_x == 0
-                && let (Some(bytes), Some(hash)) = (app.playlist_cover.as_deref(), app.playlist_cover_hash)
+                && let (Some(bytes), Some(hash)) =
+                    (app.playlist_cover.as_deref(), app.playlist_cover_hash)
             {
-                let cover = playlist_panel::compute_layout(layout_out.playlist_rect, app).cover_rect;
+                let cover =
+                    playlist_panel::compute_layout(layout_out.playlist_rect, app).cover_rect;
                 self.halfblocks.paint(f.buffer_mut(), cover, hash, bytes);
             }
             // modals (top-most)
@@ -377,7 +371,27 @@ impl Tui {
         f.buffer_mut()
             .set_string(seg.x, seg.y, &content, border_style);
     }
-
+}
+fn paint_halfblock_cover(
+    target: &mut ratatui::buffer::Buffer,
+    halfblocks: &mut crate::tmplayer::render::halfblock_cover::HalfblockCovers,
+    cover: Rect,
+    app: &AppState,
+) {
+    let content = info_panel::cover_content_rect(cover);
+    if let Some(anim) = &app.cover_anim {
+        let (from_dx, to_dx) = anim.slide_offsets(cover.width, app.last_frame);
+        for (snapshot, dx) in [(&anim.from, from_dx), (&anim.to, to_dx)] {
+            if let (Some(bytes), Some(hash)) = (snapshot.cover.as_deref(), snapshot.cover_hash) {
+                halfblocks.paint_segment(target, content, cover, dx, hash, bytes);
+            }
+        }
+    } else if let (Some(bytes), Some(hash)) = (
+        app.player.track.cover.as_deref(),
+        app.player.track.cover_hash,
+    ) {
+        halfblocks.paint(target, content, hash, bytes);
+    }
 }
 
 fn centered_rect(size: Rect, width: u16, height: u16) -> Rect {
@@ -571,7 +585,6 @@ fn render_settings_modal(
     f.render_widget(Paragraph::new(""), bottom_cols[1]);
 }
 
-
 fn render_bar_settings_modal(
     f: &mut ratatui::Frame,
     size: Rect,
@@ -621,17 +634,14 @@ fn render_bar_settings_modal(
         crate::data::config::BarChannels::Stereo => "Stereo",
     };
 
-    let items = vec![
+    let items = [
         format!(
             "{}: {}",
             lang_text(app, "可视化", "Visualization"),
             match app.config.visualize {
-                crate::data::config::VisualizeMode::Lyrics =>
-                    lang_text(app, "仅歌词", "Lyrics"),
-                crate::data::config::VisualizeMode::Hidden =>
-                    lang_text(app, "关闭", "Off"),
-                crate::data::config::VisualizeMode::Bars =>
-                    lang_text(app, "频谱", "Bars"),
+                crate::data::config::VisualizeMode::Lyrics => lang_text(app, "仅歌词", "Lyrics"),
+                crate::data::config::VisualizeMode::Hidden => lang_text(app, "关闭", "Off"),
+                crate::data::config::VisualizeMode::Bars => lang_text(app, "频谱", "Bars"),
                 crate::data::config::VisualizeMode::Oscilloscope => {
                     lang_text(app, "示波器", "Oscilloscope")
                 }
@@ -665,14 +675,10 @@ fn render_bar_settings_modal(
             "{}: {}",
             lang_text(app, "音质", "Audio Quality"),
             match app.config.audio_quality {
-                crate::data::config::AudioQuality::Standard =>
-                    lang_text(app, "标准", "Standard"),
-                crate::data::config::AudioQuality::Higher =>
-                    lang_text(app, "较高", "Higher"),
-                crate::data::config::AudioQuality::Exhigh =>
-                    lang_text(app, "极高", "Exhigh"),
-                crate::data::config::AudioQuality::Lossless =>
-                    lang_text(app, "无损", "Lossless"),
+                crate::data::config::AudioQuality::Standard => lang_text(app, "标准", "Standard"),
+                crate::data::config::AudioQuality::Higher => lang_text(app, "较高", "Higher"),
+                crate::data::config::AudioQuality::Exhigh => lang_text(app, "极高", "Exhigh"),
+                crate::data::config::AudioQuality::Lossless => lang_text(app, "无损", "Lossless"),
                 crate::data::config::AudioQuality::Hires => "Hi-Res",
                 crate::data::config::AudioQuality::Jyeffect => {
                     lang_text(app, "高清环绕声", "JYEffect")
@@ -858,14 +864,10 @@ fn render_download_settings_modal(
         crate::data::config::AudioQuality::Exhigh => lang_text(app, "极高", "Exhigh"),
         crate::data::config::AudioQuality::Lossless => lang_text(app, "无损", "Lossless"),
         crate::data::config::AudioQuality::Hires => "Hi-Res",
-        crate::data::config::AudioQuality::Jyeffect => {
-            lang_text(app, "高清环绕声", "JYEffect")
-        }
+        crate::data::config::AudioQuality::Jyeffect => lang_text(app, "高清环绕声", "JYEffect"),
         crate::data::config::AudioQuality::Sky => lang_text(app, "沉浸环绕声", "Sky"),
         crate::data::config::AudioQuality::Dolby => lang_text(app, "杜比全景声", "Dolby"),
-        crate::data::config::AudioQuality::Jymaster => {
-            lang_text(app, "超清母带", "JYMaster")
-        }
+        crate::data::config::AudioQuality::Jymaster => lang_text(app, "超清母带", "JYMaster"),
     };
     let path_prefix = format!("{}: ", lang_text(app, "下载路径", "Download Path"));
     let path_display = app.download_display_path();
@@ -988,7 +990,6 @@ fn render_download_settings_modal(
         modal_rows.push(rect, idx);
     }
 }
-
 
 fn render_about_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
     let area = centered_rect(size, 70, 22);
@@ -1552,8 +1553,8 @@ fn render_eq_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
             ));
         }
 
-        for b in 0..BANDS {
-            let gain = gains[b].clamp(-12.0, 12.0).round() as i32;
+        for (b, gain_value) in gains.iter().enumerate().take(BANDS) {
+            let gain = gain_value.clamp(-12.0, 12.0).round() as i32;
             let filled = if db_row == 0 {
                 false
             } else if db_row > 0 {
@@ -1670,35 +1671,6 @@ fn render_eq_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
     );
 }
 
-/// Returns the rendered heart span's occupied cells using the selected icon set.
-fn heart_cells(meta: Rect, app: &AppState) -> Option<(u16, u16, u16)> {
-    if meta.width == 0 || meta.height == 0 {
-        return None;
-    }
-    let heart = crate::data::icons::UiIcons::for_mode(app.config.icon_mode).heart(app.player.liked);
-    let width = unicode_width::UnicodeWidthStr::width(heart).min(u16::MAX as usize) as u16;
-    let width = width.min(meta.width);
-    (width > 0).then_some((meta.x + meta.width - width, meta.y, width))
-}
-
-fn download_cells(meta: Rect, app: &AppState) -> Option<(u16, u16, u16)> {
-    let (_, y, heart_width) = heart_cells(meta, app)?;
-    let glyph = crate::tmplayer::ui::panels::info_panel::download_glyph(app)?;
-    let width = unicode_width::UnicodeWidthChar::width(glyph).unwrap_or(1) as u16;
-    let end = meta.x + meta.width - heart_width;
-    (end > meta.x + width).then_some((end - width - 1, y, width))
-}
-
-/// Legacy single-cell helper retained for layout tests; runtime hit testing uses `heart_cells`.
-pub(crate) fn download_cell(meta: Rect) -> Option<(u16, u16)> {
-    let heart_x = meta.x + meta.width.saturating_sub(1);
-    (meta.width >= 3 && meta.height > 0).then_some((heart_x.saturating_sub(2), meta.y))
-}
-
-fn heart_cell(meta: Rect) -> Option<(u16, u16)> {
-    (meta.width > 0 && meta.height > 0).then_some((meta.x + meta.width - 1, meta.y))
-}
-
 pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option<Action> {
     // Eq modal consumes clicks first
     if app.overlay == Overlay::EqModal {
@@ -1750,9 +1722,7 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
                     }
                 }
 
-                let Some(band) = band else {
-                    return None;
-                };
+                let band = band?;
 
                 // fixed height mapping: prefer 25 rows (12..0..-12)
                 let want_h: u16 = 25;
@@ -1816,7 +1786,8 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
         return Some(Action::ToggleFavorite);
     }
     if app.download_state != crate::tmplayer::DownloadIconState::Hidden
-        && let Some((download_x, download_y, download_width)) = download_cells(layout.info_meta, app)
+        && let Some((download_x, download_y, download_width)) =
+            download_cells(layout.info_meta, app)
         && row == download_y
         && col >= download_x
         && col < download_x + download_width
@@ -1978,6 +1949,7 @@ mod tests {
             crate::data::config::Language::Zh,
         );
         app.overlay = overlay;
+        app.config.icon_mode = crate::data::icons::IconMode::Nerd;
         app
     }
 
@@ -2046,55 +2018,6 @@ mod tests {
         );
     }
 
-    /// 爱心落在标题行（meta 块首行）最后一格，不是块内任意一行。
-    #[test]
-    fn heart_cell_is_the_last_column_of_the_first_meta_row() {
-        let meta = rect(10, 4, 26, 3);
-
-        assert_eq!(heart_cell(meta), Some((10 + 26 - 1, 4)));
-        // 同一列的下面两行是艺术字/专辑，不是爱心
-        assert_ne!(heart_cell(meta), Some((35, 5)));
-        assert_ne!(heart_cell(meta), Some((35, 6)));
-    }
-
-    #[test]
-    fn heart_cell_is_absent_when_the_row_is_not_drawn() {
-        assert_eq!(heart_cell(Rect::default()), None);
-        assert_eq!(heart_cell(rect(3, 7, 0, 3)), None);
-        assert_eq!(heart_cell(rect(3, 7, 12, 0)), None);
-    }
-
-    /// 1 格宽的 meta 行：爱心就在那一格。
-    #[test]
-    fn heart_cell_handles_a_single_cell_row() {
-        assert_eq!(heart_cell(rect(0, 0, 1, 1)), Some((0, 0)));
-    }
-
-    /// 标题行的点击落在爱心那一格才切收藏，其余位置不误触。
-    #[test]
-    fn clicking_the_heart_cell_toggles_favorite() {
-        let layout = UiLayout {
-            info_meta: rect(2, 5, 20, 3),
-            ..UiLayout::default()
-        };
-        let app = state(Overlay::None);
-
-        assert_eq!(
-            hit_test(&layout, &app, 2 + 20 - 1, 5),
-            Some(Action::ToggleFavorite)
-        );
-        assert_eq!(
-            hit_test(&layout, &app, 2 + 20 - 2, 5),
-            None,
-            "标题文字不算爱心"
-        );
-        assert_eq!(
-            hit_test(&layout, &app, 2 + 20 - 1, 6),
-            None,
-            "专辑行没有爱心"
-        );
-    }
-
     /// 编辑态只有路径值段落换底色（标签保持 modal 底色）。
     #[test]
     fn download_path_edit_paints_only_the_value_area() {
@@ -2125,72 +2048,259 @@ mod tests {
         assert_eq!(value_cell.style().bg, Some(buff), "路径值段落换底色");
         assert_eq!(value_cell.style().fg, Some(app.theme.color_text()));
     }
-    /// 标题行右端实际渲染出来的三格：下载图标、空格、爱心（与命中格同源）。
     #[test]
-    fn info_title_row_renders_download_then_gap_then_heart() {
-        let mut app = state(Overlay::None);
-        app.player.track.title = "Title".to_string();
-        app.download_state = crate::tmplayer::DownloadIconState::NotDownloaded;
+    fn rendered_title_icons_match_mouse_hits_in_nerd_and_ascii_modes() {
+        use crate::data::icons::IconMode;
+        use crate::tmplayer::DownloadIconState;
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-        let (_, buf) = render_to_buffer_sized(120, 40, &mut app, |f, app, _rows| {
-            let area = f.area();
-            info_panel::render(f, area, area.width, app);
-        });
-
-        let left = ratatui::layout::Rect::new(0, 0, 120, 40);
-        let layout = info_panel::layout(left, 120);
-        let (download_x, y) = download_cell(layout.meta).expect("下载格");
-        let (heart_x, _) = heart_cell(layout.meta).expect("爱心格");
-        assert_eq!(heart_x, download_x + 2, "下载图标与爱心之间隔一格");
-        let icons = crate::data::icons::UiIcons::for_mode(app.config.icon_mode);
-        let expected_download = crate::tmplayer::ui::panels::info_panel::download_glyph(&app)
-            .expect("下载图标");
-        assert_eq!(buf[(download_x, y)].symbol(), expected_download.to_string());
-        assert_eq!(buf[(download_x + 1, y)].symbol(), " ");
-        assert_eq!(buf[(heart_x, y)].symbol(), icons.heart(app.player.liked));
+        for mode in [IconMode::Nerd, IconMode::Ascii] {
+            for liked in [false, true] {
+                for download in [
+                    DownloadIconState::NotDownloaded,
+                    DownloadIconState::Downloading,
+                    DownloadIconState::Done,
+                    DownloadIconState::Hidden,
+                ] {
+                    let mut app = state(Overlay::None);
+                    app.config.icon_mode = mode;
+                    app.player.liked = liked;
+                    app.player.track.title = "Title".to_string();
+                    app.download_state = download;
+                    let (_, buf) = render_to_buffer_sized(120, 40, &mut app, |f, app, _| {
+                        info_panel::render(f, f.area(), 120, app);
+                    });
+                    let meta = info_panel::layout(rect(0, 0, 120, 40), 120).meta;
+                    let layout = UiLayout {
+                        info_meta: meta,
+                        ..UiLayout::default()
+                    };
+                    let click = |col, row| {
+                        let event = MouseEvent {
+                            kind: MouseEventKind::Down(MouseButton::Left),
+                            column: col,
+                            row,
+                            modifiers: KeyModifiers::empty(),
+                        };
+                        assert_eq!(
+                            crate::tmplayer::utils::input::map_mouse(event),
+                            Action::MouseClick { col, row }
+                        );
+                        hit_test(&layout, &app, col, row)
+                    };
+                    let (heart_x, y, heart_width) = heart_cells(meta, &app).unwrap();
+                    let heart: String = (heart_x..heart_x + heart_width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect();
+                    assert_eq!(
+                        heart,
+                        crate::data::icons::UiIcons::for_mode(mode).heart(liked)
+                    );
+                    for x in heart_x..heart_x + heart_width {
+                        assert_eq!(click(x, y), Some(Action::ToggleFavorite));
+                        assert_eq!(click(x, y + 1), None);
+                    }
+                    if let Some((download_x, download_y, width)) = download_cells(meta, &app) {
+                        assert_eq!(download_y, y);
+                        assert_eq!(download_x + width + 1, heart_x);
+                        assert_eq!(
+                            buf[(download_x, y)].symbol(),
+                            info_panel::download_glyph(&app).unwrap().to_string()
+                        );
+                        for x in download_x..download_x + width {
+                            assert_eq!(click(x, y), Some(Action::ToggleDownload));
+                        }
+                    } else {
+                        assert_eq!(download, DownloadIconState::Hidden);
+                        assert_eq!(click(heart_x - 2, y), None);
+                    }
+                    assert_eq!(buf[(heart_x - 1, y)].symbol(), " ");
+                    assert_eq!(click(heart_x - 1, y), None);
+                }
+            }
+        }
     }
 
-    /// 下载图标格在爱心左侧隔一格；画不下三格时留给爱心，不画也不可点。
     #[test]
-    fn download_cell_sits_left_of_the_heart() {
-        let meta = rect(10, 4, 26, 3);
-        assert_eq!(download_cell(meta), Some((10 + 26 - 3, 4)));
-        assert_eq!(download_cell(rect(0, 0, 2, 1)), None);
-        assert_eq!(download_cell(rect(0, 0, 1, 1)), None);
-        assert_eq!(download_cell(Rect::default()), None);
+    fn title_icon_geometry_omits_undrawn_or_clipped_glyphs() {
+        for mode in [
+            crate::data::icons::IconMode::Nerd,
+            crate::data::icons::IconMode::Ascii,
+        ] {
+            let mut app = state(Overlay::None);
+            app.config.icon_mode = mode;
+            app.download_state = crate::tmplayer::DownloadIconState::NotDownloaded;
+            for meta in [Rect::default(), rect(3, 7, 0, 3), rect(3, 7, 12, 0)] {
+                assert_eq!(heart_cells(meta, &app), None);
+                assert_eq!(download_cells(meta, &app), None);
+                let layout = UiLayout {
+                    info_meta: meta,
+                    ..UiLayout::default()
+                };
+                assert_eq!(hit_test(&layout, &app, meta.x, meta.y), None);
+            }
+            let width = unicode_width::UnicodeWidthStr::width(
+                crate::data::icons::UiIcons::for_mode(mode).heart(false),
+            ) as u16;
+            assert_eq!(heart_cells(rect(0, 0, width, 1), &app), Some((0, 0, width)));
+            assert_eq!(heart_cells(rect(0, 0, width - 1, 1), &app), None);
+            assert_eq!(download_cells(rect(0, 0, width + 1, 1), &app), None);
+        }
     }
 
-    /// 下载可用时，爱心左边隔一格是下载按钮；下载不可用（Hidden）时整格不命中。
     #[test]
-    fn clicking_the_download_cell_toggles_download_only_when_visible() {
-        let layout = UiLayout {
-            info_meta: rect(2, 5, 20, 3),
-            ..UiLayout::default()
+    fn halfblock_cover_slides_keep_both_cached_images_colored_and_clipped() {
+        use crate::tmplayer::app::state::CoverSnapshot;
+        use crate::tmplayer::render::halfblock_cover::HalfblockCovers;
+        use ratatui::buffer::Buffer;
+        use ratatui::style::Color;
+        use std::io::Cursor;
+        use std::time::{Duration, Instant};
+
+        let encode = |rgb| {
+            let image = image::RgbImage::from_pixel(4, 4, image::Rgb(rgb));
+            let mut bytes = Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgb8(image)
+                .write_to(&mut bytes, image::ImageFormat::Png)
+                .unwrap();
+            bytes.into_inner()
         };
-
         let mut app = state(Overlay::None);
-        app.download_state = crate::tmplayer::DownloadIconState::NotDownloaded;
-        assert_eq!(
-            hit_test(&layout, &app, 2 + 20 - 3, 5),
-            Some(Action::ToggleDownload)
-        );
-        assert_eq!(
-            hit_test(&layout, &app, 2 + 20 - 2, 5),
-            None,
-            "图标与爱心之间是空格"
-        );
-        assert_eq!(
-            hit_test(&layout, &app, 2 + 20 - 1, 5),
-            Some(Action::ToggleFavorite),
-            "下载图标不影响爱心那一格"
-        );
+        app.config.graphics_protocol = crate::data::config::GraphicsProtocol::Halfblocks;
+        let cover = info_panel::layout(rect(0, 0, 120, 40), 120).cover;
+        let red = Color::Rgb(255, 0, 0);
+        let blue = Color::Rgb(0, 0, 255);
+        let mut halfblocks = HalfblockCovers::new();
+        let mut from = CoverSnapshot::from(&app.player.track);
+        from.cover = Some(encode([255, 0, 0]));
+        from.cover_hash = Some(1);
+        let mut to = from.clone();
+        to.cover = Some(encode([0, 0, 255]));
+        to.cover_hash = Some(2);
+        let content = info_panel::cover_content_rect(cover);
+        let mut first = Buffer::empty(rect(0, 0, 120, 40));
+        let mut second = first.clone();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            halfblocks.poll();
+            halfblocks.paint(&mut first, content, 1, from.cover.as_deref().unwrap());
+            halfblocks.paint(&mut second, content, 2, to.cover.as_deref().unwrap());
+            if first[(content.x, content.y)].fg == red && second[(content.x, content.y)].fg == blue
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "color cover worker did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
 
-        let hidden = state(Overlay::None);
-        assert_eq!(
-            hidden.download_state,
-            crate::tmplayer::DownloadIconState::Hidden
-        );
-        assert_eq!(hit_test(&layout, &hidden, 2 + 20 - 3, 5), None);
+        for border in [false, true] {
+            app.config.album_border = border;
+            for dir in [-1, 1] {
+                let started_at = Instant::now();
+                app.start_cover_anim(from.clone(), to.clone(), dir, started_at);
+                app.last_frame = started_at + Duration::from_millis(110);
+                let (_, buffer) = render_to_buffer_sized(120, 40, &mut app, |f, app, _| {
+                    info_panel::render(f, f.area(), 120, app);
+                    paint_halfblock_cover(f.buffer_mut(), &mut halfblocks, cover, app);
+                });
+                let left = &buffer[(cover.x + cover.width / 4, content.y)];
+                let right = &buffer[(cover.x + cover.width * 3 / 4, content.y)];
+                assert_eq!(left.symbol(), "▀");
+                assert_eq!(right.symbol(), "▀");
+                assert_eq!(left.fg, if dir < 0 { red } else { blue });
+                assert_eq!(right.fg, if dir < 0 { blue } else { red });
+                for y in buffer.area.top()..buffer.area.bottom() {
+                    for x in buffer.area.left()..buffer.area.right() {
+                        if buffer[(x, y)].symbol() == "▀" {
+                            assert!(cover.contains((x, y).into()), "cover escaped its clip");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rendered_controls_match_nerd_and_ascii_glyph_widths() {
+        use crate::data::icons::{IconMode, UiIcons};
+        use crate::tmplayer::app::state::{PlaybackState, RepeatMode};
+        use unicode_width::UnicodeWidthStr;
+
+        for mode in [IconMode::Nerd, IconMode::Ascii] {
+            for playing in [false, true] {
+                for repeat in [
+                    RepeatMode::Sequence,
+                    RepeatMode::Shuffle,
+                    RepeatMode::LoopAll,
+                    RepeatMode::LoopOne,
+                ] {
+                    let mut app = state(Overlay::None);
+                    app.config.icon_mode = mode;
+                    app.player.playback = if playing {
+                        PlaybackState::Playing
+                    } else {
+                        PlaybackState::Paused
+                    };
+                    app.player.repeat_mode = repeat;
+                    let icons = UiIcons::for_mode(mode);
+                    let labels = [
+                        icons.previous(),
+                        icons.play_pause(playing),
+                        icons.next(),
+                        match repeat {
+                            RepeatMode::Sequence => icons.sequence(),
+                            RepeatMode::Shuffle => icons.shuffle(),
+                            RepeatMode::LoopAll => icons.loop_all(),
+                            RepeatMode::LoopOne => icons.loop_one(),
+                        },
+                    ];
+                    let actions = [
+                        Action::Prev,
+                        Action::TogglePlayPause,
+                        Action::Next,
+                        Action::ToggleRepeatMode,
+                    ];
+                    let line_width =
+                        labels.iter().map(|label| label.width()).sum::<usize>() as u16 + 3;
+                    for area_width in [120, 7] {
+                        let controls = rect(0, 0, area_width, 1);
+                        let layout = UiLayout {
+                            info_controls: controls,
+                            ..UiLayout::default()
+                        };
+                        let (_, buffer) = render_to_buffer_sized(120, 1, &mut app, |f, app, _| {
+                            control_buttons::render(f, controls, app);
+                        });
+                        let mut x = (area_width / 2).saturating_sub(line_width.min(area_width) / 2);
+                        for (label, action) in labels.into_iter().zip(actions) {
+                            for ch in label.chars() {
+                                if x < area_width {
+                                    assert_eq!(buffer[(x, 0)].symbol(), ch.to_string());
+                                    assert_eq!(hit_test(&layout, &app, x, 0), Some(action));
+                                }
+                                x += 1;
+                            }
+                            if x < area_width {
+                                assert_eq!(
+                                    hit_test(&layout, &app, x, 0),
+                                    None,
+                                    "control separator is not clickable"
+                                );
+                            }
+                            x += 1;
+                        }
+                        assert_eq!(
+                            hit_test(&layout, &app, area_width, 0),
+                            None,
+                            "clipped control is not clickable"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// 作者名贴 meta 块第 2 行左端：只有名字画出来的那几格可点，行尾空白不算。

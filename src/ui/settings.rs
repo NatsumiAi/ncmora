@@ -206,7 +206,7 @@ fn draw_playback_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
         BarChannels::Stereo => "Stereo",
     };
 
-    let items = vec![
+    let items = [
         format!(
             "{}: {}",
             l(app, "可视化", "Visualization"),
@@ -423,8 +423,12 @@ fn draw_download_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
     });
 
     let mut lines: Vec<Line> = Vec::with_capacity(crate::app::SETTINGS_DOWNLOAD_ITEMS);
-    for idx in 0..crate::app::SETTINGS_DOWNLOAD_ITEMS {
-        let style = row_styles[idx];
+    for (idx, style) in row_styles
+        .iter()
+        .copied()
+        .enumerate()
+        .take(crate::app::SETTINGS_DOWNLOAD_ITEMS)
+    {
         let spans: Vec<Span> = match idx {
             0 => vec![Span::styled(
                 format!("  {}: {}", l(app, "音质", "Audio Quality"), quality),
@@ -656,7 +660,9 @@ fn draw_keybind_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
         Style::default().fg(app.theme.color_subtext()),
     )));
 
-    let focus_index = app.settings.keybind_rebinding
+    let focus_index = app
+        .settings
+        .keybind_rebinding
         .unwrap_or(app.settings.keybind_selected);
     let visible_rows = rows[1].height as usize;
     let total_rows = lines.len();
@@ -1274,6 +1280,25 @@ fn l<'a>(app: &App, zh: &'a str, en: &'a str) -> &'a str {
     }
 }
 
+fn on_off(app: &App, enabled: bool) -> &'static str {
+    match app.config.language {
+        Language::Zh => {
+            if enabled {
+                "开"
+            } else {
+                "关"
+            }
+        }
+        Language::En => {
+            if enabled {
+                "On"
+            } else {
+                "Off"
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1393,24 +1418,5 @@ mod tests {
     #[test]
     fn scrolled_rows_is_empty_without_room() {
         assert!(scrolled_rows(crate::app::SETTINGS_KEYBIND_ITEMS, 0, 3).is_empty());
-    }
-}
-
-fn on_off(app: &App, enabled: bool) -> &'static str {
-    match app.config.language {
-        Language::Zh => {
-            if enabled {
-                "开"
-            } else {
-                "关"
-            }
-        }
-        Language::En => {
-            if enabled {
-                "On"
-            } else {
-                "Off"
-            }
-        }
     }
 }

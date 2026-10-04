@@ -9,7 +9,6 @@ pub mod utils;
 use anyhow::Result;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,6 +43,7 @@ pub struct FullscreenBootstrap {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub enum FullscreenExit {
     BackToHost,
     BackToHostOpenSettings,
@@ -106,7 +106,6 @@ pub enum DownloadIconState {
     Done,
 }
 
-
 pub trait HostPlaybackBridge {
     async fn tick(&mut self);
     fn metadata_signature(&self) -> u64;
@@ -152,7 +151,6 @@ pub async fn run_fullscreen(
     app::event_loop::run(&mut app, host_bridge).await
 }
 
-
 fn apply_bootstrap(app: &mut app::state::AppState, bootstrap: FullscreenBootstrap) {
     let mut playlist = data::playlist::Playlist::default();
     let mut tracks: Vec<app::state::TrackMetadata> = Vec::new();
@@ -165,21 +163,20 @@ fn apply_bootstrap(app: &mut app::state::AppState, bootstrap: FullscreenBootstra
                 current.title.clone()
             };
             playlist.items.push(data::playlist::PlaylistItem {
-                path: PathBuf::from("ncm://seed/current"),
+                song_id: None,
                 title,
             });
             tracks.push(track_from_seed(current));
         }
     } else {
         for (idx, item) in bootstrap.playlist.iter().enumerate() {
-            let id = item.id.clone().unwrap_or_else(|| format!("seed-{idx}"));
             let title = if item.title.trim().is_empty() {
                 format!("Track {}", idx + 1)
             } else {
                 item.title.clone()
             };
             playlist.items.push(data::playlist::PlaylistItem {
-                path: PathBuf::from(format!("ncm://{id}")),
+                song_id: item.id.clone(),
                 title,
             });
             tracks.push(app::state::TrackMetadata {

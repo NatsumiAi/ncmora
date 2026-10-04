@@ -6,7 +6,10 @@ pub struct Ema {
 
 impl Ema {
     pub fn new(alpha: f32, len: usize) -> Self {
-        Self { alpha: alpha.clamp(0.0, 1.0), state: vec![0.0; len] }
+        Self {
+            alpha: alpha.clamp(0.0, 1.0),
+            state: vec![0.0; len],
+        }
     }
 
     pub fn reset(&mut self) {
@@ -29,7 +32,38 @@ impl Ema {
         }
         n
     }
+}
 
-    pub fn len(&self) -> usize { self.state.len() }
-    pub fn is_empty(&self) -> bool { self.state.is_empty() }
+#[cfg(test)]
+mod tests {
+    use super::Ema;
+
+    #[test]
+    fn smooths_into_reused_output_and_resets_between_streams() {
+        let mut smoother = Ema::new(0.35, 2);
+        let mut output = [0.0; 2];
+        assert_eq!(smoother.apply_in_place(&[1.0, 0.0], &mut output), 2);
+        assert_eq!(output, [0.35, 0.0]);
+        smoother.apply_in_place(&[1.0, 1.0], &mut output);
+        assert!((output[0] - 0.5775).abs() < 0.00001);
+        assert_eq!(output[1], 0.35);
+        smoother.reset();
+        smoother.apply_in_place(&[0.0, 1.0], &mut output);
+        assert_eq!(output, [0.0, 0.35]);
+    }
+
+    #[test]
+    fn stereo_channels_keep_independent_history() {
+        let mut left = Ema::new(0.35, 1);
+        let mut right = Ema::new(0.35, 1);
+        let (mut left_out, mut right_out) = ([0.0], [0.0]);
+        left.apply_in_place(&[1.0], &mut left_out);
+        right.apply_in_place(&[0.0], &mut right_out);
+        assert_eq!(left_out, [0.35]);
+        assert_eq!(right_out, [0.0]);
+        left.apply_in_place(&[0.0], &mut left_out);
+        right.apply_in_place(&[1.0], &mut right_out);
+        assert!((left_out[0] - 0.2275).abs() < 0.00001);
+        assert_eq!(right_out, [0.35]);
+    }
 }

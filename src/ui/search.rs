@@ -1,7 +1,7 @@
-use crate::app::{ARTIST_CARD_ROWS, App, SearchItemKind};
-use crate::data::icons::UiIcons;
 use crate::app::controllers::SearchController;
+use crate::app::{ARTIST_CARD_ROWS, App, SearchItemKind};
 use crate::data::config::Language;
+use crate::data::icons::UiIcons;
 use crate::ui::page_lyrics;
 use crate::ui::player_bar;
 use ratatui::Frame;
@@ -392,7 +392,8 @@ fn render_search_row(
         .unwrap_or_else(|| app.search.results()[item_idx].right_label.clone());
     let left = format!(
         "{:02}. {}",
-        ordinal, app.search.results()[item_idx].left_label
+        ordinal,
+        app.search.results()[item_idx].left_label
     );
 
     // 下载图标落在右侧标签（单曲行就是时长）左边：图标 + 一列分隔空格。

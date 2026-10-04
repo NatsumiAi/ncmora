@@ -1,5 +1,6 @@
 use super::{AuthorState, HomeSidebarState, HomeState, PlaylistState, PrivateRoamState};
 
+#[derive(Default)]
 pub(crate) struct BrowseController {
     pub home: HomeState,
     pub home_sidebar: HomeSidebarState,
@@ -9,21 +10,6 @@ pub(crate) struct BrowseController {
     pub(super) home_sidebar_fetch: Option<super::HomeSidebarFetchFuture>,
     pub(super) author_fetch: Option<super::AuthorFetchFuture>,
     pub(super) playlist_fetch: Option<super::PlaylistFetchSlot>,
-}
-
-impl Default for BrowseController {
-    fn default() -> Self {
-        Self {
-            home: HomeState::default(),
-            home_sidebar: HomeSidebarState::default(),
-            playlist: PlaylistState::default(),
-            private_roam: PrivateRoamState::default(),
-            author: AuthorState::default(),
-            home_sidebar_fetch: None,
-            author_fetch: None,
-            playlist_fetch: None,
-        }
-    }
 }
 
 impl BrowseController {
@@ -38,7 +24,11 @@ impl BrowseController {
         self.private_roam = PrivateRoamState::default();
     }
 
-    pub(super) fn apply_playlist(&mut self, fetch: super::PlaylistFetch, api: &super::ApiState) -> Option<super::LikedRefresh> {
+    pub(super) fn apply_playlist(
+        &mut self,
+        fetch: super::PlaylistFetch,
+        api: &super::ApiState,
+    ) -> Option<super::LikedRefresh> {
         self.playlist_fetch = None;
         self.playlist.id = Some(fetch.id);
         self.playlist.title = fetch.title;

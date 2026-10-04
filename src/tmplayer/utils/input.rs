@@ -1,5 +1,5 @@
-use crate::tmplayer::app::state::Overlay;
 use crate::data::config::Config;
+use crate::tmplayer::app::state::Overlay;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -47,7 +47,6 @@ pub enum Action {
     PlaylistDown,
     PlaylistSelect(usize),
 
-
     SeekToFraction(f32),
 
     PathChar(char),
@@ -78,7 +77,6 @@ pub enum Action {
 }
 
 pub fn map_key(ev: KeyEvent, overlay: Overlay, config: &Config) -> Action {
-
     // modal-specific handling first
     if overlay == Overlay::SettingsModal {
         return match ev.code {
@@ -104,7 +102,6 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay, config: &Config) -> Action {
             _ => Action::None,
         };
     }
-
 
     if overlay == Overlay::LyricsSettingsModal {
         return match ev.code {
@@ -406,12 +403,11 @@ fn normalize_keybind_token(token: &str) -> Option<String> {
         _ => {}
     }
 
-    if let Some(rest) = lower.strip_prefix('f') {
-        if let Ok(num) = rest.parse::<u8>() {
-            if num > 0 {
-                return Some(format!("F{}", num));
-            }
-        }
+    if let Some(rest) = lower.strip_prefix('f')
+        && let Ok(num) = rest.parse::<u8>()
+        && num > 0
+    {
+        return Some(format!("F{}", num));
     }
 
     let mut chars = token.chars();

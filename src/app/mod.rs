@@ -6,13 +6,15 @@ pub(crate) mod player;
 mod startup;
 pub(crate) mod streaming;
 
+pub(crate) mod browse_controller;
+pub(crate) mod download_controller;
+pub(crate) mod input_controller;
 pub(crate) mod playback_controller;
 pub(crate) mod settings_controller;
-pub(crate) mod browse_controller;
-pub(crate) mod input_controller;
-pub(crate) mod download_controller;
 pub(crate) mod startup_controller;
-use crate::app::player::{AudioPlayer, AudioPlayerState, cleanup_cache_dir, is_nonempty_file, resolve_cache_root};
+use crate::app::player::{
+    AudioPlayer, AudioPlayerState, cleanup_cache_dir, is_nonempty_file, resolve_cache_root,
+};
 use crate::data::config::{AudioQuality, BarChannels, BarNumber, Language, VisualizeMode};
 use crate::data::config::{Config, GraphicsProtocol};
 use crate::data::playback_session;
@@ -59,22 +61,22 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthChar;
 
+use crate::data::atomic_file::write_atomic;
+use crate::data::persistence::{PersistenceHandle, PersistenceWorker};
 use api::ApiState;
+use browse_controller::BrowseController;
+use controllers::SearchController;
 use download::{
     DownloadEvent, DownloadManager, DownloadRequest, DownloadRow, DownloadRowCache, DownloadState,
     DownloadTarget,
 };
+use download_controller::DownloadController;
+use input_controller::InputController;
 use mpris_bridge::{MprisBridge, MprisControlEvent, MprisSyncPayload};
-use controllers::SearchController;
 use playback_controller::PlaybackController;
 use settings_controller::SettingsController;
 use startup::StartupInit;
-use browse_controller::BrowseController;
-use input_controller::InputController;
-use download_controller::DownloadController;
 use startup_controller::StartupController;
-use crate::data::atomic_file::write_atomic;
-use crate::data::persistence::{PersistenceHandle, PersistenceWorker};
 use streaming::StreamingReader;
 
 const MAX_INPUT_LEN: usize = 64;
@@ -318,10 +320,10 @@ impl LoginState {
         if ch.is_control() || !self.is_input_focused() {
             return;
         }
-        if let Some(value) = self.active_input_mut() {
-            if value.chars().count() < MAX_INPUT_LEN {
-                value.push(ch);
-            }
+        if let Some(value) = self.active_input_mut()
+            && value.chars().count() < MAX_INPUT_LEN
+        {
+            value.push(ch);
         }
     }
 
@@ -336,6 +338,7 @@ impl LoginState {
 }
 
 type SharedFuture<T> = Shared<Pin<Box<dyn Future<Output = Option<T>>>>>;
+type HomeSidebarTask = Pin<Box<dyn Future<Output = Option<Result<HomeSidebarFetch, String>>>>>;
 
 /// 侧边栏歌单的一次拉取结果。异步任务不持有 `&mut App`，
 /// 取完由 `tick_home_sidebar_fetch` 搬进状态。
@@ -1312,7 +1315,9 @@ impl HomeTile {
         cover_url: Option<String>,
     ) -> Self {
         let mut cover = CoverFetchState::default();
-        cover_url.map(|x| cover.load(api.clone(), x));
+        if let Some(x) = cover_url {
+            cover.load(api.clone(), x)
+        }
         Self {
             id,
             title,
@@ -1951,7 +1956,6 @@ impl SearchScope {
     }
 }
 
-
 #[derive(Clone)]
 pub struct PlaylistState {
     pub id: Option<String>,
@@ -2134,7 +2138,9 @@ impl AuthorTile {
         kind: AuthorTileKind,
     ) -> Self {
         let mut cover = CoverFetchState::default();
-        cover_url.map(|x| cover.load(api.clone(), x));
+        if let Some(x) = cover_url {
+            cover.load(api.clone(), x)
+        }
         Self {
             kind,
             title,
@@ -2372,7 +2378,6 @@ impl PlaybackRepeatMode {
             Self::LoopOne => Self::Sequence,
         }
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2984,7 +2989,10 @@ impl App {
     }
     pub async fn tick(&mut self) {
         if let Some(error) = self.persistence.pending_error() {
-            self.set_runtime_status(format!("{}: {error}", self.lang_text("保存失败", "Save failed")));
+            self.set_runtime_status(format!(
+                "{}: {error}",
+                self.lang_text("保存失败", "Save failed")
+            ));
         }
         self.tick_audio().await;
         self.tick_cover_fetch();
@@ -3013,10 +3021,10 @@ impl App {
             }
 
             let now = Instant::now();
-            if let Some(last) = self.qr_last_poll_at {
-                if now.duration_since(last) < Duration::from_millis(1400) {
-                    return;
-                }
+            if let Some(last) = self.qr_last_poll_at
+                && now.duration_since(last) < Duration::from_millis(1400)
+            {
+                return;
             }
 
             self.qr_last_poll_at = Some(now);
@@ -3100,10 +3108,10 @@ impl App {
             | KeybindAction::Next
             | KeybindAction::TogglePlayPause
             | KeybindAction::ToggleMode
-            | KeybindAction::ToggleLikeCollapsed => {
-                if self.can_execute_global_hotkey() {
-                    self.trigger_keybind_action(action).await;
-                }
+            | KeybindAction::ToggleLikeCollapsed
+                if self.can_execute_global_hotkey() =>
+            {
+                self.trigger_keybind_action(action).await;
             }
             _ => {}
         }
@@ -3215,16 +3223,16 @@ impl App {
             self.play_next_hotkey().await;
             return;
         }
-        if let Some(rect) = hits.progress {
-            if rect.contains(col, row) {
-                let relative_x = col.saturating_sub(rect.x) as f32;
-                let ratio = if rect.width <= 1 {
-                    0.0
-                } else {
-                    (relative_x / (rect.width - 1) as f32).clamp(0.0, 1.0)
-                };
-                self.seek_to_ratio(ratio);
-            }
+        if let Some(rect) = hits.progress
+            && rect.contains(col, row)
+        {
+            let relative_x = col.saturating_sub(rect.x) as f32;
+            let ratio = if rect.width <= 1 {
+                0.0
+            } else {
+                (relative_x / (rect.width - 1) as f32).clamp(0.0, 1.0)
+            };
+            self.seek_to_ratio(ratio);
         }
     }
 
@@ -3389,16 +3397,16 @@ impl App {
             return;
         }
 
-        if self.config.page_lyrics_snap {
-            if let Some(layout) = self.page_lyrics_layout {
-                let (pos_x, pos_y) = page_lyrics::snap_pos(
-                    layout.content_rect(),
-                    layout.panel_rect(),
-                    self.page_lyrics_pos(),
-                );
-                self.config.page_lyrics_pos_x = pos_x;
-                self.config.page_lyrics_pos_y = pos_y;
-            }
+        if self.config.page_lyrics_snap
+            && let Some(layout) = self.page_lyrics_layout
+        {
+            let (pos_x, pos_y) = page_lyrics::snap_pos(
+                layout.content_rect(),
+                layout.panel_rect(),
+                self.page_lyrics_pos(),
+            );
+            self.config.page_lyrics_pos_x = pos_x;
+            self.config.page_lyrics_pos_y = pos_y;
         }
 
         self.persist_config();
@@ -3472,10 +3480,10 @@ impl App {
         if self.page_lyrics_grab.is_some() {
             return true;
         }
-        if let Some(started_at) = self.input.search_box_anim_started_at {
-            if started_at.elapsed() < SEARCH_BOX_ANIM_DURATION {
-                return true;
-            }
+        if let Some(started_at) = self.input.search_box_anim_started_at
+            && started_at.elapsed() < SEARCH_BOX_ANIM_DURATION
+        {
+            return true;
         }
         if self.browse.home_sidebar.anim_started_at.is_some() {
             return true;
@@ -3537,7 +3545,8 @@ impl App {
     }
 
     pub fn now_playing_artist_text(&self) -> String {
-        self.playback.now_playing
+        self.playback
+            .now_playing
             .as_ref()
             .map(|track| track.artist.clone())
             .unwrap_or_default()
@@ -3832,10 +3841,15 @@ impl App {
             return;
         }
 
-        let fallback_total = self.playback.now_playing
+        let fallback_total = self
+            .playback
+            .now_playing
             .as_ref()
             .map(|track| Duration::from_millis(track.duration_ms.max(0) as u64));
-        let _ = self.playback.audio_player.seek_to_ratio(ratio, fallback_total);
+        let _ = self
+            .playback
+            .audio_player
+            .seek_to_ratio(ratio, fallback_total);
         self.playback.playback_state = map_audio_state(self.playback.audio_player.state());
     }
 
@@ -3919,7 +3933,9 @@ impl App {
 
     fn sync_mpris_exposure(&mut self) {
         let now = Instant::now();
-        let signature = self.playback.now_playing
+        let signature = self
+            .playback
+            .now_playing
             .as_ref()
             .map(mpris_metadata_signature)
             .unwrap_or(0);
@@ -4111,10 +4127,10 @@ impl App {
 
     fn can_execute_global_hotkey(&mut self) -> bool {
         let now = Instant::now();
-        if let Some(last_at) = self.last_global_hotkey_at {
-            if now.duration_since(last_at) < Duration::from_millis(GLOBAL_HOTKEY_COOLDOWN_MS) {
-                return false;
-            }
+        if let Some(last_at) = self.last_global_hotkey_at
+            && now.duration_since(last_at) < Duration::from_millis(GLOBAL_HOTKEY_COOLDOWN_MS)
+        {
+            return false;
         }
         self.last_global_hotkey_at = Some(now);
         true
@@ -4181,8 +4197,7 @@ impl App {
         if self.browse.home_sidebar_fetch.is_none() {
             self.browse.home_sidebar.loading = true;
             let fut = fetch_home_sidebar_playlists(self.api.clone(), self.config.language);
-            let fut: Pin<Box<dyn Future<Output = Option<Result<HomeSidebarFetch, String>>>>> =
-                Box::pin(async move { Some(fut.await) });
+            let fut: HomeSidebarTask = Box::pin(async move { Some(fut.await) });
             self.browse.home_sidebar_fetch = Some(shot_and_share(fut));
         }
     }
@@ -4343,17 +4358,23 @@ impl App {
             self.refresh_now_playing_like_state();
         }
 
-        self.browse.home.status_line = format!("{} {}", self.lang_text("正在加载", "Loading"), title);
+        self.browse.home.status_line =
+            format!("{} {}", self.lang_text("正在加载", "Loading"), title);
 
         match self.load_playlist_detail(&playlist_id).await {
             Ok(()) => {
                 self.playlist_return_page = Page::Home;
                 self.playlist_section_return_snapshot = None;
                 self.browse.home_sidebar.expanded = false;
-                let target = if self.browse.home_sidebar.expanded { 1.0 } else { 0.0 };
+                let target = if self.browse.home_sidebar.expanded {
+                    1.0
+                } else {
+                    0.0
+                };
                 self.browse.home_sidebar.anim_progress = target;
                 self.page = Page::Playlist;
-                self.browse.home.status_line = format!("{} {}", self.lang_text("已打开", "Opened"), title);
+                self.browse.home.status_line =
+                    format!("{} {}", self.lang_text("已打开", "Opened"), title);
             }
             Err(err) => {
                 self.browse.home.status_line = format!(
@@ -4594,11 +4615,11 @@ impl App {
             return;
         }
 
-        if self.playback.playback_state == PlaybackRuntimeState::Stopped {
-            if let Some(index) = self.playback.playback_index {
-                self.play_queue_index(index, false).await;
-                return;
-            }
+        if self.playback.playback_state == PlaybackRuntimeState::Stopped
+            && let Some(index) = self.playback.playback_index
+        {
+            self.play_queue_index(index, false).await;
+            return;
         }
 
         self.playback.audio_player.toggle_play_pause();
@@ -4611,18 +4632,22 @@ impl App {
             return;
         }
 
-        let current = self.playback.playback_index
+        let current = self
+            .playback
+            .playback_index
             .unwrap_or(0)
             .min(self.playback.playback_queue.len() - 1);
         let target = match self.playback.playback_repeat_mode {
             PlaybackRepeatMode::Sequence => current.checked_sub(1),
-            PlaybackRepeatMode::LoopAll => {
-                Some((current + self.playback.playback_queue.len() - 1) % self.playback.playback_queue.len())
-            }
+            PlaybackRepeatMode::LoopAll => Some(
+                (current + self.playback.playback_queue.len() - 1)
+                    % self.playback.playback_queue.len(),
+            ),
             PlaybackRepeatMode::LoopOne => Some(current),
-            PlaybackRepeatMode::Shuffle => {
-                Some(pick_shuffle_index(self.playback.playback_queue.len(), current))
-            }
+            PlaybackRepeatMode::Shuffle => Some(pick_shuffle_index(
+                self.playback.playback_queue.len(),
+                current,
+            )),
         };
 
         if let Some(index) = target {
@@ -4636,7 +4661,9 @@ impl App {
             return;
         }
 
-        let current = self.playback.playback_index
+        let current = self
+            .playback
+            .playback_index
             .unwrap_or(0)
             .min(self.playback.playback_queue.len() - 1);
         let target = match self.playback.playback_repeat_mode {
@@ -4649,9 +4676,10 @@ impl App {
             }
             PlaybackRepeatMode::LoopAll => Some((current + 1) % self.playback.playback_queue.len()),
             PlaybackRepeatMode::LoopOne => Some(current),
-            PlaybackRepeatMode::Shuffle => {
-                Some(pick_shuffle_index(self.playback.playback_queue.len(), current))
-            }
+            PlaybackRepeatMode::Shuffle => Some(pick_shuffle_index(
+                self.playback.playback_queue.len(),
+                current,
+            )),
         };
 
         if let Some(index) = target {
@@ -4735,12 +4763,17 @@ impl App {
 
         let fut = song_like_check_request(self.api.clone(), song_id.clone());
         let fut: LikeVerifyTask = Box::pin(async move { Some(fut.await) });
-        self.playback.like_machine.begin_verify(song_id, shot_and_share(fut));
+        self.playback
+            .like_machine
+            .begin_verify(song_id, shot_and_share(fut));
     }
 
     /// 当前曲目 id。
     fn current_song_id(&self) -> Option<String> {
-        self.playback.now_playing.as_ref().map(|track| track.song_id.clone())
+        self.playback
+            .now_playing
+            .as_ref()
+            .map(|track| track.song_id.clone())
     }
 
     /// 重新解析下载根目录（设置里改了路径、或全屏页同步回来时调用）。
@@ -4906,7 +4939,11 @@ impl App {
                 &candidate.album,
             ),
         };
-        match self.downloads.manager.known_state_of(&candidate.song_id, &target) {
+        match self
+            .downloads
+            .manager
+            .known_state_of(&candidate.song_id, &target)
+        {
             None => {
                 self.downloads.pending_intent = Some(candidate);
                 self.set_runtime_status(self.lang_text(
@@ -5055,7 +5092,11 @@ impl App {
         let target = pending.target;
         self.playback.like_machine.toggle = None;
 
-        match self.playback.like_machine.on_toggle_result(&song_id, target, result) {
+        match self
+            .playback
+            .like_machine
+            .on_toggle_result(&song_id, target, result)
+        {
             ToggleOutcome::Settled { liked } => {
                 self.sync_like_display(&song_id);
                 self.set_runtime_status(if liked {
@@ -5091,7 +5132,11 @@ impl App {
         let song_id = pending.song_id.clone();
         self.playback.like_machine.verify = None;
 
-        if self.playback.like_machine.on_verify_result(&song_id, result) {
+        if self
+            .playback
+            .like_machine
+            .on_verify_result(&song_id, result)
+        {
             self.sync_like_display(&song_id);
         }
     }
@@ -5107,7 +5152,8 @@ impl App {
 
         let fut = like_song_request(self.api.clone(), song_id.clone(), target);
         let fut: LikeToggleTask = Box::pin(async move { Some(fut.await) });
-        self.playback.like_machine
+        self.playback
+            .like_machine
             .begin_toggle(song_id, target, shot_and_share(fut));
     }
 
@@ -5130,7 +5176,9 @@ impl App {
             return;
         }
 
-        let current = self.playback.playback_index
+        let current = self
+            .playback
+            .playback_index
             .unwrap_or(0)
             .min(self.playback.playback_queue.len() - 1);
 
@@ -5163,9 +5211,10 @@ impl App {
             }
             PlaybackRepeatMode::LoopAll => Some((current + 1) % self.playback.playback_queue.len()),
             PlaybackRepeatMode::LoopOne => Some(current),
-            PlaybackRepeatMode::Shuffle => {
-                Some(pick_shuffle_index(self.playback.playback_queue.len(), current))
-            }
+            PlaybackRepeatMode::Shuffle => Some(pick_shuffle_index(
+                self.playback.playback_queue.len(),
+                current,
+            )),
         };
 
         if let Some(index) = target {
@@ -5254,7 +5303,11 @@ impl App {
                 )
                 .await
                 {
-                    Ok(reader) => match self.playback.audio_player.play_streaming(reader, progress_rx).await
+                    Ok(reader) => match self
+                        .playback
+                        .audio_player
+                        .play_streaming(reader, progress_rx)
+                        .await
                     {
                         Ok(()) => ok(self),
                         Err(err) => fail(err, self),
@@ -5325,10 +5378,10 @@ impl App {
             now_mut.cover = Some(bytes.clone());
         }
 
-        if let Some(index) = self.playback.playback_index {
-            if let Some(slot) = self.playback.playback_queue.get_mut(index) {
-                slot.cover = Some(bytes);
-            }
+        if let Some(index) = self.playback.playback_index
+            && let Some(slot) = self.playback.playback_queue.get_mut(index)
+        {
+            slot.cover = Some(bytes);
         }
     }
 
@@ -5355,10 +5408,10 @@ impl App {
         }
 
         let now_at = Instant::now();
-        if let Some(last) = self.cover_fetch_last_attempt_at {
-            if now_at.duration_since(last) < Duration::from_millis(COVER_FETCH_RETRY_MS) {
-                return;
-            }
+        if let Some(last) = self.cover_fetch_last_attempt_at
+            && now_at.duration_since(last) < Duration::from_millis(COVER_FETCH_RETRY_MS)
+        {
+            return;
         }
 
         let generation = self.cover_fetch_generation.wrapping_add(1);
@@ -5375,7 +5428,9 @@ impl App {
     }
 
     fn tick_cover_fetch(&mut self) {
-        let needs_schedule = self.playback.now_playing
+        let needs_schedule = self
+            .playback
+            .now_playing
             .as_ref()
             .map(|now| now.cover.is_none() && now.cover_url.is_some())
             .unwrap_or(false);
@@ -5416,10 +5471,10 @@ impl App {
         if let Some(now_mut) = self.playback.now_playing.as_mut() {
             now_mut.lyrics = Some(lyrics.clone());
         }
-        if let Some(index) = self.playback.playback_index {
-            if let Some(slot) = self.playback.playback_queue.get_mut(index) {
-                slot.lyrics = Some(lyrics);
-            }
+        if let Some(index) = self.playback.playback_index
+            && let Some(slot) = self.playback.playback_queue.get_mut(index)
+        {
+            slot.lyrics = Some(lyrics);
         }
     }
 
@@ -5440,10 +5495,10 @@ impl App {
         }
 
         let now_at = Instant::now();
-        if let Some(last) = self.lyric_fetch_last_attempt_at {
-            if now_at.duration_since(last) < Duration::from_millis(LYRICS_FETCH_RETRY_MS) {
-                return;
-            }
+        if let Some(last) = self.lyric_fetch_last_attempt_at
+            && now_at.duration_since(last) < Duration::from_millis(LYRICS_FETCH_RETRY_MS)
+        {
+            return;
         }
 
         let req = LyricFetchRequest {
@@ -5461,7 +5516,9 @@ impl App {
     }
 
     fn tick_lyric_fetch(&mut self) {
-        let needs_schedule = self.playback.now_playing
+        let needs_schedule = self
+            .playback
+            .now_playing
             .as_ref()
             .map(|now| now.lyrics.is_none())
             .unwrap_or(false);
@@ -5488,15 +5545,15 @@ impl App {
                 continue;
             }
 
-            if let (Some(bytes), Some(url)) = (track.cover.take(), track.cover_url.as_deref()) {
-                if let Some(path) = cover_cache_path_for_dir(cover_cache_dir, url) {
-                    let _ = persistence.enqueue(move || {
-                        if let Some(bytes) = validate_cached_cover(bytes) {
-                            write_atomic(&path, &bytes)?;
-                        }
-                        Ok(())
-                    });
-                }
+            if let (Some(bytes), Some(url)) = (track.cover.take(), track.cover_url.as_deref())
+                && let Some(path) = cover_cache_path_for_dir(cover_cache_dir, url)
+            {
+                let _ = persistence.enqueue(move || {
+                    if let Some(bytes) = validate_cached_cover(bytes) {
+                        write_atomic(&path, &bytes)?;
+                    }
+                    Ok(())
+                });
             }
         }
     }
@@ -5504,44 +5561,37 @@ impl App {
     async fn enrich_track_metadata(&mut self, track: &mut PlaybackTrack, allow_network: bool) {
         // Queue switches hydrate through the cover worker after the new track is
         // installed. Neither disk IO nor image decoding delays the transition.
-        if allow_network && track.cover.is_none() {
-            if let Some(url) = track.cover_url.as_deref() {
-                track.cover = self.fetch_cover_with_disk_cache(url).await;
-            }
+        if allow_network
+            && track.cover.is_none()
+            && let Some(url) = track.cover_url.as_deref()
+        {
+            track.cover = self.fetch_cover_with_disk_cache(url).await;
         }
 
-        if allow_network && track.cover.is_none() {
-            if let Ok(detail) = self.api.song_detail(&track.song_id).await {
-                if let Some(song) = detail
-                    .body
-                    .get("songs")
-                    .and_then(|value| value.as_array())
-                    .and_then(|items| items.first())
-                {
-                    if let Some(cover_url) =
-                        song.pointer("/al/picUrl").and_then(|value| value.as_str())
-                    {
-                        if let Some(bytes) = self.fetch_cover_with_disk_cache(cover_url).await {
-                            track.cover = Some(bytes);
-                        }
-                    }
-                }
-            }
+        if allow_network
+            && track.cover.is_none()
+            && let Ok(detail) = self.api.song_detail(&track.song_id).await
+            && let Some(song) = detail
+                .body
+                .get("songs")
+                .and_then(|value| value.as_array())
+                .and_then(|items| items.first())
+            && let Some(cover_url) = song.pointer("/al/picUrl").and_then(|value| value.as_str())
+            && let Some(bytes) = self.fetch_cover_with_disk_cache(cover_url).await
+        {
+            track.cover = Some(bytes);
         }
 
-        if allow_network && track.lyrics.is_none() {
-            if let Ok(lyric) = self.api.lyric(&track.song_id).await {
-                if let Some(raw_lrc) = lyric
-                    .body
-                    .pointer("/lrc/lyric")
-                    .and_then(|value| value.as_str())
-                {
-                    track.lyrics =
-                        crate::tmplayer::playback::metadata::parse_lrc(raw_lrc).or_else(|| {
-                            crate::tmplayer::playback::metadata::parse_plain_lyrics(raw_lrc)
-                        });
-                }
-            }
+        if allow_network
+            && track.lyrics.is_none()
+            && let Ok(lyric) = self.api.lyric(&track.song_id).await
+            && let Some(raw_lrc) = lyric
+                .body
+                .pointer("/lrc/lyric")
+                .and_then(|value| value.as_str())
+        {
+            track.lyrics = crate::tmplayer::playback::metadata::parse_lrc(raw_lrc)
+                .or_else(|| crate::tmplayer::playback::metadata::parse_plain_lyrics(raw_lrc));
         }
     }
 
@@ -5605,7 +5655,12 @@ impl App {
     }
 
     async fn play_focused_playlist_track(&mut self) {
-        let Some(track) = self.browse.playlist.tracks.get(self.browse.playlist.focused_idx) else {
+        let Some(track) = self
+            .browse
+            .playlist
+            .tracks
+            .get(self.browse.playlist.focused_idx)
+        else {
             return;
         };
 
@@ -5637,7 +5692,8 @@ impl App {
             AuthorTileKind::HotSong => (
                 self.lang_text("热门歌曲", "Hot Songs").to_string(),
                 self.browse.author.hot_songs.clone(),
-                self.browse.author
+                self.browse
+                    .author
                     .hot_songs
                     .first()
                     .and_then(|track| track.cover_url.clone())
@@ -5646,7 +5702,8 @@ impl App {
             AuthorTileKind::Album => (
                 self.lang_text("专辑", "Albums").to_string(),
                 self.browse.author.albums.clone(),
-                self.browse.author
+                self.browse
+                    .author
                     .albums
                     .first()
                     .and_then(|track| track.cover_url.clone())
@@ -5655,7 +5712,8 @@ impl App {
             AuthorTileKind::Ep => (
                 "EP".to_string(),
                 self.browse.author.eps.clone(),
-                self.browse.author
+                self.browse
+                    .author
                     .eps
                     .first()
                     .and_then(|track| track.cover_url.clone())
@@ -5664,7 +5722,8 @@ impl App {
             AuthorTileKind::Single => (
                 "Single".to_string(),
                 self.browse.author.singles.clone(),
-                self.browse.author
+                self.browse
+                    .author
                     .singles
                     .first()
                     .and_then(|track| track.cover_url.clone())
@@ -5684,7 +5743,9 @@ impl App {
         self.playlist_section_return_snapshot = None;
         // 这一页换成作者页分区：在途的占位拉取作废（同 `apply_playlist_fetch`）。
         self.browse.playlist_fetch = None;
-        self.browse.playlist.id = self.browse.author
+        self.browse.playlist.id = self
+            .browse
+            .author
             .id
             .as_ref()
             .map(|id| format!("artist:{}:{}", id, section_title));
@@ -5697,13 +5758,20 @@ impl App {
             )
             .to_string();
         self.browse.playlist.set_tracks(tracks);
-        section_cover.map(|x| self.browse.playlist.cover.load(self.api.clone(), x));
+        if let Some(x) = section_cover {
+            self.browse.playlist.cover.load(self.api.clone(), x)
+        }
         self.page = Page::Playlist;
     }
 
     async fn open_focused_playlist_album(&mut self) {
         let (album_id, title, fallback_cover_url, track_kind) = {
-            let Some(track) = self.browse.playlist.tracks.get(self.browse.playlist.focused_idx) else {
+            let Some(track) = self
+                .browse
+                .playlist
+                .tracks
+                .get(self.browse.playlist.focused_idx)
+            else {
                 return;
             };
 
@@ -5737,9 +5805,8 @@ impl App {
         match self.load_album_detail(&album_id).await {
             Ok(()) => {
                 self.playlist_section_return_snapshot = section_snapshot;
-                match (&self.browse.playlist.cover.image, fallback_cover_url) {
-                    (None, Some(url)) => self.browse.playlist.cover.load(self.api.clone(), url),
-                    _ => (),
+                if let (None, Some(url)) = (&self.browse.playlist.cover.image, fallback_cover_url) {
+                    self.browse.playlist.cover.load(self.api.clone(), url)
                 }
                 self.set_runtime_status(format!(
                     "{} {}",
@@ -5891,7 +5958,9 @@ impl App {
     }
 
     async fn activate_focused_search_result(&mut self) {
-        let Some(kind) = self.search.results()
+        let Some(kind) = self
+            .search
+            .results()
             .get(self.search.focused_idx)
             .map(|item| item.kind)
         else {
@@ -5947,15 +6016,17 @@ impl App {
             KeyCode::End => {
                 self.input.search_box_cursor = char_count(&self.input.search_box_input);
             }
-            KeyCode::Char(ch) => {
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
-                    self.input.insert(ch);
-                }
+            KeyCode::Char(ch)
+                if (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
+            {
+                self.input.insert(ch);
             }
             _ => {}
         }
 
-        self.input.search_box_cursor = self.input.search_box_cursor
+        self.input.search_box_cursor = self
+            .input
+            .search_box_cursor
             .min(char_count(&self.input.search_box_input));
     }
 
@@ -5967,7 +6038,9 @@ impl App {
             return;
         }
 
-        let visible_h = self.input.search_box_anim_height
+        let visible_h = self
+            .input
+            .search_box_anim_height
             .min(crate::ui::search_box::TARGET_HEIGHT)
             .min(term_h);
         if visible_h < crate::ui::search_box::TARGET_HEIGHT {
@@ -6007,14 +6080,17 @@ impl App {
         }
 
         let rel = col.saturating_sub(inner_x);
-        self.input.search_box_cursor = char_index_for_display_column(&self.input.search_box_input, rel);
+        self.input.search_box_cursor =
+            char_index_for_display_column(&self.input.search_box_input, rel);
     }
 
     /// 设置弹窗内的鼠标点击：单击聚焦该行，400ms 内再点同一行等同 Enter。
     ///
     /// 弹窗盖住整页，未命中行的点击由调用方直接丢弃（不穿透到底层页面）。
     async fn handle_settings_modal_click(&mut self, overlay: Overlay, col: u16, row: u16) {
-        let Some((_, index)) = self.settings.item_hits
+        let Some((_, index)) = self
+            .settings
+            .item_hits
             .iter()
             .find(|(rect, _)| rect.contains(col, row))
             .copied()
@@ -6095,7 +6171,9 @@ impl App {
 
     fn is_double_settings_click(&mut self, overlay: Overlay, index: usize) -> bool {
         let now = Instant::now();
-        let is_double = self.settings.last_click
+        let is_double = self
+            .settings
+            .last_click
             .map(|(at, o, i)| {
                 o == overlay
                     && i == index
@@ -6294,7 +6372,9 @@ impl App {
     ///
     /// 填字面量 `Null` 回车 = 显式禁用下载；填绝对路径恢复。
     fn begin_download_path_edit(&mut self) {
-        let current = self.downloads.root
+        let current = self
+            .downloads
+            .root
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| self.download_display_path());
@@ -6405,7 +6485,8 @@ impl App {
 
     /// 设置弹窗里显示的下载路径（`Null` = 系统里没有可用位置）。
     pub fn download_display_path(&self) -> String {
-        self.downloads.root
+        self.downloads
+            .root
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| crate::app::download::DOWNLOAD_PATH_NULL.to_string())
@@ -6430,14 +6511,13 @@ impl App {
                 KeyCode::Right => self.download_path_edit_move(1),
                 KeyCode::Home => self.download_path_edit_home(),
                 KeyCode::End => self.download_path_edit_end(),
-                KeyCode::Char(ch) => {
+                KeyCode::Char(ch)
                     if !key
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                        && !ch.is_control()
-                    {
-                        self.download_path_edit_insert(ch);
-                    }
+                        && !ch.is_control() =>
+                {
+                    self.download_path_edit_insert(ch);
                 }
                 _ => {}
             }
@@ -6632,10 +6712,10 @@ impl App {
             }
             // 空格等价于点击一次形象：重新计时即打断当前动画重头播放。
             #[cfg(feature = "easter-egg")]
-            KeyCode::Char(' ') if key.modifiers.is_empty() => {
-                if self.about_egg.phase == EasterEggPhase::Active {
-                    self.about_egg.jelly_started_at = Some(Instant::now());
-                }
+            KeyCode::Char(' ')
+                if key.modifiers.is_empty() && self.about_egg.phase == EasterEggPhase::Active =>
+            {
+                self.about_egg.jelly_started_at = Some(Instant::now());
             }
             _ => {}
         }
@@ -6734,22 +6814,20 @@ impl App {
                     self.sync_terminal_size();
                 }
             }
-            9 => {
-                if delta != 0 {
-                    self.config.home_more_recommend = !self.config.home_more_recommend;
-                    self.persist_config();
-                    if self.page == Page::Home {
-                        if let Err(err) = self.load_home_recommendations().await {
-                            self.browse.home.status_line = format!(
-                                "{}: {}",
-                                self.lang_text(
-                                    "推荐歌单刷新失败",
-                                    "Failed to refresh home recommendations",
-                                ),
-                                err
-                            );
-                        }
-                    }
+            9 if delta != 0 => {
+                self.config.home_more_recommend = !self.config.home_more_recommend;
+                self.persist_config();
+                if self.page == Page::Home
+                    && let Err(err) = self.load_home_recommendations().await
+                {
+                    self.browse.home.status_line = format!(
+                        "{}: {}",
+                        self.lang_text(
+                            "推荐歌单刷新失败",
+                            "Failed to refresh home recommendations",
+                        ),
+                        err
+                    );
                 }
             }
             _ => {}
@@ -6848,10 +6926,10 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char(ch) => {
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
-                    self.login.push_char(ch);
-                }
+            KeyCode::Char(ch)
+                if (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
+            {
+                self.login.push_char(ch);
             }
             _ => {}
         }
@@ -6965,7 +7043,9 @@ impl App {
     fn tick_search_box_animation(&mut self) {
         if matches!(self.overlay, Some(Overlay::SearchBox)) {
             // time-based：动画时长与驱动帧率解耦，与 startup_loading 同风格
-            let started_at = self.input.search_box_anim_started_at
+            let started_at = self
+                .input
+                .search_box_anim_started_at
                 .get_or_insert_with(Instant::now);
             let elapsed = started_at.elapsed();
             if elapsed >= SEARCH_BOX_ANIM_DURATION {
@@ -7025,7 +7105,11 @@ impl App {
     }
 
     fn tick_home_sidebar_animation(&mut self) {
-        let target = if self.browse.home_sidebar.expanded { 1.0 } else { 0.0 };
+        let target = if self.browse.home_sidebar.expanded {
+            1.0
+        } else {
+            0.0
+        };
         let state = &mut self.browse.home_sidebar;
         if (state.anim_progress - target).abs() < 0.001 {
             state.anim_progress = target;
@@ -7050,7 +7134,11 @@ impl App {
 
     /// 启动一次侧边栏滑出/收起动画（记录当前进度作为动画起点，支持中途反向）。
     fn animate_home_sidebar(&mut self) {
-        let target = if self.browse.home_sidebar.expanded { 1.0 } else { 0.0 };
+        let target = if self.browse.home_sidebar.expanded {
+            1.0
+        } else {
+            0.0
+        };
         if (self.browse.home_sidebar.anim_progress - target).abs() < 0.001 {
             // 已在目标态：无需动画，清掉可能的残留状态
             self.browse.home_sidebar.anim_progress = target;
@@ -7072,10 +7160,10 @@ impl App {
     }
 
     fn tick_startup_loading(&mut self) {
-        if self.page == Page::Loading {
-            if let Some(target) = self.startup.tick() {
-                self.page = target;
-            }
+        if self.page == Page::Loading
+            && let Some(target) = self.startup.tick()
+        {
+            self.page = target;
         }
     }
 
@@ -7122,28 +7210,28 @@ impl App {
         match self.page {
             Page::Home => {
                 if self.browse.home_sidebar.is_visible() {
-                    if let Some(panel) = self.home_sidebar_panel_hit {
-                        if panel.contains(col, row) {
-                            let sidebar_hit = self
-                                .home_sidebar_playlist_hits
-                                .iter()
-                                .find(|(rect, _)| rect.contains(col, row))
-                                .map(|(_, hit)| *hit);
-                            if let Some(hit) = sidebar_hit {
-                                if self.browse.home_sidebar.expanded {
-                                    self.browse.home_sidebar.set_focus(hit.section, hit.index);
-                                    if self.is_double_content_click(
-                                        Page::Home,
-                                        Self::home_sidebar_double_click_index(hit),
-                                    ) {
-                                        self.open_focused_home_sidebar_playlist().await;
-                                    }
+                    if let Some(panel) = self.home_sidebar_panel_hit
+                        && panel.contains(col, row)
+                    {
+                        let sidebar_hit = self
+                            .home_sidebar_playlist_hits
+                            .iter()
+                            .find(|(rect, _)| rect.contains(col, row))
+                            .map(|(_, hit)| *hit);
+                        if let Some(hit) = sidebar_hit {
+                            if self.browse.home_sidebar.expanded {
+                                self.browse.home_sidebar.set_focus(hit.section, hit.index);
+                                if self.is_double_content_click(
+                                    Page::Home,
+                                    Self::home_sidebar_double_click_index(hit),
+                                ) {
+                                    self.open_focused_home_sidebar_playlist().await;
                                 }
-                                return true;
                             }
-                            self.last_content_click = None;
                             return true;
                         }
+                        self.last_content_click = None;
+                        return true;
                     }
 
                     if self.browse.home_sidebar.expanded {
@@ -7157,14 +7245,14 @@ impl App {
                     .iter()
                     .find(|(rect, _)| rect.contains(col, row))
                     .map(|(_, idx)| *idx);
-                if let Some(idx) = hit {
-                    if idx < self.browse.home.tiles.len() {
-                        self.browse.home.focused_idx = idx;
-                        if self.is_double_content_click(Page::Home, idx) {
-                            self.enter_home_tile().await;
-                        }
-                        return true;
+                if let Some(idx) = hit
+                    && idx < self.browse.home.tiles.len()
+                {
+                    self.browse.home.focused_idx = idx;
+                    if self.is_double_content_click(Page::Home, idx) {
+                        self.enter_home_tile().await;
                     }
+                    return true;
                 }
             }
             Page::Playlist => {
@@ -7186,14 +7274,14 @@ impl App {
                     .iter()
                     .find(|(rect, _)| rect.contains(col, row))
                     .map(|(_, idx)| *idx);
-                if let Some(idx) = hit {
-                    if idx < self.browse.playlist.tracks.len() {
-                        self.browse.playlist.set_focus(idx);
-                        if self.is_double_content_click(Page::Playlist, idx) {
-                            self.play_focused_playlist_track().await;
-                        }
-                        return true;
+                if let Some(idx) = hit
+                    && idx < self.browse.playlist.tracks.len()
+                {
+                    self.browse.playlist.set_focus(idx);
+                    if self.is_double_content_click(Page::Playlist, idx) {
+                        self.play_focused_playlist_track().await;
                     }
+                    return true;
                 }
             }
             Page::Author => {
@@ -7202,14 +7290,14 @@ impl App {
                     .iter()
                     .find(|(rect, _)| rect.contains(col, row))
                     .map(|(_, idx)| *idx);
-                if let Some(idx) = hit {
-                    if idx < self.browse.author.tiles.len() {
-                        self.browse.author.set_focus(idx);
-                        if self.is_double_content_click(Page::Author, idx) {
-                            self.play_focused_author_tile().await;
-                        }
-                        return true;
+                if let Some(idx) = hit
+                    && idx < self.browse.author.tiles.len()
+                {
+                    self.browse.author.set_focus(idx);
+                    if self.is_double_content_click(Page::Author, idx) {
+                        self.play_focused_author_tile().await;
                     }
+                    return true;
                 }
             }
             Page::Search => {
@@ -7230,14 +7318,14 @@ impl App {
                     .iter()
                     .find(|(rect, _)| rect.contains(col, row))
                     .map(|(_, idx)| *idx);
-                if let Some(idx) = hit {
-                    if idx < self.search.results().len() {
-                        self.search.set_focus(idx);
-                        if self.is_double_content_click(Page::Search, idx) {
-                            self.activate_focused_search_result().await;
-                        }
-                        return true;
+                if let Some(idx) = hit
+                    && idx < self.search.results().len()
+                {
+                    self.search.set_focus(idx);
+                    if self.is_double_content_click(Page::Search, idx) {
+                        self.activate_focused_search_result().await;
                     }
+                    return true;
                 }
             }
             _ => {}
@@ -7309,7 +7397,9 @@ impl App {
             return;
         };
 
-        let artist_line = self.playback.now_playing
+        let artist_line = self
+            .playback
+            .now_playing
             .as_ref()
             .map(|track| track.artist.clone())
             .unwrap_or_default();
@@ -7362,7 +7452,9 @@ impl App {
 
         // 标题先显示正在播放的专辑名；解析失败时也只是把错误写进简介。
         let title = {
-            let album = self.playback.now_playing
+            let album = self
+                .playback
+                .now_playing
                 .as_ref()
                 .map(|track| track.album.trim().to_string())
                 .unwrap_or_default();
@@ -7407,26 +7499,32 @@ impl App {
             .clamp_for_vip(self.vip_audio_unlocked);
         config.page_lyrics_pos_x = config.page_lyrics_pos_x.clamp(0.0, 1.0);
         config.page_lyrics_pos_y = config.page_lyrics_pos_y.clamp(0.0, 1.0);
-        if config.download_path != self.config.download_path {
-            if let Some(raw) = config.download_path.as_deref() {
-                if crate::app::download::validate_download_path(raw).await.is_err() {
-                    config.download_path = self.config.download_path.clone();
-                    self.set_runtime_status(self.lang_text(
-                        "下载目录不可写，保留原设置",
-                        "Download directory is not writable; keeping previous setting",
-                    ));
-                }
-            }
+        if config.download_path != self.config.download_path
+            && let Some(raw) = config.download_path.as_deref()
+            && crate::app::download::validate_download_path(raw)
+                .await
+                .is_err()
+        {
+            config.download_path = self.config.download_path.clone();
+            self.set_runtime_status(self.lang_text(
+                "下载目录不可写，保留原设置",
+                "Download directory is not writable; keeping previous setting",
+            ));
         }
         let theme_changed = self.config.theme != config.theme;
         let memory_changed = self.config.playback_memory != config.playback_memory;
         let recommendations_changed = self.config.home_more_recommend != config.home_more_recommend;
         if theme_changed {
-            self.theme = ThemeLoader::load_async(&config.theme).await.unwrap_or_default();
+            self.theme = ThemeLoader::load_async(&config.theme)
+                .await
+                .unwrap_or_default();
         }
-        self.playback.audio_player.set_eq(crate::tmplayer::app::state::EqSettings {
-            bands_db: config.eq_bands_db,
-        }).unwrap_or_else(|error| log::error!("apply EQ: {error:#}"));
+        self.playback
+            .audio_player
+            .set_eq(crate::tmplayer::app::state::EqSettings {
+                bands_db: config.eq_bands_db,
+            })
+            .unwrap_or_else(|error| log::error!("apply EQ: {error:#}"));
         self.config = config;
         self.refresh_download_root();
         self.persist_config();
@@ -7437,13 +7535,14 @@ impl App {
                 self.clear_playback_memory();
             }
         }
-        if recommendations_changed && self.page != Page::Login {
-            if let Err(error) = self.load_home_recommendations().await {
-                self.browse.home.status_line = format!(
-                    "{}: {error}",
-                    self.lang_text("推荐歌单刷新失败", "Failed to refresh home recommendations"),
-                );
-            }
+        if recommendations_changed
+            && self.page != Page::Login
+            && let Err(error) = self.load_home_recommendations().await
+        {
+            self.browse.home.status_line = format!(
+                "{}: {error}",
+                self.lang_text("推荐歌单刷新失败", "Failed to refresh home recommendations"),
+            );
         }
     }
 
@@ -7467,7 +7566,9 @@ impl App {
 
         // Prefer persistent now-playing queue so fullscreen follows actual playback state.
         if !self.playback.playback_queue.is_empty() {
-            bootstrap.playlist = self.playback.playback_queue
+            bootstrap.playlist = self
+                .playback
+                .playback_queue
                 .iter()
                 .map(|track| crate::tmplayer::FullscreenPlaylistItemSeed {
                     id: Some(track.song_id.clone()),
@@ -7478,25 +7579,27 @@ impl App {
                 })
                 .collect();
             if !bootstrap.playlist.is_empty() {
-                bootstrap.current_index = self.playback.playback_index
+                bootstrap.current_index = self
+                    .playback
+                    .playback_index
                     .map(|index| index.min(bootstrap.playlist.len() - 1));
             }
         }
 
         // Keep fullscreen in true idle state when nothing is actually playing.
-        if bootstrap.playlist.is_empty() {
-            if let Some(track) = self.playback.now_playing.as_ref() {
-                bootstrap
-                    .playlist
-                    .push(crate::tmplayer::FullscreenPlaylistItemSeed {
-                        id: Some(track.song_id.clone()),
-                        title: track.title.clone(),
-                        artist: track.artist.clone(),
-                        album: track.album.clone(),
-                        duration: Duration::from_millis(track.duration_ms.max(0) as u64),
-                    });
-                bootstrap.current_index = Some(0);
-            }
+        if bootstrap.playlist.is_empty()
+            && let Some(track) = self.playback.now_playing.as_ref()
+        {
+            bootstrap
+                .playlist
+                .push(crate::tmplayer::FullscreenPlaylistItemSeed {
+                    id: Some(track.song_id.clone()),
+                    title: track.title.clone(),
+                    artist: track.artist.clone(),
+                    album: track.album.clone(),
+                    duration: Duration::from_millis(track.duration_ms.max(0) as u64),
+                });
+            bootstrap.current_index = Some(0);
         }
 
         if !bootstrap.playlist.is_empty() {
@@ -7505,15 +7608,15 @@ impl App {
                 .unwrap_or(0)
                 .min(bootstrap.playlist.len() - 1);
 
-            if let Some(now) = self.playback.now_playing.as_ref() {
-                if let Some(found) = bootstrap.playlist.iter().position(|item| {
+            if let Some(now) = self.playback.now_playing.as_ref()
+                && let Some(found) = bootstrap.playlist.iter().position(|item| {
                     item.id
                         .as_deref()
                         .map(|id| id == now.song_id.as_str())
                         .unwrap_or(false)
-                }) {
-                    active_idx = found;
-                }
+                })
+            {
+                active_idx = found;
             }
             bootstrap.current_index = Some(active_idx);
 
@@ -7538,77 +7641,74 @@ impl App {
                 seed.lyrics = now.lyrics.clone();
             }
 
-            let song_id = self.playback.now_playing
+            let song_id = self
+                .playback
+                .now_playing
                 .as_ref()
                 .map(|track| track.song_id.clone())
                 .or_else(|| bootstrap.playlist[active_idx].id.clone());
 
             if let Some(song_id) = song_id {
-                if let Ok(detail) = self.api.song_detail(&song_id).await {
-                    if let Some(song) = detail
+                if let Ok(detail) = self.api.song_detail(&song_id).await
+                    && let Some(song) = detail
                         .body
                         .get("songs")
                         .and_then(|value| value.as_array())
                         .and_then(|items| items.first())
-                    {
-                        if let Some(name) = song.get("name").and_then(|value| value.as_str()) {
-                            seed.title = name.to_string();
-                        }
-                        if let Some(artist) = parse_artists(song) {
-                            seed.artist = artist;
-                        }
-                        if let Some(album) =
-                            song.pointer("/al/name").and_then(|value| value.as_str())
-                        {
-                            seed.album = album.to_string();
-                        }
-                        if let Some(duration_ms) = song.get("dt").and_then(|value| value.as_i64()) {
-                            seed.duration = Duration::from_millis(duration_ms.max(0) as u64);
-                        }
+                {
+                    if let Some(name) = song.get("name").and_then(|value| value.as_str()) {
+                        seed.title = name.to_string();
+                    }
+                    if let Some(artist) = parse_artists(song) {
+                        seed.artist = artist;
+                    }
+                    if let Some(album) = song.pointer("/al/name").and_then(|value| value.as_str()) {
+                        seed.album = album.to_string();
+                    }
+                    if let Some(duration_ms) = song.get("dt").and_then(|value| value.as_i64()) {
+                        seed.duration = Duration::from_millis(duration_ms.max(0) as u64);
+                    }
 
-                        if seed.cover.is_none() {
-                            if let Some(cover_url) =
-                                song.pointer("/al/picUrl").and_then(|value| value.as_str())
-                            {
-                                if let Some(bytes) =
-                                    self.fetch_cover_with_disk_cache(cover_url).await
-                                {
-                                    seed.cover = Some(bytes);
-                                }
-                            }
-                        }
+                    if seed.cover.is_none()
+                        && let Some(cover_url) =
+                            song.pointer("/al/picUrl").and_then(|value| value.as_str())
+                        && let Some(bytes) = self.fetch_cover_with_disk_cache(cover_url).await
+                    {
+                        seed.cover = Some(bytes);
                     }
                 }
 
                 if seed.cover.is_none() {
-                    let fallback_cover_url = self.playback.now_playing
+                    let fallback_cover_url = self
+                        .playback
+                        .now_playing
                         .as_ref()
                         .and_then(|track| track.cover_url.clone());
-                    if let Some(cover_url) = fallback_cover_url.as_deref() {
-                        if let Some(bytes) = self.fetch_cover_with_disk_cache(cover_url).await {
-                            seed.cover = Some(bytes);
-                        }
+                    if let Some(cover_url) = fallback_cover_url.as_deref()
+                        && let Some(bytes) = self.fetch_cover_with_disk_cache(cover_url).await
+                    {
+                        seed.cover = Some(bytes);
                     }
                 }
 
-                if seed.lyrics.is_none() {
-                    if let Ok(lyric) = self.api.lyric(&song_id).await {
-                        if let Some(raw_lrc) = lyric
-                            .body
-                            .pointer("/lrc/lyric")
-                            .and_then(|value| value.as_str())
-                        {
-                            seed.lyrics = crate::tmplayer::playback::metadata::parse_lrc(raw_lrc)
-                                .or_else(|| {
-                                    crate::tmplayer::playback::metadata::parse_plain_lyrics(raw_lrc)
-                                });
-                        }
-                    }
+                if seed.lyrics.is_none()
+                    && let Ok(lyric) = self.api.lyric(&song_id).await
+                    && let Some(raw_lrc) = lyric
+                        .body
+                        .pointer("/lrc/lyric")
+                        .and_then(|value| value.as_str())
+                {
+                    seed.lyrics =
+                        crate::tmplayer::playback::metadata::parse_lrc(raw_lrc).or_else(|| {
+                            crate::tmplayer::playback::metadata::parse_plain_lyrics(raw_lrc)
+                        });
                 }
             }
 
             if playlist_cover.is_none() {
-                let first_track = self.playback.playback_queue
+                let first_track = self
+                    .playback
+                    .playback_queue
                     .first()
                     .cloned()
                     .or_else(|| self.playback.now_playing.clone());
@@ -7616,28 +7716,23 @@ impl App {
                 if let Some(first_track) = first_track {
                     playlist_cover = first_track.cover.clone();
 
-                    if playlist_cover.is_none() {
-                        if let Some(cover_url) = first_track.cover_url.as_deref() {
-                            playlist_cover = self.fetch_cover_with_disk_cache(cover_url).await
-                        }
+                    if playlist_cover.is_none()
+                        && let Some(cover_url) = first_track.cover_url.as_deref()
+                    {
+                        playlist_cover = self.fetch_cover_with_disk_cache(cover_url).await
                     }
 
-                    if playlist_cover.is_none() {
-                        if let Ok(detail) = self.api.song_detail(&first_track.song_id).await {
-                            if let Some(song) = detail
-                                .body
-                                .get("songs")
-                                .and_then(|value| value.as_array())
-                                .and_then(|items| items.first())
-                            {
-                                if let Some(cover_url) =
-                                    song.pointer("/al/picUrl").and_then(|value| value.as_str())
-                                {
-                                    playlist_cover =
-                                        self.fetch_cover_with_disk_cache(cover_url).await
-                                }
-                            }
-                        }
+                    if playlist_cover.is_none()
+                        && let Ok(detail) = self.api.song_detail(&first_track.song_id).await
+                        && let Some(song) = detail
+                            .body
+                            .get("songs")
+                            .and_then(|value| value.as_array())
+                            .and_then(|items| items.first())
+                        && let Some(cover_url) =
+                            song.pointer("/al/picUrl").and_then(|value| value.as_str())
+                    {
+                        playlist_cover = self.fetch_cover_with_disk_cache(cover_url).await
                     }
                 }
             }
@@ -7660,7 +7755,7 @@ impl App {
     }
 
     fn clear_playback_memory(&self) {
-        let _ = self.persistence.enqueue(|| playback_session::clear());
+        let _ = self.persistence.enqueue(playback_session::clear);
     }
 
     fn persist_playback_memory(&self) {
@@ -7668,7 +7763,9 @@ impl App {
             return;
         }
 
-        let queue = self.playback.playback_queue
+        let queue = self
+            .playback
+            .playback_queue
             .iter()
             .map(|track| playback_session::PlaybackSessionTrack {
                 song_id: track.song_id.clone(),
@@ -7683,12 +7780,16 @@ impl App {
         let record = playback_session::PlaybackSessionRecord {
             queue,
             current_index: self.playback.playback_index,
-            repeat_mode: Some(playback_repeat_mode_key(self.playback.playback_repeat_mode).to_string()),
+            repeat_mode: Some(
+                playback_repeat_mode_key(self.playback.playback_repeat_mode).to_string(),
+            ),
             source_playlist_id: self.playback.playback_queue_source_id.clone(),
             updated_at: 0,
         };
 
-        let _ = self.persistence.enqueue(move || playback_session::save(&record));
+        let _ = self
+            .persistence
+            .enqueue(move || playback_session::save(&record));
     }
 
     async fn try_restore_playback_memory(&mut self) {
@@ -7733,7 +7834,8 @@ impl App {
             self.playback.playback_repeat_mode = mode;
         }
 
-        self.playback.replace_queue(queue, None, None, record.source_playlist_id.clone());
+        self.playback
+            .replace_queue(queue, None, None, record.source_playlist_id.clone());
         let target = record
             .current_index
             .unwrap_or(0)
@@ -7804,9 +7906,9 @@ impl App {
         self.settings.reset_navigation();
         self.session_cookie = None;
         self.api.clear_cookie();
-        let _ = self.persistence.enqueue(|| session::clear_cookie());
+        let _ = self.persistence.enqueue(session::clear_cookie);
         self.clear_playback_memory();
-        let _ = self.persistence.enqueue(|| private_roam::clear());
+        let _ = self.persistence.enqueue(private_roam::clear);
         self.browse.reset_pages();
         self.vip_audio_unlocked = false;
         self.config.audio_quality = self.config.audio_quality.clamp_for_vip(false);
@@ -7838,7 +7940,11 @@ impl App {
             return;
         }
 
-        let focused = self.browse.home.focused_idx.min(self.browse.home.tiles.len() - 1);
+        let focused = self
+            .browse
+            .home
+            .focused_idx
+            .min(self.browse.home.tiles.len() - 1);
         let title = self.browse.home.tiles[focused].title.clone();
         let Some(playlist_id) = self.browse.home.tiles[focused].id.clone() else {
             self.browse.home.status_line = "当前块暂无可用歌单".to_string();
@@ -8149,7 +8255,9 @@ impl App {
             )
             .to_string();
         self.browse.playlist.set_tracks(tracks);
-        cover_url.map(|x| self.browse.playlist.cover.load(self.api.clone(), x));
+        if let Some(x) = cover_url {
+            self.browse.playlist.cover.load(self.api.clone(), x)
+        }
         Ok(())
     }
 
@@ -8164,7 +8272,9 @@ impl App {
             }
             self.browse.private_roam.tracks = fetched;
             if self.browse.private_roam.cover_url.is_none() {
-                self.browse.private_roam.cover_url = self.browse.private_roam
+                self.browse.private_roam.cover_url = self
+                    .browse
+                    .private_roam
                     .tracks
                     .first()
                     .and_then(|track| track.cover_url.clone());
@@ -8191,13 +8301,15 @@ impl App {
             .to_string();
         self.browse.playlist.set_tracks(tracks);
         // 进入漫游后默认聚焦到最后播放的歌曲
-        if let Some(index) = focus_index {
-            if index < self.browse.playlist.tracks.len() {
-                self.browse.playlist.focused_idx = index;
-                self.browse.playlist.scroll_offset = index;
-            }
+        if let Some(index) = focus_index
+            && index < self.browse.playlist.tracks.len()
+        {
+            self.browse.playlist.focused_idx = index;
+            self.browse.playlist.scroll_offset = index;
         }
-        cover_url.map(|x| self.browse.playlist.cover.load(self.api.clone(), x));
+        if let Some(x) = cover_url {
+            self.browse.playlist.cover.load(self.api.clone(), x)
+        }
         Ok(())
     }
 
@@ -8223,7 +8335,9 @@ impl App {
         self.browse.private_roam.tracks = new_tracks;
         self.browse.private_roam.last_played_index = new_index;
         if self.browse.private_roam.cover_url.is_none() {
-            self.browse.private_roam.cover_url = self.browse.private_roam
+            self.browse.private_roam.cover_url = self
+                .browse
+                .private_roam
                 .tracks
                 .first()
                 .and_then(|track| track.cover_url.clone());
@@ -8242,7 +8356,13 @@ impl App {
         let mut added = false;
         let mut new_queue_items = Vec::new();
         for track in fetched {
-            if !self.browse.private_roam.tracks.iter().any(|t| t.id == track.id) {
+            if !self
+                .browse
+                .private_roam
+                .tracks
+                .iter()
+                .any(|t| t.id == track.id)
+            {
                 if let Some(item) = PlaybackTrack::from_playlist_track(&track) {
                     new_queue_items.push(item);
                 }
@@ -8270,7 +8390,9 @@ impl App {
 
     /// 播放队列切到某首歌时，记录漫游播放位置与封面；播放到最后一首时追加新歌
     async fn track_private_roam_playback(&mut self, track: &PlaybackTrack) {
-        let Some(pos) = self.browse.private_roam
+        let Some(pos) = self
+            .browse
+            .private_roam
             .tracks
             .iter()
             .position(|t| t.id.as_deref() == Some(track.song_id.as_str()))
@@ -8285,7 +8407,10 @@ impl App {
             self.browse.private_roam.last_played_cover_url = Some(cover.clone());
             // 列表页封面同步为播放到的歌曲封面
             if self.browse.playlist.id.as_deref() == Some(HOME_PRIVATE_ROAM_TILE_ID) {
-                self.browse.playlist.cover.load(self.api.clone(), cover.clone());
+                self.browse
+                    .playlist
+                    .cover
+                    .load(self.api.clone(), cover.clone());
             }
             // 漫游没有固定的列表封面，其语义是「跟随当前播放歌曲」。
             // 队列来源封面（全屏侧边栏用）同步更新，否则会停在换队列那一刻的旧封面。
@@ -8311,7 +8436,9 @@ impl App {
 
     fn persist_private_roam(&self) {
         let record = private_roam::PrivateRoamRecord {
-            tracks: self.browse.private_roam
+            tracks: self
+                .browse
+                .private_roam
                 .tracks
                 .iter()
                 .map(|track| private_roam::PrivateRoamTrack {
@@ -8328,7 +8455,9 @@ impl App {
             last_refresh_day: self.browse.private_roam.last_refresh_day,
             updated_at: 0,
         };
-        let _ = self.persistence.enqueue(move || private_roam::save(&record));
+        let _ = self
+            .persistence
+            .enqueue(move || private_roam::save(&record));
     }
 
     fn load_private_roam_memory(&mut self) {
@@ -8359,7 +8488,8 @@ impl App {
         self.browse.private_roam.last_played_cover_url = record.last_played_cover_url.clone();
         self.browse.private_roam.last_refresh_day = record.last_refresh_day;
         self.browse.private_roam.cover_url = record.last_played_cover_url.or_else(|| {
-            self.browse.private_roam
+            self.browse
+                .private_roam
                 .tracks
                 .first()
                 .and_then(|track| track.cover_url.clone())
@@ -8370,7 +8500,9 @@ impl App {
         let Some(url) = self.browse.private_roam.cover_url.clone() else {
             return;
         };
-        if let Some(tile) = self.browse.home
+        if let Some(tile) = self
+            .browse
+            .home
             .tiles
             .iter_mut()
             .find(|tile| tile.title == "私人漫游")
@@ -8425,59 +8557,55 @@ impl App {
         let mut description = String::new();
         let mut cover_url = None;
 
-        if let Some(response) = detail.as_ref() {
-            if response_code(response) == 200 {
-                title = first_non_empty(
-                    &response.body,
-                    &["/data/artist/name", "/artist/name", "/data/name"],
-                )
-                .unwrap_or_default();
-                cover_url = first_non_empty(
-                    &response.body,
-                    &[
-                        "/data/artist/avatarUrl",
-                        "/data/artist/cover",
-                        "/artist/picUrl",
-                        "/artist/img1v1Url",
-                        "/artist/avatarUrl",
-                    ],
-                );
-                description = first_non_empty(
-                    &response.body,
-                    &["/data/artist/briefDesc", "/artist/briefDesc"],
-                )
-                .unwrap_or_default();
-            }
+        if let Some(response) = detail.as_ref()
+            && response_code(response) == 200
+        {
+            title = first_non_empty(
+                &response.body,
+                &["/data/artist/name", "/artist/name", "/data/name"],
+            )
+            .unwrap_or_default();
+            cover_url = first_non_empty(
+                &response.body,
+                &[
+                    "/data/artist/avatarUrl",
+                    "/data/artist/cover",
+                    "/artist/picUrl",
+                    "/artist/img1v1Url",
+                    "/artist/avatarUrl",
+                ],
+            );
+            description = first_non_empty(
+                &response.body,
+                &["/data/artist/briefDesc", "/artist/briefDesc"],
+            )
+            .unwrap_or_default();
         }
 
-        if title.is_empty() {
-            if let Some(response) = top_song.as_ref() {
-                if let Some(first_song) = response
-                    .body
-                    .get("songs")
-                    .and_then(|value| value.as_array())
-                    .and_then(|songs| songs.first())
-                {
-                    title = parse_artists(first_song).unwrap_or_default();
-                }
-            }
+        if title.is_empty()
+            && let Some(response) = top_song.as_ref()
+            && let Some(first_song) = response
+                .body
+                .get("songs")
+                .and_then(|value| value.as_array())
+                .and_then(|songs| songs.first())
+        {
+            title = parse_artists(first_song).unwrap_or_default();
         }
 
-        if let Some(response) = desc.as_ref() {
-            if response_code(response) == 200 {
-                if let Some(text) =
-                    first_non_empty(&response.body, &["/briefDesc", "/data/briefDesc"])
-                {
-                    if !text.trim().is_empty() {
-                        description = text;
-                    }
-                }
+        if let Some(response) = desc.as_ref()
+            && response_code(response) == 200
+        {
+            if let Some(text) = first_non_empty(&response.body, &["/briefDesc", "/data/briefDesc"])
+                && !text.trim().is_empty()
+            {
+                description = text;
+            }
 
-                if description.trim().is_empty() {
-                    if let Some(text) = first_non_empty_intro_text(&response.body) {
-                        description = text;
-                    }
-                }
+            if description.trim().is_empty()
+                && let Some(text) = first_non_empty_intro_text(&response.body)
+            {
+                description = text;
             }
         }
 
@@ -8495,66 +8623,64 @@ impl App {
         let mut eps = Vec::new();
         let mut singles = Vec::new();
 
-        if let Some(response) = top_song.as_ref() {
-            if response_code(response) == 200 {
-                if let Some(items) = response
-                    .body
-                    .get("songs")
-                    .and_then(|value| value.as_array())
-                {
-                    hot_songs = parse_tracks(items);
-                }
-            }
+        if let Some(response) = top_song.as_ref()
+            && response_code(response) == 200
+            && let Some(items) = response
+                .body
+                .get("songs")
+                .and_then(|value| value.as_array())
+        {
+            hot_songs = parse_tracks(items);
         }
 
-        if let Some(response) = album.as_ref() {
-            if response_code(response) == 200 {
-                let album_items = response
-                    .body
-                    .get("hotAlbums")
-                    .and_then(|value| value.as_array())
-                    .or_else(|| {
-                        response
-                            .body
-                            .pointer("/artist/albums")
-                            .and_then(|value| value.as_array())
-                    });
+        if let Some(response) = album.as_ref()
+            && response_code(response) == 200
+        {
+            let album_items = response
+                .body
+                .get("hotAlbums")
+                .and_then(|value| value.as_array())
+                .or_else(|| {
+                    response
+                        .body
+                        .pointer("/artist/albums")
+                        .and_then(|value| value.as_array())
+                });
 
-                if let Some(items) = album_items {
-                    for item in items {
-                        let Some(name) = item.get("name").and_then(|value| value.as_str()) else {
-                            continue;
-                        };
+            if let Some(items) = album_items {
+                for item in items {
+                    let Some(name) = item.get("name").and_then(|value| value.as_str()) else {
+                        continue;
+                    };
 
-                        let size = item
-                            .get("size")
-                            .and_then(|value| value.as_i64())
-                            .unwrap_or_default();
+                    let size = item
+                        .get("size")
+                        .and_then(|value| value.as_i64())
+                        .unwrap_or_default();
 
-                        let kind = artist_album_kind(item);
-                        let cover_url = first_non_empty(item, &["/picUrl", "/blurPicUrl"]);
-                        let track = PlaylistTrack {
-                            kind: match kind {
-                                AuthorTileKind::HotSong => PlaylistTrackKind::Song,
-                                AuthorTileKind::Album => PlaylistTrackKind::Album,
-                                AuthorTileKind::Ep => PlaylistTrackKind::Ep,
-                                AuthorTileKind::Single => PlaylistTrackKind::Single,
-                            },
-                            id: parse_value_as_string(item.get("id")),
-                            title: name.to_string(),
-                            artist: first_non_empty(item, &["/artist/name", "/artists/0/name"])
-                                .unwrap_or_else(|| title.clone()),
-                            album: name.to_string(),
-                            cover_url,
-                            duration_ms: 0,
-                            duration: format!("{} {}", size, lang_text(language, "首", "tracks")),
-                        };
+                    let kind = artist_album_kind(item);
+                    let cover_url = first_non_empty(item, &["/picUrl", "/blurPicUrl"]);
+                    let track = PlaylistTrack {
+                        kind: match kind {
+                            AuthorTileKind::HotSong => PlaylistTrackKind::Song,
+                            AuthorTileKind::Album => PlaylistTrackKind::Album,
+                            AuthorTileKind::Ep => PlaylistTrackKind::Ep,
+                            AuthorTileKind::Single => PlaylistTrackKind::Single,
+                        },
+                        id: parse_value_as_string(item.get("id")),
+                        title: name.to_string(),
+                        artist: first_non_empty(item, &["/artist/name", "/artists/0/name"])
+                            .unwrap_or_else(|| title.clone()),
+                        album: name.to_string(),
+                        cover_url,
+                        duration_ms: 0,
+                        duration: format!("{} {}", size, lang_text(language, "首", "tracks")),
+                    };
 
-                        match kind {
-                            AuthorTileKind::HotSong | AuthorTileKind::Album => albums.push(track),
-                            AuthorTileKind::Ep => eps.push(track),
-                            AuthorTileKind::Single => singles.push(track),
-                        }
+                    match kind {
+                        AuthorTileKind::HotSong | AuthorTileKind::Album => albums.push(track),
+                        AuthorTileKind::Ep => eps.push(track),
+                        AuthorTileKind::Single => singles.push(track),
                     }
                 }
             }
@@ -8788,11 +8914,8 @@ impl App {
 
             if added == 0 {
                 if self.search.has_more {
-                    self.search.status_line = format!(
-                        "{} 已加载 {} 条",
-                        scope.display_name(),
-                        self.search.len()
-                    );
+                    self.search.status_line =
+                        format!("{} 已加载 {} 条", scope.display_name(), self.search.len());
                 } else {
                     self.search.status_line = format!(
                         "{} 搜索结果已全部加载，共 {} 条",
@@ -8803,11 +8926,8 @@ impl App {
                 return Ok(0);
             }
 
-            self.search.status_line = format!(
-                "{} 已加载 {} 条",
-                scope.display_name(),
-                self.search.len()
-            );
+            self.search.status_line =
+                format!("{} 已加载 {} 条", scope.display_name(), self.search.len());
             return Ok(added);
         }
 
@@ -8832,11 +8952,8 @@ impl App {
             return Ok(0);
         }
 
-        self.search.status_line = format!(
-            "{} 已加载 {} 条",
-            scope.display_name(),
-            self.search.len()
-        );
+        self.search.status_line =
+            format!("{} 已加载 {} 条", scope.display_name(), self.search.len());
         Ok(added)
     }
 
@@ -8844,7 +8961,9 @@ impl App {
         self.session_cookie = self.api.session_cookie().map(|value| value.to_string());
         if let Some(cookie) = self.session_cookie.as_deref() {
             let cookie = cookie.to_string();
-            let _ = self.persistence.enqueue(move || session::save_cookie(&cookie));
+            let _ = self
+                .persistence
+                .enqueue(move || session::save_cookie(&cookie));
         }
         self.refresh_vip_audio_access().await;
         let _ = self.refresh_liked_song_cache().await;
@@ -9075,10 +9194,9 @@ fn extract_qr_key(response: &ApiResponse) -> String {
             .body
             .pointer(pointer)
             .and_then(|value| value.as_str())
+            && !value.trim().is_empty()
         {
-            if !value.trim().is_empty() {
-                return value.to_string();
-            }
+            return value.to_string();
         }
     }
     String::new()
@@ -9090,10 +9208,9 @@ fn extract_qr_url(response: &ApiResponse) -> String {
             .body
             .pointer(pointer)
             .and_then(|value| value.as_str())
+            && !value.trim().is_empty()
         {
-            if !value.trim().is_empty() {
-                return value.to_string();
-            }
+            return value.to_string();
         }
     }
     String::new()
@@ -9286,10 +9403,10 @@ async fn fetch_playlist_cover_url(api: &mut ApiState, playlist_id: &str) -> Opti
         return None;
     }
 
-    if let Some(playlist) = response.body.get("playlist") {
-        if let Some(cover_url) = first_non_empty(playlist, &["/coverImgUrl", "/picUrl"]) {
-            return Some(cover_url);
-        }
+    if let Some(playlist) = response.body.get("playlist")
+        && let Some(cover_url) = first_non_empty(playlist, &["/coverImgUrl", "/picUrl"])
+    {
+        return Some(cover_url);
     }
 
     response
@@ -9304,17 +9421,14 @@ async fn fetch_playlist_cover_url(api: &mut ApiState, playlist_id: &str) -> Opti
 /// 首页推荐 tile：每日推荐 + 推荐歌单卡片，已按固定顺序排好。
 async fn fetch_home_tiles(api: &mut ApiState, show_more: bool) -> Vec<HomeTile> {
     let mut daily_tile = HomeTile::placeholder_daily();
-    if let Ok(response) = api.recommend_songs().await {
-        if response_code(&response) == 200 {
-            if let Some(songs) = home_daily_song_items(&response.body) {
-                if let Some(cover_url) = songs
-                    .iter()
-                    .find_map(|item| first_non_empty(item, &["/al/picUrl", "/album/picUrl"]))
-                {
-                    daily_tile.cover.load(api.clone(), cover_url);
-                }
-            }
-        }
+    if let Ok(response) = api.recommend_songs().await
+        && response_code(&response) == 200
+        && let Some(songs) = home_daily_song_items(&response.body)
+        && let Some(cover_url) = songs
+            .iter()
+            .find_map(|item| first_non_empty(item, &["/al/picUrl", "/album/picUrl"]))
+    {
+        daily_tile.cover.load(api.clone(), cover_url);
     }
 
     let mut cards = Vec::new();
@@ -9323,10 +9437,10 @@ async fn fetch_home_tiles(api: &mut ApiState, show_more: bool) -> Vec<HomeTile> 
         cards = parse_recommend_cards(&response, 24);
     }
 
-    if cards.is_empty() {
-        if let Ok(response) = api.personalized(24).await {
-            cards = parse_personalized_cards(&response, 24);
-        }
+    if cards.is_empty()
+        && let Ok(response) = api.personalized(24).await
+    {
+        cards = parse_personalized_cards(&response, 24);
     }
 
     let mut tiles = Vec::with_capacity(cards.len().saturating_add(1));
@@ -9341,12 +9455,11 @@ async fn fetch_home_tiles(api: &mut ApiState, show_more: bool) -> Vec<HomeTile> 
         let mut tile =
             HomeTile::from_recommendation(api, card.id, card.title, card.subtitle, card.cover_url);
 
-        if pinned_title == Some("私人雷达") {
-            if let Some(playlist_id) = tile.id.clone() {
-                if let Some(cover_url) = fetch_playlist_cover_url(api, &playlist_id).await {
-                    tile.cover.load(api.clone(), cover_url);
-                }
-            }
+        if pinned_title == Some("私人雷达")
+            && let Some(playlist_id) = tile.id.clone()
+            && let Some(cover_url) = fetch_playlist_cover_url(api, &playlist_id).await
+        {
+            tile.cover.load(api.clone(), cover_url);
         }
 
         if pinned_title == Some("私人漫游") {
@@ -9557,12 +9670,11 @@ fn extract_current_user_id(response: &ApiResponse) -> Option<String> {
         "/account/id",
         "/data/account/id",
     ] {
-        if let Some(value) = response.body.pointer(pointer) {
-            if let Some(id) = parse_value_as_string(Some(value)) {
-                if !id.trim().is_empty() {
-                    return Some(id);
-                }
-            }
+        if let Some(value) = response.body.pointer(pointer)
+            && let Some(id) = parse_value_as_string(Some(value))
+            && !id.trim().is_empty()
+        {
+            return Some(id);
         }
     }
 
@@ -9576,12 +9688,11 @@ fn extract_liked_playlist_id(response: &ApiResponse) -> Option<String> {
         "/profile/likesPlaylistId",
         "/data/profile/likesPlaylistId",
     ] {
-        if let Some(value) = response.body.pointer(pointer) {
-            if let Some(id) = parse_value_as_string(Some(value)) {
-                if !id.trim().is_empty() {
-                    return Some(id);
-                }
-            }
+        if let Some(value) = response.body.pointer(pointer)
+            && let Some(id) = parse_value_as_string(Some(value))
+            && !id.trim().is_empty()
+        {
+            return Some(id);
         }
     }
 
@@ -9627,10 +9738,10 @@ async fn fetch_private_roam_songs(api: &mut ApiState) -> Vec<PlaylistTrack> {
         };
         let normalized = normalize_fm_song_items(songs);
         for track in parse_tracks(&normalized) {
-            if let Some(id) = &track.id {
-                if seen.insert(id.clone()) {
-                    tracks.push(track);
-                }
+            if let Some(id) = &track.id
+                && seen.insert(id.clone())
+            {
+                tracks.push(track);
             }
         }
     }
@@ -9655,11 +9766,11 @@ fn merge_private_roam_refresh(
     let mut new_tracks = Vec::new();
     let mut kept_last_played = false;
 
-    if let Some(index) = last_played_index {
-        if let Some(last) = old_tracks.get(index) {
-            new_tracks.push(last.clone());
-            kept_last_played = true;
-        }
+    if let Some(index) = last_played_index
+        && let Some(last) = old_tracks.get(index)
+    {
+        new_tracks.push(last.clone());
+        kept_last_played = true;
     }
     for track in fetched {
         if !new_tracks.iter().any(|t| t.id == track.id) {
@@ -9677,15 +9788,15 @@ fn normalize_fm_song_items(items: &[Value]) -> Vec<Value> {
         .iter()
         .map(|item| {
             let mut song = item.clone();
-            if song.get("al").is_none() {
-                if let Some(album) = song.get("album").cloned() {
-                    song["al"] = album;
-                }
+            if song.get("al").is_none()
+                && let Some(album) = song.get("album").cloned()
+            {
+                song["al"] = album;
             }
-            if song.get("ar").is_none() {
-                if let Some(artists) = song.get("artists").cloned() {
-                    song["ar"] = artists;
-                }
+            if song.get("ar").is_none()
+                && let Some(artists) = song.get("artists").cloned()
+            {
+                song["ar"] = artists;
             }
             song
         })
@@ -9730,10 +9841,10 @@ fn parse_tracks(items: &[Value]) -> Vec<PlaylistTrack> {
 }
 
 fn parse_song_like_check_result(body: &Value, song_id: &str) -> Option<bool> {
-    if let Some(value) = body.pointer(&format!("/data/{song_id}")) {
-        if let Some(liked) = parse_song_like_check_flag(value) {
-            return Some(liked);
-        }
+    if let Some(value) = body.pointer(&format!("/data/{song_id}"))
+        && let Some(liked) = parse_song_like_check_flag(value)
+    {
+        return Some(liked);
     }
 
     for pointer in [
@@ -9742,10 +9853,10 @@ fn parse_song_like_check_result(body: &Value, song_id: &str) -> Option<bool> {
         "/data/songs/0/liked",
         "/liked",
     ] {
-        if let Some(value) = body.pointer(pointer) {
-            if let Some(liked) = parse_song_like_check_flag(value) {
-                return Some(liked);
-            }
+        if let Some(value) = body.pointer(pointer)
+            && let Some(liked) = parse_song_like_check_flag(value)
+        {
+            return Some(liked);
         }
     }
 
@@ -9811,10 +9922,9 @@ fn parse_likelist_song_ids(body: &Value) -> HashSet<String> {
                 .map(|value| value.to_string())
                 .or_else(|| item.as_u64().map(|value| value.to_string()))
                 .or_else(|| item.as_str().map(|value| value.trim().to_string()))
+                && !value.is_empty()
             {
-                if !value.is_empty() {
-                    out.insert(value);
-                }
+                out.insert(value);
             }
         }
     }
@@ -9962,10 +10072,10 @@ fn parse_usize_value(value: Option<&Value>) -> Option<usize> {
     if let Some(number) = value.as_u64() {
         return Some(number as usize);
     }
-    if let Some(number) = value.as_i64() {
-        if number >= 0 {
-            return Some(number as usize);
-        }
+    if let Some(number) = value.as_i64()
+        && number >= 0
+    {
+        return Some(number as usize);
     }
     if let Some(text) = value.as_str() {
         return text.trim().parse::<usize>().ok();
@@ -10193,13 +10303,12 @@ fn pick_artist_id(
     line: &str,
     index: usize,
 ) -> Option<String> {
-    if let Some(name) = artist_name_segments(line).get(index).copied() {
-        if let Some((_, id)) = artists
+    if let Some(name) = artist_name_segments(line).get(index).copied()
+        && let Some((_, id)) = artists
             .iter()
             .find(|(candidate, _)| candidate.as_str() == name)
-        {
-            return id.clone();
-        }
+    {
+        return id.clone();
     }
 
     artists.get(index).and_then(|(_, id)| id.clone())
@@ -10233,10 +10342,10 @@ fn format_duration(duration_ms: i64) -> String {
 
 fn parse_value_as_string(value: Option<&Value>) -> Option<String> {
     let value = value?;
-    if let Some(text) = value.as_str() {
-        if !text.trim().is_empty() {
-            return Some(text.to_string());
-        }
+    if let Some(text) = value.as_str()
+        && !text.trim().is_empty()
+    {
+        return Some(text.to_string());
     }
     if let Some(number) = value.as_i64() {
         return Some(number.to_string());
@@ -10464,12 +10573,11 @@ fn normalize_keybind_token(token: &str) -> Option<String> {
         _ => {}
     }
 
-    if let Some(rest) = lower.strip_prefix('f') {
-        if let Ok(num) = rest.parse::<u8>() {
-            if num > 0 {
-                return Some(format!("F{}", num));
-            }
-        }
+    if let Some(rest) = lower.strip_prefix('f')
+        && let Ok(num) = rest.parse::<u8>()
+        && num > 0
+    {
+        return Some(format!("F{}", num));
     }
 
     let mut chars = token.chars();
@@ -10552,7 +10660,10 @@ mod tests {
                 .write_to(&mut encoded, format)
                 .unwrap();
             let complete = encoded.into_inner();
-            assert_eq!(validate_cached_cover(complete.clone()), Some(complete.clone()));
+            assert_eq!(
+                validate_cached_cover(complete.clone()),
+                Some(complete.clone())
+            );
 
             let mut incomplete = complete;
             incomplete.pop();
@@ -10816,13 +10927,12 @@ mod tests {
     }
 
     fn pending_toggle_future() -> LikeToggleFuture {
-        let fut: Pin<Box<dyn Future<Output = Option<Result<(), String>>>>> =
-            Box::pin(async { None });
+        let fut: LikeToggleTask = Box::pin(async { None });
         fut.shared()
     }
 
     fn pending_verify_future() -> LikeVerifyFuture {
-        let fut: Pin<Box<dyn Future<Output = Option<Result<bool, ()>>>>> = Box::pin(async { None });
+        let fut: LikeVerifyTask = Box::pin(async { None });
         fut.shared()
     }
 
@@ -10967,13 +11077,15 @@ mod tests {
     }
 
     fn sidebar_state(created: usize, collected: usize) -> HomeSidebarState {
-        let mut state = HomeSidebarState::default();
-        state.created_playlists = (0..created)
-            .map(|i| sidebar_item(&format!("created-{i}")))
-            .collect();
-        state.collected_playlists = (0..collected)
-            .map(|i| sidebar_item(&format!("collected-{i}")))
-            .collect();
+        let mut state = HomeSidebarState {
+            created_playlists: (0..created)
+                .map(|i| sidebar_item(&format!("created-{i}")))
+                .collect(),
+            collected_playlists: (0..collected)
+                .map(|i| sidebar_item(&format!("collected-{i}")))
+                .collect(),
+            ..HomeSidebarState::default()
+        };
         state.clamp_focus();
         state
     }

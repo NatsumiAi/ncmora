@@ -1,7 +1,7 @@
-use crate::tmplayer::app::state::{AppState, Overlay, PlaybackState, RepeatMode};
-use crate::tmplayer::audio::cava::{CavaChannels, CavaConfig, CavaService};
 use crate::data::config::{BarChannels, BarNumber, Config, VisualizeMode};
 use crate::data::theme_loader::ThemeLoader;
+use crate::tmplayer::app::state::{AppState, Overlay, PlaybackState, RepeatMode};
+use crate::tmplayer::audio::cava::{CavaChannels, CavaConfig, CavaService};
 use crate::tmplayer::ui::tui::{Tui, UiLayout};
 use crate::tmplayer::utils::input::{Action, map_key, map_mouse};
 use crate::tmplayer::{
@@ -13,7 +13,6 @@ use crossterm::event::{self, Event};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// 子页的上一级：挂在设置弹窗下面的这些弹窗，Esc 应该回到设置弹窗，
@@ -35,6 +34,9 @@ fn clear_spectrum(app: &mut AppState) {
     app.spectrum.bars.fill(0.0);
     app.spectrum.bars_left.fill(0.0);
     app.spectrum.bars_right.fill(0.0);
+    app.spectrum_bar_smoother.reset();
+    app.spectrum_left_smoother.reset();
+    app.spectrum_right_smoother.reset();
 }
 
 fn has_spectrum_data(app: &AppState) -> bool {
@@ -60,11 +62,7 @@ fn map_host_repeat(mode: HostRepeatMode) -> RepeatMode {
     }
 }
 
-async fn apply_host_config_sync(
-    app: &mut AppState,
-    config: Config,
-    vip_audio_unlocked: bool,
-) {
+async fn apply_host_config_sync(app: &mut AppState, config: Config, vip_audio_unlocked: bool) {
     let theme_changed = app.config.theme != config.theme;
     app.config = config;
     app.language = app.config.language;
@@ -83,10 +81,7 @@ async fn apply_host_config_sync(
     app.refresh_download_root();
 }
 
-async fn save_and_sync_host_config(
-    app: &mut AppState,
-    host_bridge: &mut impl HostPlaybackBridge,
-) {
+async fn save_and_sync_host_config(app: &mut AppState, host_bridge: &mut impl HostPlaybackBridge) {
     host_bridge.apply_config_sync(app.config.clone()).await;
     let accepted = host_bridge.config_snapshot();
     apply_host_config_sync(app, accepted, host_bridge.vip_audio_unlocked()).await;
@@ -97,7 +92,6 @@ async fn sync_eq_config(app: &mut AppState, host_bridge: &mut impl HostPlaybackB
     app.config.eq_bands_db = app.eq.bands_db;
     save_and_sync_host_config(app, host_bridge).await;
 }
-
 
 fn empty_track_metadata() -> crate::tmplayer::app::state::TrackMetadata {
     crate::tmplayer::app::state::TrackMetadata {
@@ -116,11 +110,14 @@ fn hash_cover_bytes(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
-
 fn sync_from_host_snapshot(app: &mut AppState, snapshot: HostPlaybackSnapshot) {
+    let previous_index = app.playlist.current;
     let queue_len = snapshot.playlist.len();
 
     if queue_len == 0 {
+        clear_spectrum(app);
+        app.cover_anim = None;
+        app.pending_system_cover_anim = None;
         app.api_tracks.clear();
         app.playlist = crate::tmplayer::data::playlist::Playlist::default();
         app.playlist_view = crate::tmplayer::data::playlist::Playlist::default();
@@ -136,7 +133,6 @@ fn sync_from_host_snapshot(app: &mut AppState, snapshot: HostPlaybackSnapshot) {
     let mut tracks = Vec::with_capacity(queue_len);
 
     for (idx, item) in snapshot.playlist.iter().enumerate() {
-        let id = item.id.clone().unwrap_or_else(|| format!("seed-{idx}"));
         let title = if item.title.trim().is_empty() {
             format!("Track {}", idx + 1)
         } else {
@@ -146,7 +142,7 @@ fn sync_from_host_snapshot(app: &mut AppState, snapshot: HostPlaybackSnapshot) {
         playlist
             .items
             .push(crate::tmplayer::data::playlist::PlaylistItem {
-                path: PathBuf::from(format!("ncm://{id}")),
+                song_id: item.id.clone(),
                 title,
             });
 
@@ -204,6 +200,13 @@ fn sync_from_host_snapshot(app: &mut AppState, snapshot: HostPlaybackSnapshot) {
     let mut view = playlist.clone();
     view.selected = view_selected;
     view.clamp_selected();
+    let identity_changed = previous_index
+        .and_then(|index| app.playlist.items.get(index))
+        .and_then(|item| item.song_id.as_deref())
+        != playlist
+            .items
+            .get(current)
+            .and_then(|item| item.song_id.as_deref());
 
     app.api_tracks = tracks;
     app.playlist = playlist;
@@ -213,8 +216,36 @@ fn sync_from_host_snapshot(app: &mut AppState, snapshot: HostPlaybackSnapshot) {
     app.player.repeat_mode = map_host_repeat(snapshot.repeat_mode);
     app.player.liked = snapshot.current_liked;
     app.player.position = snapshot.position;
+    let track_changed = identity_changed
+        || previous_index != Some(current)
+        || app.player.track.title != current_track.title
+        || app.player.track.artist != current_track.artist
+        || app.player.track.album != current_track.album;
+    if track_changed {
+        clear_spectrum(app);
+        if previous_index.is_some() {
+            let (from, dir, _) = app.pending_system_cover_anim.take().unwrap_or_else(|| {
+                (
+                    crate::tmplayer::app::state::CoverSnapshot::from(&app.player.track),
+                    -1,
+                    Instant::now(),
+                )
+            });
+            app.start_cover_anim(
+                from,
+                crate::tmplayer::app::state::CoverSnapshot::from(&current_track),
+                dir,
+                Instant::now(),
+            );
+        }
+    }
+    if let Some(anim) = app.cover_anim.as_mut()
+        && anim.to.cover_hash != current_track.cover_hash
+    {
+        anim.to.cover.clone_from(&current_track.cover);
+        anim.to.cover_hash = current_track.cover_hash;
+    }
     app.player.track = current_track;
-
 }
 
 fn apply_host_runtime_snapshot(app: &mut AppState, runtime: HostPlaybackRuntimeSnapshot) -> bool {
@@ -258,15 +289,15 @@ fn apply_host_runtime_snapshot(app: &mut AppState, runtime: HostPlaybackRuntimeS
         changed = true;
     }
 
-    if let Some(index) = runtime.current_index {
-        if !app.playlist.items.is_empty() {
-            let idx = index.min(app.playlist.len().saturating_sub(1));
-            if app.playlist.current != Some(idx) {
-                app.playlist.current = Some(idx);
-                app.playlist.selected = idx;
-                app.playlist.clamp_selected();
-                changed = true;
-            }
+    if let Some(index) = runtime.current_index
+        && !app.playlist.items.is_empty()
+    {
+        let idx = index.min(app.playlist.len().saturating_sub(1));
+        if app.playlist.current != Some(idx) {
+            app.playlist.current = Some(idx);
+            app.playlist.selected = idx;
+            app.playlist.clamp_selected();
+            changed = true;
         }
     }
 
@@ -332,6 +363,7 @@ pub async fn run(
     let desired = desired_cava_config(app, &last_layout);
     cava.set_desired(desired);
     let mut cava_cfg = desired;
+    let mut last_cava_failure: Option<String> = None;
 
     let _ = sync_from_host_bridge(
         app,
@@ -344,7 +376,6 @@ pub async fn run(
     loop {
         let frame_start = Instant::now();
         let mut state_changed = false;
-
 
         state_changed |= sync_from_host_bridge(
             app,
@@ -377,6 +408,20 @@ pub async fn run(
         if cava_cfg != desired {
             cava.set_desired(desired);
             cava_cfg = desired;
+            clear_spectrum(app);
+            last_cava_failure = None;
+            state_changed = true;
+        }
+        {
+            let failure = cava.failure();
+            if *failure != last_cava_failure {
+                if let Some(error) = failure.as_ref() {
+                    log::warn!("Fullscreen visualization unavailable: {error}");
+                    app.set_toast(format!("Visualization unavailable: {error}"));
+                    state_changed = true;
+                }
+                last_cava_failure.clone_from(&failure);
+            }
         }
 
         if app.config.visualize == VisualizeMode::Bars {
@@ -395,24 +440,30 @@ pub async fn run(
                 let snapshot = cava.latest();
                 let bars = desired_bar_count(app, &last_layout);
                 ensure_bar_buffers(app, bars);
+                let mut left = [0.0; crate::tmplayer::audio::cava::MAX_BARS];
+                let mut right = [0.0; crate::tmplayer::audio::cava::MAX_BARS];
+                let mut mono = [0.0; crate::tmplayer::audio::cava::MAX_BARS];
                 if app.config.bar_channels == BarChannels::Stereo {
-                    let _ = snapshot.copy_stereo_into(
-                        &mut app.spectrum.bars_left,
-                        &mut app.spectrum.bars_right,
-                    );
+                    let _ = snapshot.copy_stereo_into(&mut left, &mut right);
+                    app.spectrum_left_smoother
+                        .apply_in_place(&left[..bars], &mut app.spectrum.bars_left);
+                    app.spectrum_right_smoother
+                        .apply_in_place(&right[..bars], &mut app.spectrum.bars_right);
                 } else {
                     app.spectrum.bars_left.fill(0.0);
                     app.spectrum.bars_right.fill(0.0);
                 }
-                let _ = snapshot.mono_into(&mut app.spectrum.bars);
+                let _ = snapshot.mono_into(&mut mono);
+                app.spectrum_bar_smoother
+                    .apply_in_place(&mono[..bars], &mut app.spectrum.bars);
             }
         } else if has_spectrum_data(app) {
             clear_spectrum(app);
             state_changed = true;
         }
 
-
         app.tick(frame_start);
+        state_changed |= tui.poll_cover_frames();
 
         if app.should_continuous_redraw() {
             state_changed = true;
@@ -467,7 +518,6 @@ pub async fn run(
     };
     Ok(exit)
 }
-
 
 async fn handle_action(
     app: &mut AppState,
@@ -567,7 +617,7 @@ async fn handle_action(
                 return Ok(());
             }
             Overlay::SettingsModal => match app.settings_selected {
-                0 | 1 | 2 | 3 => {
+                0..=3 => {
                     apply_settings_delta(app, host_bridge, 1).await;
                 }
                 4 => {
@@ -657,13 +707,12 @@ async fn handle_action(
                     app.config.page_lyrics_drag = !app.config.page_lyrics_drag;
                     save_and_sync_host_config(app, host_bridge).await;
                 }
-                2 => {
+                2
                     // 拖动关闭时吸附无意义：灰置且不可改。
-                    if app.config.page_lyrics_drag {
+                    if app.config.page_lyrics_drag => {
                         app.config.page_lyrics_snap = !app.config.page_lyrics_snap;
                         save_and_sync_host_config(app, host_bridge).await;
                     }
-                }
                 _ => {}
             },
             Overlay::HelpModal => {
@@ -877,10 +926,20 @@ async fn handle_action(
             sync_from_host_snapshot(app, host_bridge.snapshot());
         }
         Action::Prev => {
+            app.pending_system_cover_anim = Some((
+                crate::tmplayer::app::state::CoverSnapshot::from(&app.player.track),
+                1,
+                Instant::now(),
+            ));
             host_bridge.play_previous().await;
             sync_from_host_snapshot(app, host_bridge.snapshot());
         }
         Action::Next => {
+            app.pending_system_cover_anim = Some((
+                crate::tmplayer::app::state::CoverSnapshot::from(&app.player.track),
+                -1,
+                Instant::now(),
+            ));
             host_bridge.play_next().await;
             sync_from_host_snapshot(app, host_bridge.snapshot());
         }
@@ -1068,11 +1127,9 @@ async fn apply_settings_delta(
             }
         }
         // Home more recommendations
-        9 => {
-            if delta != 0 {
-                app.config.home_more_recommend = !app.config.home_more_recommend;
-                save_and_sync_host_config(app, host_bridge).await;
-            }
+        9 if delta != 0 => {
+            app.config.home_more_recommend = !app.config.home_more_recommend;
+            save_and_sync_host_config(app, host_bridge).await;
         }
         _ => {}
     }
@@ -1136,10 +1193,7 @@ async fn apply_download_settings_delta(
 /// 「恢复默认」两段式：首次进入待确认态，再选一次才写回默认值。
 ///
 /// 下载不可用（显式 `Null` / 宿主没有可写位置）时也允许：它就是那个出口。
-async fn activate_download_reset(
-    app: &mut AppState,
-    host_bridge: &mut impl HostPlaybackBridge,
-) {
+async fn activate_download_reset(app: &mut AppState, host_bridge: &mut impl HostPlaybackBridge) {
     if !app.download_reset_armed {
         // 待确认态由行内文字（「确认恢复」+ 警戒色）表达，不再弹提示。
         app.download_reset_armed = true;
@@ -1147,8 +1201,7 @@ async fn activate_download_reset(
     }
 
     app.download_reset_armed = false;
-    app.config.download_audio_quality =
-        crate::data::config::default_download_audio_quality();
+    app.config.download_audio_quality = crate::data::config::default_download_audio_quality();
     app.config.download_path = None;
     save_and_sync_host_config(app, host_bridge).await;
     app.refresh_download_root();
@@ -1209,10 +1262,7 @@ fn download_path_edit_move(app: &mut AppState, delta: i32) {
 }
 
 /// 回车确认：非法（空 / 非绝对 / 不可写）就保留修改前的值，只弹一次 toast。
-async fn commit_download_path_edit(
-    app: &mut AppState,
-    host_bridge: &mut impl HostPlaybackBridge,
-) {
+async fn commit_download_path_edit(app: &mut AppState, host_bridge: &mut impl HostPlaybackBridge) {
     let Some(edit) = app.download_path_edit.take() else {
         return;
     };
@@ -1253,16 +1303,13 @@ async fn apply_lyrics_settings_delta(
             app.config.page_lyrics_drag = !app.config.page_lyrics_drag;
             save_and_sync_host_config(app, host_bridge).await;
         }
-        2 => {
-            if app.config.page_lyrics_drag {
-                app.config.page_lyrics_snap = !app.config.page_lyrics_snap;
-                save_and_sync_host_config(app, host_bridge).await;
-            }
+        2 if app.config.page_lyrics_drag => {
+            app.config.page_lyrics_snap = !app.config.page_lyrics_snap;
+            save_and_sync_host_config(app, host_bridge).await;
         }
         _ => {}
     }
 }
-
 
 fn cycle_bar_number(cur: BarNumber, delta: i32) -> BarNumber {
     let options = [
@@ -1344,13 +1391,12 @@ fn desired_cava_config(app: &AppState, layout: &UiLayout) -> Option<CavaConfig> 
     })
 }
 
-
 fn ensure_bar_buffers(app: &mut AppState, bars: usize) {
     if app.spectrum.bars.len() != bars {
-        app.spectrum.bars = vec![0.0; bars];
-        app.spectrum.bars_left = vec![0.0; bars];
-        app.spectrum.bars_right = vec![0.0; bars];
-        app.spectrum_bar_smoother = crate::tmplayer::audio::smoother::Ema::new(0.35, bars);
+        app.spectrum.bars.resize(bars, 0.0);
+        app.spectrum.bars_left.resize(bars, 0.0);
+        app.spectrum.bars_right.resize(bars, 0.0);
+        clear_spectrum(app);
     }
 }
 
@@ -1366,12 +1412,9 @@ fn max_display_bars(width_cells: u16, gap: bool) -> usize {
     }
 }
 
-
 fn fps_to_dt(fps: u32) -> Duration {
     Duration::from_secs_f64(1.0 / f64::from(fps.clamp(1, 120)))
 }
-
-// fallback bars removed (leave spectrum empty when unavailable)
 
 #[cfg(test)]
 mod tests {
@@ -1399,5 +1442,51 @@ mod tests {
         assert_eq!(settings_parent(Overlay::EqModal), None);
         assert_eq!(settings_parent(Overlay::Playlist), None);
         assert_eq!(settings_parent(Overlay::None), None);
+    }
+
+    #[test]
+    fn host_song_identity_starts_cover_slide_and_resets_smoothing() {
+        let mut app = AppState::new(
+            Config::default(),
+            crate::ui::theme::Theme::default(),
+            crate::data::config::Language::Zh,
+        );
+        let snapshot = |id: &str| HostPlaybackSnapshot {
+            playlist: vec![crate::tmplayer::FullscreenPlaylistItemSeed {
+                id: Some(id.to_string()),
+                title: "Same title".to_string(),
+                artist: "Same artist".to_string(),
+                album: "Same album".to_string(),
+                duration: Duration::from_secs(60),
+            }],
+            current_index: Some(0),
+            ..HostPlaybackSnapshot::default()
+        };
+        sync_from_host_snapshot(&mut app, snapshot("first"));
+        assert!(
+            app.cover_anim.is_none(),
+            "initial sync is not a track transition"
+        );
+        app.spectrum.bars.fill(1.0);
+        let mut output = [0.0];
+        app.spectrum_bar_smoother
+            .apply_in_place(&[1.0], &mut output);
+        let now = Instant::now();
+        app.pending_system_cover_anim = Some((
+            crate::tmplayer::app::state::CoverSnapshot::from(&app.player.track),
+            1,
+            now,
+        ));
+        sync_from_host_snapshot(&mut app, snapshot("second"));
+        assert_eq!(app.playlist.items[0].song_id.as_deref(), Some("second"));
+        assert_eq!(app.cover_anim.as_ref().unwrap().dir, 1);
+        assert!(app.pending_system_cover_anim.is_none());
+        assert!(app.spectrum.bars.iter().all(|value| *value == 0.0));
+        app.spectrum_bar_smoother
+            .apply_in_place(&[1.0], &mut output);
+        assert_eq!(output, [0.35]);
+        sync_from_host_snapshot(&mut app, HostPlaybackSnapshot::default());
+        assert!(app.cover_anim.is_none());
+        assert!(app.playlist.items.is_empty());
     }
 }

@@ -1,5 +1,5 @@
-use super::{LikeMachine, PlaybackRepeatMode, PlaybackRuntimeState, PlaybackTrack};
 use super::player::AudioPlayer;
+use super::{LikeMachine, PlaybackRepeatMode, PlaybackRuntimeState, PlaybackTrack};
 
 pub(crate) struct PlaybackController {
     pub audio_player: AudioPlayer,

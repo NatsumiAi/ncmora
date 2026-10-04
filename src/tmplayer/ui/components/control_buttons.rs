@@ -1,4 +1,5 @@
-use crate::tmplayer::app::state::{AppState, PlaybackState};
+use crate::data::icons::UiIcons;
+use crate::tmplayer::app::state::{AppState, PlaybackState, RepeatMode};
 use crate::tmplayer::utils::input::Action;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -7,25 +8,33 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
-pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
-    let play = match app.player.playback {
-        PlaybackState::Playing => "[]",
-        _ => "[]",
+fn glyphs(app: &AppState) -> [&'static str; 4] {
+    let icons = UiIcons::for_mode(app.config.icon_mode);
+    let repeat = match app.player.repeat_mode {
+        RepeatMode::Sequence => icons.sequence(),
+        RepeatMode::Shuffle => icons.shuffle(),
+        RepeatMode::LoopAll => icons.loop_all(),
+        RepeatMode::LoopOne => icons.loop_one(),
     };
+    [
+        icons.previous(),
+        icons.play_pause(app.player.playback == PlaybackState::Playing),
+        icons.next(),
+        repeat,
+    ]
+}
 
-    let repeat_symbol = app.player.repeat_mode.symbol();
-
+pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
+    let [previous, play, next, repeat] = glyphs(app);
+    let text = Style::default().fg(app.theme.color_text());
     let line = Line::from(vec![
-        Span::styled("[] ", Style::default().fg(app.theme.color_text())),
-        Span::styled(
-            format!("{} ", play),
-            Style::default().fg(app.theme.color_text()),
-        ),
-        Span::styled("[] ", Style::default().fg(app.theme.color_text())),
-        Span::styled(
-            repeat_symbol,
-            Style::default().fg(app.theme.color_subtext()),
-        ),
+        Span::styled(previous, text),
+        Span::styled(" ", text),
+        Span::styled(play, text),
+        Span::styled(" ", text),
+        Span::styled(next, text),
+        Span::styled(" ", text),
+        Span::styled(repeat, Style::default().fg(app.theme.color_subtext())),
     ]);
 
     f.render_widget(
@@ -37,28 +46,18 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
 }
 
 pub fn hit_test(area: Rect, app: &AppState, col: u16, row: u16) -> Option<Action> {
-    if row < area.y || row >= area.y + area.height {
+    if !area.contains((col, row).into()) {
         return None;
     }
-    let play = match app.player.playback {
-        PlaybackState::Playing => "[]",
-        _ => "[]",
-    };
-    let repeat_symbol = app.player.repeat_mode.symbol();
+    let [s_prev, s_play, s_next, repeat_symbol] = glyphs(app);
+    let text_w = [s_prev, s_play, s_next, repeat_symbol]
+        .into_iter()
+        .map(UnicodeWidthStr::width)
+        .sum::<usize>() as u16
+        + 3;
 
-    // Must match render() exactly (including spaces) because we align by glyph width.
-    let s_prev = "[]";
-    let s_play = play;
-    let s_next = "[]";
-    let sep = " ";
-    let label = format!("{s_prev}{sep}{s_play}{sep}{s_next}{sep}{repeat_symbol}");
-
-    let text_w = UnicodeWidthStr::width(label.as_str()) as u16;
-    if text_w == 0 || area.width == 0 {
-        return None;
-    }
-
-    let start_x = area.x + area.width.saturating_sub(text_w) / 2;
+    // Paragraph centers the already-truncated line, rounding each half separately.
+    let start_x = area.x + (area.width / 2).saturating_sub(text_w.min(area.width) / 2);
     if col < start_x || col >= start_x + text_w {
         return None;
     }

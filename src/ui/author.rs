@@ -127,8 +127,11 @@ fn draw_author_header(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let description_line_limit =
-        intro_line_limit(&app.browse.author.description, info_area.width, cover_line_limit);
+    let description_line_limit = intro_line_limit(
+        &app.browse.author.description,
+        info_area.width,
+        cover_line_limit,
+    );
     let available_extra = info_area.height.saturating_sub(3);
     let spacer_height = u16::from(description_line_limit > 0 && available_extra >= 2);
     let description_height = available_extra

@@ -32,10 +32,9 @@ pub fn load() -> Result<Option<PlaybackSessionRecord>> {
         return Ok(None);
     }
 
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path.display()))?;
-    let record: PlaybackSessionRecord = toml::from_str(&raw)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let record: PlaybackSessionRecord =
+        toml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
     if record.queue.is_empty() {
         return Ok(None);
     }

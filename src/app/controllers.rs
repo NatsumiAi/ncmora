@@ -91,7 +91,10 @@ impl SearchController {
     }
 
     pub fn item_start_row(&self, index: usize) -> usize {
-        self.layout_index().get(index).copied().unwrap_or(self.total_rows())
+        self.layout_index()
+            .get(index)
+            .copied()
+            .unwrap_or(self.total_rows())
     }
 
     pub fn item_end_row(&self, index: usize) -> usize {
@@ -107,7 +110,11 @@ impl SearchController {
     }
 
     fn total_rows(&self) -> usize {
-        if self.card_mode { self.card_total_rows } else { self.compact_total_rows }
+        if self.card_mode {
+            self.card_total_rows
+        } else {
+            self.compact_total_rows
+        }
     }
 
     fn max_scroll_rows(&self) -> usize {
@@ -128,8 +135,12 @@ impl SearchController {
         let view = self.view_rows.max(1);
         let start = self.item_start_row(self.focused_idx);
         let end = self.item_end_row(self.focused_idx);
-        if end > self.scroll_rows.saturating_add(view) { self.scroll_rows = end - view; }
-        if start < self.scroll_rows { self.scroll_rows = start; }
+        if end > self.scroll_rows.saturating_add(view) {
+            self.scroll_rows = end - view;
+        }
+        if start < self.scroll_rows {
+            self.scroll_rows = start;
+        }
         self.clamp_scroll();
     }
 
@@ -138,11 +149,15 @@ impl SearchController {
         self.card_mode = card_mode;
         if self.compact_layout_index.len() != self.results.len()
             || self.card_layout_index.len() != self.results.len()
-        { self.rebuild_layout_index(); }
+        {
+            self.rebuild_layout_index();
+        }
         self.ensure_focus_visible();
     }
 
-    pub fn effective_scroll_rows(&self) -> usize { self.scroll_rows.min(self.max_scroll_rows()) }
+    pub fn effective_scroll_rows(&self) -> usize {
+        self.scroll_rows.min(self.max_scroll_rows())
+    }
 
     /// Returns only entries intersecting the row viewport, using cached starts.
     pub fn visible_range(&self, top: usize, bottom: usize) -> Range<usize> {
@@ -151,13 +166,21 @@ impl SearchController {
         let mut high = starts.len();
         while first < high {
             let mid = first + (high - first) / 2;
-            if self.item_end_row(mid) <= top { first = mid + 1; } else { high = mid; }
+            if self.item_end_row(mid) <= top {
+                first = mid + 1;
+            } else {
+                high = mid;
+            }
         }
         let mut last = first;
         high = starts.len();
         while last < high {
             let mid = last + (high - last) / 2;
-            if starts[mid] < bottom { last = mid + 1; } else { high = mid; }
+            if starts[mid] < bottom {
+                last = mid + 1;
+            } else {
+                high = mid;
+            }
         }
         first..last
     }
@@ -169,20 +192,28 @@ impl SearchController {
     }
 
     pub fn set_focus(&mut self, index: usize) {
-        if self.results.is_empty() { self.focused_idx = 0; self.scroll_rows = 0; return; }
+        if self.results.is_empty() {
+            self.focused_idx = 0;
+            self.scroll_rows = 0;
+            return;
+        }
         self.focused_idx = index.min(self.results.len() - 1);
         self.ensure_focus_visible();
     }
 
     pub fn focus_next(&mut self) -> bool {
-        if self.results.is_empty() || self.focused_idx + 1 >= self.results.len() { return false; }
+        if self.results.is_empty() || self.focused_idx + 1 >= self.results.len() {
+            return false;
+        }
         self.focused_idx += 1;
         self.ensure_focus_visible();
         true
     }
 
     pub fn focus_prev(&mut self) -> bool {
-        if self.results.is_empty() || self.focused_idx == 0 { return false; }
+        if self.results.is_empty() || self.focused_idx == 0 {
+            return false;
+        }
         self.focused_idx -= 1;
         self.ensure_focus_visible();
         true
@@ -199,7 +230,9 @@ impl SearchController {
         self.ensure_focus_visible();
     }
 
-    pub fn generation(&self) -> u64 { self.generation }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
 
     pub fn append_results(&mut self, mut results: Vec<SearchItem>) -> usize {
         let added = results.len();
@@ -232,13 +265,36 @@ mod tests {
     use crate::app::{CoverFetchState, SearchItem};
 
     fn item(kind: SearchItemKind, label: &str) -> SearchItem {
-        SearchItem { kind, left_label: label.to_string(), right_label: String::new(), song_id: None, album_id: None, playlist_id: None, artist_id: None, title: None, artist: None, album: None, cover_url: None, duration_ms: None, cover: CoverFetchState::default() }
+        SearchItem {
+            kind,
+            left_label: label.to_string(),
+            right_label: String::new(),
+            song_id: None,
+            album_id: None,
+            playlist_id: None,
+            artist_id: None,
+            title: None,
+            artist: None,
+            album: None,
+            cover_url: None,
+            duration_ms: None,
+            cover: CoverFetchState::default(),
+        }
     }
 
     #[test]
     fn mixed_sections_cache_rows_and_ordinals() {
         let mut state = SearchController::default();
-        state.set_results(vec![item(SearchItemKind::Artist, "a1"), item(SearchItemKind::Artist, "a2"), item(SearchItemKind::Song, "s1"), item(SearchItemKind::Playlist, "p1")], 0, false);
+        state.set_results(
+            vec![
+                item(SearchItemKind::Artist, "a1"),
+                item(SearchItemKind::Artist, "a2"),
+                item(SearchItemKind::Song, "s1"),
+                item(SearchItemKind::Playlist, "p1"),
+            ],
+            0,
+            false,
+        );
         state.set_viewport(20, true);
         assert_eq!(state.item_start_row(0), 0);
         assert_eq!(state.item_start_row(1), 4);
@@ -253,7 +309,10 @@ mod tests {
         let mut state = SearchController::default();
         state.set_results(vec![item(SearchItemKind::Artist, "a")], 1, true);
         state.set_viewport(8, true);
-        assert_eq!(state.append_results(vec![item(SearchItemKind::Song, "s")]), 1);
+        assert_eq!(
+            state.append_results(vec![item(SearchItemKind::Song, "s")]),
+            1
+        );
         assert_eq!(state.item_start_row(1) + state.divider_rows(1), 5);
         state.set_viewport(8, false);
         assert_eq!(state.item_start_row(1) + state.divider_rows(1), 2);
@@ -262,7 +321,13 @@ mod tests {
     #[test]
     fn resize_and_focus_keep_visible_range_deterministic() {
         let mut state = SearchController::default();
-        state.set_results((0..8).map(|i| item(SearchItemKind::Song, &format!("s{i}"))).collect(), 0, false);
+        state.set_results(
+            (0..8)
+                .map(|i| item(SearchItemKind::Song, &format!("s{i}")))
+                .collect(),
+            0,
+            false,
+        );
         state.set_viewport(3, false);
         state.set_focus(6);
         assert_eq!(state.effective_scroll_rows(), 4);

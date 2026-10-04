@@ -1,5 +1,5 @@
-use crate::tmplayer::app::state::{AppState, CoverSnapshot};
 use crate::data::icons::UiIcons;
+use crate::tmplayer::app::state::{AppState, CoverSnapshot};
 use crate::tmplayer::render::cover_cache::CoverKey;
 use crate::tmplayer::ui::borders::SOLID_BORDER;
 use crate::tmplayer::ui::components::{control_buttons, progress_bar, volume_bar};
@@ -241,6 +241,31 @@ pub fn layout(area: Rect, window_width: u16) -> InfoPanelLayout {
         time_line,
     }
 }
+/// The content viewport is reserved even when the album border is hidden.
+pub fn cover_content_rect(cover: Rect) -> Rect {
+    if cover.width >= 3 && cover.height >= 3 {
+        cover.inner(ratatui::layout::Margin {
+            horizontal: 1,
+            vertical: 1,
+        })
+    } else {
+        cover
+    }
+}
+
+pub fn heart_cells(meta: Rect, app: &AppState) -> Option<(u16, u16, u16)> {
+    let heart = UiIcons::for_mode(app.config.icon_mode).heart(app.player.liked);
+    let width = heart.width() as u16;
+    (meta.height > 0 && width > 0 && width <= meta.width)
+        .then(|| (meta.x + meta.width - width, meta.y, width))
+}
+
+pub fn download_cells(meta: Rect, app: &AppState) -> Option<(u16, u16, u16)> {
+    let (heart_x, y, _) = heart_cells(meta, app)?;
+    let glyph = download_glyph(app)?;
+    let width = glyph.width().unwrap_or(1) as u16;
+    (heart_x > meta.x + width).then(|| (heart_x - width - 1, y, width))
+}
 
 /// 标题行右端的下载图标字形；`Hidden`（下载不可用）时不画。
 pub fn download_glyph(app: &AppState) -> Option<char> {
@@ -275,10 +300,7 @@ pub fn render(f: &mut Frame, area: Rect, window_width: u16, app: &mut AppState) 
         let show_border = app.config.album_border;
 
         if let Some(anim) = app.cover_anim.take() {
-            let progress = (app.last_frame.duration_since(anim.started_at).as_secs_f32()
-                / anim.duration.as_secs_f32())
-                .clamp(0.0, 1.0);
-            let offset = (progress * l.cover.width as f32).round() as i16;
+            let (from_dx, to_dx) = anim.slide_offsets(l.cover.width, app.last_frame);
             let (from_box, from_fg) = cover_box_ascii_for_snapshot(
                 &anim.from,
                 l.cover.width,
@@ -298,11 +320,18 @@ pub fn render(f: &mut Frame, area: Rect, window_width: u16, app: &mut AppState) 
                 l.cover.height,
                 &from_box,
                 &to_box,
-                anim.dir,
-                offset,
+                from_dx,
+                to_dx,
             );
-            let fg = if to_fg == app.theme.color_text() { to_fg } else { from_fg };
-            f.render_widget(Paragraph::new(composed).style(Style::default().fg(fg)), l.cover);
+            let fg = if to_fg == app.theme.color_text() {
+                to_fg
+            } else {
+                from_fg
+            };
+            f.render_widget(
+                Paragraph::new(composed).style(Style::default().fg(fg)),
+                l.cover,
+            );
             app.cover_anim = Some(anim);
         } else {
             let snap = CoverSnapshot::from(&app.player.track);
@@ -313,7 +342,10 @@ pub fn render(f: &mut Frame, area: Rect, window_width: u16, app: &mut AppState) 
                 show_border,
                 app,
             );
-            f.render_widget(Paragraph::new(ascii).style(Style::default().fg(fg)), l.cover);
+            f.render_widget(
+                Paragraph::new(ascii).style(Style::default().fg(fg)),
+                l.cover,
+            );
         }
     }
 
@@ -338,7 +370,12 @@ pub fn render(f: &mut Frame, area: Rect, window_width: u16, app: &mut AppState) 
         let heart_style = Style::default()
             .fg(app.theme.color_accent3())
             .add_modifier(Modifier::BOLD);
-        let download_glyph = download_glyph(app);
+        let heart = if heart_cells(meta_rect, app).is_some() {
+            heart
+        } else {
+            ""
+        };
+        let download_glyph = download_cells(meta_rect, app).and_then(|_| download_glyph(app));
         let download_style = match app.download_state {
             crate::tmplayer::DownloadIconState::Downloading => Style::default()
                 .fg(app.theme.color_accent2())
@@ -462,7 +499,8 @@ fn cover_box_ascii_for_snapshot(
 
     let mut grid: Vec<Vec<char>> = vec![vec![' '; width as usize]; height as usize];
 
-    let (inner_x, inner_y, inner_w, inner_h) = if width >= 3 && height >= 3 {
+    let content = cover_content_rect(Rect::new(0, 0, width, height));
+    let (inner_x, inner_y, inner_w, inner_h) = if content.x > 0 {
         if show_border {
             // Border
             let tl = SOLID_BORDER.top_left.chars().next().unwrap_or(' ');
@@ -489,7 +527,12 @@ fn cover_box_ascii_for_snapshot(
         }
 
         // Always reserve the same inner content area, even when border is hidden.
-        (1usize, 1usize, (width - 2) as usize, (height - 2) as usize)
+        (
+            content.x as usize,
+            content.y as usize,
+            content.width as usize,
+            content.height as usize,
+        )
     } else {
         // Too small to reserve padding; render full area.
         (0usize, 0usize, width as usize, height as usize)
@@ -574,22 +617,14 @@ fn compose_slide_cover(
     height: u16,
     from_ascii: &str,
     to_ascii: &str,
-    dir: i8,
-    offset: i16,
+    from_dx: i16,
+    to_dx: i16,
 ) -> String {
-    let w = width as i16;
     let h = height as usize;
 
     let mut grid: Vec<Vec<char>> = vec![vec![' '; width as usize]; h];
     let from_lines = split_lines(from_ascii, h);
     let to_lines = split_lines(to_ascii, h);
-
-    // Next: dir=-1, both move left. Prev: dir=+1, both move right.
-    let (from_dx, to_dx) = if dir < 0 {
-        (-offset, w - offset)
-    } else {
-        (offset, -w + offset)
-    };
 
     blit(&mut grid, &from_lines, from_dx);
     blit(&mut grid, &to_lines, to_dx);

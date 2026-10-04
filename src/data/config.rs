@@ -40,7 +40,7 @@ impl GraphicsProtocol {
             GraphicsProtocol::Off => 0,
             GraphicsProtocol::Halfblocks => 1,
         };
-        let next = (current as i32 + delta).rem_euclid(Self::ALL.len() as i32) as usize;
+        let next = (current + delta).rem_euclid(Self::ALL.len() as i32) as usize;
         Self::ALL[next]
     }
 
@@ -77,7 +77,6 @@ pub struct Config {
     #[serde(default)]
     pub icon_mode: crate::data::icons::IconMode,
 
-
     #[serde(default)]
     pub super_smooth_bar: bool,
 
@@ -92,7 +91,6 @@ pub struct Config {
 
     #[serde(default)]
     pub bar_channel_reverse: bool,
-
 
     #[serde(default)]
     pub default_opening_title: String,
@@ -430,7 +428,6 @@ fn default_album_border() -> bool {
     true
 }
 
-
 fn default_bar_number() -> BarNumber {
     BarNumber::Auto
 }
@@ -657,12 +654,12 @@ impl Config {
             return Ok(cfg);
         }
 
-        let raw = fs::read_to_string(&path)?;
+        let raw = fs::read_to_string(path)?;
         let legacy_startup_folder_key_present = raw.contains(LEGACY_STARTUP_FOLDER_KEY_KEBAB)
             || raw.contains(LEGACY_STARTUP_FOLDER_KEY);
         let graphics_protocol_needs_save = graphics_protocol_needs_save(&raw);
-        let mut cfg: Config = toml::from_str(&raw)
-            .with_context(|| format!("parse {}", path.display()))?;
+        let mut cfg: Config =
+            toml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
 
         if cfg.ui_fps == 0 {
             cfg.ui_fps = 30;
@@ -824,7 +821,8 @@ mod tests {
 
     #[test]
     fn corrupt_config_is_rejected_without_replacement() {
-        let dir = std::env::temp_dir().join(format!("cnmplayer-config-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("cnmplayer-config-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("default.toml");

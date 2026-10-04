@@ -1,7 +1,5 @@
-
 const CELL_W_PX: u32 = 8;
 const CELL_H_PX: u32 = 16;
-
 
 pub fn cover_viewport(
     image_w: u32,

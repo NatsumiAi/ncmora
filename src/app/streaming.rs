@@ -6,13 +6,13 @@ use anyhow::{Context, Result, bail};
 use compio::io::{AsyncWrite, AsyncWriteExt};
 use cyper::Response;
 use futures::StreamExt;
+use parking_lot::{Condvar, Mutex};
 use see::sync::Sender;
 use std::fs::File;
 use std::io::{Cursor, Error, ErrorKind, Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Its synchronous Read/Seek implementation must only run on blocking workers.
@@ -65,7 +65,9 @@ impl StreamingReaderHandle {
 
 impl From<&StreamingReader> for StreamingReaderHandle {
     fn from(reader: &StreamingReader) -> Self {
-        Self { state: reader.state.clone() }
+        Self {
+            state: reader.state.clone(),
+        }
     }
 }
 
@@ -90,12 +92,16 @@ impl StreamingReader {
             request = request.header("Cookie", cookie)?;
         }
         let response = error_for_status(request.send().await?)?;
-        let total = response.content_length().context("Music no content_length!")?;
+        let total = response
+            .content_length()
+            .context("Music no content_length!")?;
         if total == 0 {
             bail!("empty streaming response");
         }
         if let Some(parent) = cache_path.parent() {
-            compio::fs::create_dir_all(parent).await.context("create streaming cache dir")?;
+            compio::fs::create_dir_all(parent)
+                .await
+                .context("create streaming cache dir")?;
         }
         // A cancelled old reader may still be finishing an async write. Never let
         // its close/cleanup truncate or unlink the next reader's temporary file.
@@ -125,13 +131,20 @@ impl StreamingReader {
         let task_state = state.clone();
         compio::runtime::spawn(async move {
             let result = download_streaming(
-                response, writer_file, &tmp_path, cache_path, &task_state, progress_tx,
-            ).await;
+                response,
+                writer_file,
+                &tmp_path,
+                cache_path,
+                &task_state,
+                progress_tx,
+            )
+            .await;
             task_state.finish(&result);
             if result.is_err() {
                 let _ = compio::fs::remove_file(&tmp_path).await;
             }
-        }).detach();
+        })
+        .detach();
         Ok(Self { state, file })
     }
 
@@ -144,7 +157,9 @@ impl StreamingReader {
             let done = self.state.done.load(Ordering::SeqCst);
             if done == 2 {
                 let error = self.state.error.lock();
-                return Err(Error::other(error.as_deref().unwrap_or("download failed").to_owned()));
+                return Err(Error::other(
+                    error.as_deref().unwrap_or("download failed").to_owned(),
+                ));
             }
             let downloaded = self.state.downloaded.load(Ordering::SeqCst);
             if done == 1 || pos < downloaded || (!reading && pos == downloaded) {
@@ -168,7 +183,11 @@ impl Read for StreamingReader {
         self.wait_for_position(pos, true)?;
         // A write may be in flight beyond the published prefix. Limit reads to
         // that prefix, rather than relying on the file's physical length.
-        let available = self.state.downloaded.load(Ordering::SeqCst).saturating_sub(pos);
+        let available = self
+            .state
+            .downloaded
+            .load(Ordering::SeqCst)
+            .saturating_sub(pos);
         let len = available.min(buf.len() as u64) as usize;
         self.file.read(&mut buf[..len])
     }
@@ -212,14 +231,17 @@ async fn download_streaming(
                 bail!("streaming cancelled");
             }
             // Timed polling lets cancellation terminate a stalled CDN response.
-            let chunk = match compio::time::timeout(Duration::from_millis(500), stream.next()).await {
+            let chunk = match compio::time::timeout(Duration::from_millis(500), stream.next()).await
+            {
                 Ok(Some(Ok(chunk))) if !chunk.is_empty() => chunk,
                 Ok(Some(Ok(_))) => continue,
                 Ok(Some(Err(err))) => return Err(err.into()),
                 Ok(None) => break,
                 Err(_) => continue,
             };
-            let next = downloaded.checked_add(chunk.len() as u64).context("streaming length overflow")?;
+            let next = downloaded
+                .checked_add(chunk.len() as u64)
+                .context("streaming length overflow")?;
             if next > total {
                 bail!("streaming response exceeds Content-Length");
             }
@@ -240,7 +262,8 @@ async fn download_streaming(
         cursor.flush().await?;
         file.sync_all().await?;
         Ok(())
-    }.await;
+    }
+    .await;
     // Close before propagating errors/cleanup/rename, including cancellation.
     let close = file.close().await;
     result?;
@@ -258,29 +281,46 @@ mod tests {
 
     #[compio::test]
     async fn complete_stream_is_published_but_truncated_stream_is_not() {
-        for (index, body) in [b"abcdef".as_slice(), b"abc".as_slice()].into_iter().enumerate() {
+        for (index, body) in [b"abcdef".as_slice(), b"abc".as_slice()]
+            .into_iter()
+            .enumerate()
+        {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
             let server = compio::runtime::spawn_blocking(move || {
                 let (mut socket, _) = listener.accept().unwrap();
                 let mut request = [0; 4096];
-                socket.read(&mut request).unwrap();
-                std::io::Write::write_all(&mut socket,
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n").unwrap();
+                std::io::Read::read_exact(&mut socket, &mut request).unwrap();
+                std::io::Write::write_all(
+                    &mut socket,
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
                 std::io::Write::write_all(&mut socket, body).unwrap();
             });
             let directory = std::env::temp_dir().join(format!(
-                "cnmplayer-stream-http-{}-{index}", std::process::id()));
+                "cnmplayer-stream-http-{}-{index}",
+                std::process::id()
+            ));
             let final_path = directory.join("song.audio");
             let http = cyper::Client::builder().no_proxy().build().unwrap();
             let (tx, _rx) = see::sync::channel((0, 0));
-            let reader = StreamingReader::new(&http, &format!("http://{address}/song"),
-                final_path.clone(), None, tx).await.unwrap();
+            let reader = StreamingReader::new(
+                &http,
+                &format!("http://{address}/song"),
+                final_path.clone(),
+                None,
+                tx,
+            )
+            .await
+            .unwrap();
             let result = compio::runtime::spawn_blocking(move || {
                 let mut reader = reader;
                 let mut bytes = Vec::new();
                 reader.read_to_end(&mut bytes).map(|_| bytes)
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             server.await.unwrap();
             if index == 0 {
                 assert_eq!(result.unwrap(), b"abcdef");
@@ -290,30 +330,48 @@ mod tests {
                 assert!(compio::fs::metadata(&final_path).await.is_err());
             }
             compio::runtime::spawn_blocking(move || std::fs::remove_dir_all(directory))
-                .await.unwrap().unwrap();
+                .await
+                .unwrap()
+                .unwrap();
         }
     }
 
     #[test]
     fn seek_rejects_negative_positions_and_overflow() {
         assert_eq!(checked_seek(4, -3).unwrap(), 1);
-        assert_eq!(checked_seek(4, -5).unwrap_err().kind(), ErrorKind::InvalidInput);
-        assert_eq!(checked_seek(u64::MAX, 1).unwrap_err().kind(), ErrorKind::InvalidInput);
+        assert_eq!(
+            checked_seek(4, -5).unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            checked_seek(u64::MAX, 1).unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
     }
 
     #[test]
     fn reads_only_published_bytes_and_propagates_failure() {
-        let path = std::env::temp_dir().join(format!("cnmplayer-stream-test-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("cnmplayer-stream-test-{}", std::process::id()));
         std::fs::write(&path, b"abcdef").unwrap();
         let state = Arc::new(StreamingState::default());
         state.downloaded.store(3, Ordering::SeqCst);
         state.total.store(6, Ordering::SeqCst);
-        let mut reader = StreamingReader { state: state.clone(), file: File::open(&path).unwrap() };
+        let mut reader = StreamingReader {
+            state: state.clone(),
+            file: File::open(&path).unwrap(),
+        };
         let mut buf = [0; 6];
         assert_eq!(reader.read(&mut buf).unwrap(), 3);
         assert_eq!(&buf[..3], b"abc");
         state.finish(&Err(anyhow::anyhow!("truncated response")));
-        assert!(reader.read(&mut buf).unwrap_err().to_string().contains("truncated response"));
+        assert!(
+            reader
+                .read(&mut buf)
+                .unwrap_err()
+                .to_string()
+                .contains("truncated response")
+        );
         drop(reader);
         std::fs::remove_file(path).unwrap();
     }

@@ -5,20 +5,19 @@ use crate::tmplayer::app::state::{EQ_BANDS, EQ_FREQS_HZ, EqSettings};
 use crate::tmplayer::audio::lufs_meter::LufsMeter;
 use crate::tmplayer::audio::pcm_tap::{PcmRing, PcmTap};
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use rodio::cpal::Error;
 use rodio::decoder::DecoderBuilder;
 use rodio::source::SeekError;
 use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use see::sync::Receiver;
-use std::borrow::Cow;
 use std::fs;
 use std::fs::File;
 use std::io::BufReader;
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI32, Ordering};
-use parking_lot::Mutex;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,8 +90,8 @@ impl AudioPlayer {
         if let Some(handle) = self.stream_handle.take() {
             handle.cancel();
         }
-        let had_pending_seek = self.invalidate_seek_on_next_play
-            || self.seek_state.lock().pending_target.is_some();
+        let had_pending_seek =
+            self.invalidate_seek_on_next_play || self.seek_state.lock().pending_target.is_some();
         self.player.stop();
         // 环内还是上一首的样本；不清掉的话示波器会先画一段前一首的波形。
         self.pcm_ring.reset();
@@ -319,7 +318,8 @@ impl AudioPlayer {
 
     /// 用于界面显示的播放位置：后台加载期间直接显示跳转目标。
     pub fn display_position(&self) -> Duration {
-        self.seek_state.lock()
+        self.seek_state
+            .lock()
             .pending_target
             .unwrap_or_else(|| self.player.get_pos())
     }
@@ -550,7 +550,7 @@ fn sanitize_cache_key(raw: &str) -> String {
     }
 }
 
-pub(crate) fn resolve_cache_root(config: &Config) -> Cow<'static, PathBuf> {
+pub(crate) fn resolve_cache_root(config: &Config) -> PathBuf {
     if let Some(custom) = config
         .cache
         .path
@@ -558,10 +558,10 @@ pub(crate) fn resolve_cache_root(config: &Config) -> Cow<'static, PathBuf> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return Cow::Owned(PathBuf::from(custom));
+        return PathBuf::from(custom);
     }
 
-    Cow::Borrowed(&STORAGE.cache)
+    STORAGE.cache.clone()
 }
 
 #[derive(Debug, Clone)]

@@ -1,6 +1,7 @@
 use super::{DownloadPathEdit, HitRect, Overlay};
 use std::time::Instant;
 
+#[derive(Default)]
 pub(crate) struct SettingsController {
     pub selected: usize,
     pub playback_selected: usize,
@@ -13,24 +14,6 @@ pub(crate) struct SettingsController {
     pub download_reset_armed: bool,
     pub item_hits: Vec<(HitRect, usize)>,
     pub last_click: Option<(Instant, Overlay, usize)>,
-}
-
-impl Default for SettingsController {
-    fn default() -> Self {
-        Self {
-            selected: 0,
-            playback_selected: 0,
-            lyrics_selected: 0,
-            keybind_selected: 0,
-            keybind_rebinding: None,
-            keybind_scroll: 0,
-            download_selected: 0,
-            download_path_edit: None,
-            download_reset_armed: false,
-            item_hits: Vec::new(),
-            last_click: None,
-        }
-    }
 }
 
 impl SettingsController {
@@ -53,7 +36,11 @@ impl SettingsController {
 
     pub fn begin_download_path_edit(&mut self, value: String) {
         let cursor = value.chars().count();
-        self.download_path_edit = Some(DownloadPathEdit { buffer: value, cursor, window_col: 0 });
+        self.download_path_edit = Some(DownloadPathEdit {
+            buffer: value,
+            cursor,
+            window_col: 0,
+        });
     }
 
     pub fn cancel_download_path_edit(&mut self) {

@@ -395,13 +395,13 @@ impl ApiState {
         let response = self.http.get(url)?.send().await?;
         let response = error_for_status(response)?;
         let expected_len = response.content_length();
-        if let Some(content_len) = expected_len {
-            if content_len > MAX_COVER_IMAGE_BYTES as u64 {
-                return Err(anyhow!(
-                    "cover image exceeds {} byte limit",
-                    MAX_COVER_IMAGE_BYTES
-                ));
-            }
+        if let Some(content_len) = expected_len
+            && content_len > MAX_COVER_IMAGE_BYTES as u64
+        {
+            return Err(anyhow!(
+                "cover image exceeds {} byte limit",
+                MAX_COVER_IMAGE_BYTES
+            ));
         }
 
         let mut bytes = Vec::with_capacity(expected_len.unwrap_or(64 * 1024) as usize);
@@ -417,13 +417,13 @@ impl ApiState {
             bytes.extend_from_slice(&chunk);
         }
 
-        if let Some(expected_len) = expected_len {
-            if bytes.len() != expected_len as usize {
-                return Err(anyhow!(
-                    "cover image length mismatch: expected {expected_len}, got {}",
-                    bytes.len()
-                ));
-            }
+        if let Some(expected_len) = expected_len
+            && bytes.len() != expected_len as usize
+        {
+            return Err(anyhow!(
+                "cover image length mismatch: expected {expected_len}, got {}",
+                bytes.len()
+            ));
         }
         if bytes.is_empty() {
             return Err(anyhow!("cover image response was empty"));
@@ -556,7 +556,11 @@ mod tests {
                 let (mut socket, _) = listener.accept().unwrap();
                 let mut request = [0; 1024];
                 let _ = socket.read(&mut request);
-                write!(socket, "HTTP/1.1 200 OK\r\n{headers}Connection: close\r\n\r\n").unwrap();
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\n{headers}Connection: close\r\n\r\n"
+                )
+                .unwrap();
                 socket.write_all(&body).unwrap();
             });
             let http = cyper::Client::builder().no_proxy().build().unwrap();
@@ -589,10 +593,11 @@ mod tests {
         });
         let http = cyper::Client::builder().no_proxy().build().unwrap();
         let api = ApiState::new(None, http).unwrap();
-        assert!(api
-            .fetch_cover_bytes(&format!("http://{address}/oversize"))
-            .await
-            .is_err());
+        assert!(
+            api.fetch_cover_bytes(&format!("http://{address}/oversize"))
+                .await
+                .is_err()
+        );
         server.await.unwrap();
     }
 

@@ -1,5 +1,5 @@
-use crate::tmplayer::app::state::AppState;
 use crate::data::config::BarChannels;
+use crate::tmplayer::app::state::AppState;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -204,7 +204,9 @@ fn build_display_vals(
 ) -> [f32; 192] {
     let mut values = [0.0; 192];
     let draw_total = draw_total.min(values.len());
-    if draw_total == 0 { return values; }
+    if draw_total == 0 {
+        return values;
+    }
     match mode {
         BarChannels::Mono => {
             let data_len = mono.len().max(1);

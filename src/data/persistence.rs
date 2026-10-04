@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use parking_lot::Mutex;
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::thread::{self, JoinHandle};
 
 type Job = Box<dyn FnOnce() -> Result<()> + Send + 'static>;
@@ -54,7 +54,10 @@ impl PersistenceWorker {
     }
 
     pub fn handle(&self) -> PersistenceHandle {
-        PersistenceHandle { tx: self.tx.clone(), errors: self.errors.clone() }
+        PersistenceHandle {
+            tx: self.tx.clone(),
+            errors: self.errors.clone(),
+        }
     }
 
     /// Observe the first background failure without consuming a flush barrier.

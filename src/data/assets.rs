@@ -1,7 +1,6 @@
-use crate::data::atomic_file;
 use crate::STORAGE;
+use crate::data::atomic_file;
 use anyhow::{Context, Result};
-use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -36,12 +35,11 @@ static ASSET_ROOT: LazyLock<PathBuf> = LazyLock::new(|| {
         .map(PathBuf::from)
         .unwrap_or_else(|| STORAGE.config.clone())
 });
-static ASSETS_READY: LazyLock<Result<(), String>> = LazyLock::new(|| {
-    ensure_all_assets(resolve_asset_root().as_ref()).map_err(|error| error.to_string())
-});
+static ASSETS_READY: LazyLock<Result<(), String>> =
+    LazyLock::new(|| ensure_all_assets(&ASSET_ROOT).map_err(|error| error.to_string()));
 
-pub fn resolve_asset_root() -> Cow<'static, PathBuf> {
-    Cow::Borrowed(&ASSET_ROOT)
+pub fn resolve_asset_root() -> &'static Path {
+    &ASSET_ROOT
 }
 
 pub fn resolve_asset_path(rel: &Path) -> PathBuf {

@@ -1,5 +1,5 @@
-pub mod atomic_file;
 pub mod assets;
+pub mod atomic_file;
 pub mod config;
 pub mod icons;
 pub mod persistence;
