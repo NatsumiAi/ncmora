@@ -1,6 +1,8 @@
 use super::{LikeMachine, PlaybackRepeatMode, PlaybackRuntimeState, PlaybackTrack};
+use super::player::AudioPlayer;
 
 pub(crate) struct PlaybackController {
+    pub audio_player: AudioPlayer,
     pub now_playing: Option<PlaybackTrack>,
     pub now_playing_liked: bool,
     pub like_machine: LikeMachine,
@@ -12,9 +14,10 @@ pub(crate) struct PlaybackController {
     pub playback_state: PlaybackRuntimeState,
 }
 
-impl Default for PlaybackController {
-    fn default() -> Self {
+impl PlaybackController {
+    pub fn new(audio_player: AudioPlayer) -> Self {
         Self {
+            audio_player,
             now_playing: None,
             now_playing_liked: false,
             like_machine: LikeMachine::default(),
@@ -26,9 +29,7 @@ impl Default for PlaybackController {
             playback_state: PlaybackRuntimeState::Stopped,
         }
     }
-}
 
-impl PlaybackController {
     pub fn cycle_repeat_mode(&mut self) {
         self.playback_repeat_mode = self.playback_repeat_mode.next();
     }

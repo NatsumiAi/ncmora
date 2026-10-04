@@ -12,6 +12,24 @@ enum Command {
     Shutdown(Sender<()>),
 }
 
+/// Cloneable submission endpoint for asynchronous producers. The worker owner
+/// remains responsible for flushing and shutting down the shared FIFO.
+#[derive(Clone)]
+pub struct PersistenceHandle {
+    tx: SyncSender<Command>,
+}
+
+impl PersistenceHandle {
+    pub fn enqueue<F>(&self, job: F) -> Result<()>
+    where
+        F: FnOnce() -> Result<()> + Send + 'static,
+    {
+        self.tx
+            .try_send(Command::Job(Box::new(job)))
+            .map_err(|error| anyhow!("persistence queue unavailable: {error}"))
+    }
+}
+
 /// Ordered, single-flight persistence worker. Jobs are executed in submission
 /// order, keeping the newest completed snapshot from being overwritten by an
 /// older write. `flush` is the shutdown barrier used by the owner at exit.
@@ -34,6 +52,10 @@ impl PersistenceWorker {
             thread: Some(thread),
             errors,
         })
+    }
+
+    pub fn handle(&self) -> PersistenceHandle {
+        PersistenceHandle { tx: self.tx.clone() }
     }
 
     /// Observe the first background failure without consuming a flush barrier.

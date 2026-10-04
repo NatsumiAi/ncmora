@@ -74,7 +74,7 @@ use input_controller::InputController;
 use download_controller::DownloadController;
 use startup_controller::StartupController;
 use crate::data::atomic_file::write_atomic;
-use crate::data::persistence::PersistenceWorker;
+use crate::data::persistence::{PersistenceHandle, PersistenceWorker};
 use streaming::StreamingReader;
 
 const MAX_INPUT_LEN: usize = 64;
@@ -2595,12 +2595,14 @@ pub struct FullscreenRuntimeSnapshot {
 struct CoverFetchRequest {
     song_id: String,
     url: String,
+    generation: u64,
 }
 
 #[derive(Debug, Clone)]
 struct CoverFetchResult {
     song_id: String,
     url: String,
+    generation: u64,
     bytes: Option<Vec<u8>>,
 }
 
@@ -2634,6 +2636,30 @@ fn validate_cached_cover(bytes: Vec<u8>) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// Only validated API bytes enter this path. Keep the buffer shared with the
+/// FIFO job until completion, then recover ownership without copying its data.
+async fn persist_fetched_cover(
+    persistence: &PersistenceHandle,
+    path: PathBuf,
+    bytes: Vec<u8>,
+) -> Vec<u8> {
+    let bytes = Arc::new(bytes);
+    let job_bytes = bytes.clone();
+    let (done_tx, done_rx) = futures::channel::oneshot::channel();
+    let queued = persistence.enqueue(move || {
+        let result = write_atomic(&path, &job_bytes);
+        drop(job_bytes);
+        let _ = done_tx.send(());
+        result
+    });
+    if queued.is_ok() {
+        let _ = done_rx.await;
+    } else if let Err(error) = queued {
+        log::warn!("cover persistence queue unavailable: {error:#}");
+    }
+    Arc::unwrap_or_clone(bytes)
+}
+
 #[derive(Debug, Clone)]
 struct LyricFetchRequest {
     song_id: String,
@@ -2651,6 +2677,7 @@ async fn loop_cover_fetch(
     tx: Sender<CoverFetchResult>,
     client: Client,
     cache_dir: PathBuf,
+    persistence: PersistenceHandle,
 ) {
     let Ok(api) = ApiState::new(None, client) else {
         return;
@@ -2670,13 +2697,16 @@ async fn loop_cover_fetch(
                 return cached;
             }
         }
-        api.fetch_cover_bytes(&req.url).await.ok()
+        let bytes = api.fetch_cover_bytes(&req.url).await.ok()?;
+        let path = cover_cache_path_for_dir(&cache_dir, &req.url)?;
+        Some(persist_fetched_cover(&persistence, path, bytes).await)
     };
     while let Ok(req) = rx.recv().await {
         let bytes = process_fn(&req).await;
         let _ = tx.send(CoverFetchResult {
             song_id: req.song_id,
             url: req.url,
+            generation: req.generation,
             bytes,
         });
     }
@@ -2720,6 +2750,7 @@ pub struct App {
     playlist_fetch: Option<PlaylistFetchSlot>,
     /// 上次检查 stderr 日志体积的时刻。
     stderr_trim_checked_at: Option<Instant>,
+    stderr_trim_inflight: Option<Receiver<()>>,
     home_sidebar_anim_span_cells: u16,
     pub search: SearchController,
     pub playback: PlaybackController,
@@ -2781,6 +2812,7 @@ pub struct App {
     cover_fetch_tx: UnboundedSender<CoverFetchRequest>,
     cover_fetch_rx: Receiver<CoverFetchResult>,
     cover_fetch_inflight_url: Option<String>,
+    cover_fetch_generation: u64,
     cover_fetch_last_attempt_at: Option<Instant>,
     lyric_fetch_tx: UnboundedSender<LyricFetchRequest>,
     lyric_fetch_rx: Receiver<LyricFetchResult>,
@@ -2825,13 +2857,23 @@ impl App {
             crate::app::download::resolve_download_root(config.download_path.as_deref());
         let mpris_bridge = MprisBridge::new(&cache_root, &config.cache);
         if config.cache.clean_on_startup {
-            let _ = cleanup_cache_dir(&cover_cache_dir, &config.cache);
+            let startup_dir = cover_cache_dir.clone();
+            let startup_policy = config.cache.clone();
+            compio::runtime::spawn_blocking(move || {
+                let _ = cleanup_cache_dir(&startup_dir, &startup_policy);
+            })
+            .detach();
         }
-        let _ = fs::create_dir_all(&cover_cache_dir);
 
         let (cover_fetch_tx, cover_fetch_req_rx) = unbounded();
         let (cover_fetch_res_tx, cover_fetch_rx) = mpsc::channel::<CoverFetchResult>();
-        let worker = loop_cover_fetch(cover_fetch_req_rx, cover_fetch_res_tx, http_client.clone());
+        let worker = loop_cover_fetch(
+            cover_fetch_req_rx,
+            cover_fetch_res_tx,
+            http_client.clone(),
+            cover_cache_dir.clone(),
+            persistence.handle(),
+        );
         launch(worker);
 
         let api = ApiState::new(saved_cookie.clone(), http_client.clone())?;
@@ -2854,6 +2896,7 @@ impl App {
             author_fetch: None,
             playlist_fetch: None,
             stderr_trim_checked_at: None,
+            stderr_trim_inflight: None,
             home_sidebar_anim_span_cells: 24,
             search: SearchController::default(),
             playback: PlaybackController::new(audio_player),
@@ -2902,6 +2945,7 @@ impl App {
             cover_fetch_tx,
             cover_fetch_rx,
             cover_fetch_inflight_url: None,
+            cover_fetch_generation: 0,
             cover_fetch_last_attempt_at: None,
             lyric_fetch_tx,
             lyric_fetch_rx,
@@ -4161,9 +4205,14 @@ impl App {
         }
     }
 
-    /// 周期性检查 stderr 日志体积。原生库可能持续刷 stderr，
-    /// 而那个文件不经 ftail，需要自己设上限。
+    /// Periodic stderr maintenance runs off the UI reactor, with one job at a time.
     fn tick_stderr_log_trim(&mut self) {
+        if let Some(rx) = self.stderr_trim_inflight.as_ref() {
+            match rx.try_recv() {
+                Ok(()) | Err(TryRecvError::Disconnected) => self.stderr_trim_inflight = None,
+                Err(TryRecvError::Empty) => return,
+            }
+        }
         const CHECK_INTERVAL: Duration = Duration::from_secs(60);
         let due = match self.stderr_trim_checked_at {
             Some(at) => at.elapsed() >= CHECK_INTERVAL,
@@ -4173,7 +4222,13 @@ impl App {
             return;
         }
         self.stderr_trim_checked_at = Some(Instant::now());
-        crate::trim_stderr_log_if_needed();
+        let (tx, rx) = mpsc::channel();
+        self.stderr_trim_inflight = Some(rx);
+        compio::runtime::spawn_blocking(move || {
+            crate::trim_stderr_log_if_needed();
+            let _ = tx.send(());
+        })
+        .detach();
     }
 
     /// 搬运侧边栏歌单的异步结果（每帧调用，结果就绪才动状态）。
@@ -4825,7 +4880,6 @@ impl App {
             );
             return;
         };
-
         self.toggle_download(DownloadCandidate {
             song_id: track.song_id,
             title: track.title,
@@ -4870,6 +4924,23 @@ impl App {
                 &candidate.album,
             ),
         };
+        match self.downloads.manager.known_state_of(&candidate.song_id, &target) {
+            None => {
+                self.downloads.pending_intent = Some(candidate);
+                self.set_runtime_status(self.lang_text(
+                    "正在检查已有下载，请稍候",
+                    "Checking existing downloads, please wait",
+                ));
+                return;
+            }
+            Some(DownloadState::Done) => {
+                self.set_runtime_status(self.lang_text("歌曲已下载", "Song already downloaded"));
+                return;
+            }
+            Some(DownloadState::Downloading) => return,
+            Some(DownloadState::NotDownloaded) => {}
+        }
+
         let level = self
             .config
             .download_audio_quality
@@ -4955,6 +5026,9 @@ impl App {
                     ));
                 }
             }
+        }
+        if let Some(candidate) = self.downloads.pending_intent.take() {
+            self.toggle_download(candidate);
         }
     }
 
@@ -5211,61 +5285,49 @@ impl App {
     }
 
     fn cover_cache_path_for_url(&self, url: &str) -> Option<PathBuf> {
-        let key = url.trim();
-        if key.is_empty() {
-            return None;
-        }
-
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        let hash = hasher.finish();
-        Some(self.cover_cache_dir.join(format!("{hash:016x}.img")))
+        cover_cache_path_for_dir(&self.cover_cache_dir, url)
     }
 
-    fn load_cover_from_disk_cache(&self, url: &str) -> Option<Vec<u8>> {
+    async fn load_cover_from_disk_cache(&self, url: &str) -> Option<Vec<u8>> {
         let path = self.cover_cache_path_for_url(url)?;
-        let bytes = fs::read(path).ok()?;
-        if bytes.is_empty() {
-            return None;
-        }
-        Some(bytes)
+        compio::runtime::spawn_blocking(move || {
+            std::fs::read(path).ok().and_then(validate_cached_cover)
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
-    fn persist_cover_to_disk_cache(&self, url: &str, bytes: &[u8]) {
-        if bytes.is_empty() {
-            return;
-        }
-
+    async fn persist_cover_to_disk_cache(&self, url: &str, bytes: Vec<u8>) -> Vec<u8> {
         let Some(path) = self.cover_cache_path_for_url(url) else {
-            return;
+            return bytes;
         };
-
-        let _ = fs::create_dir_all(&self.cover_cache_dir);
-        let _ = fs::write(path, bytes);
+        persist_fetched_cover(&self.persistence.handle(), path, bytes).await
     }
 
     async fn fetch_cover_with_disk_cache(&self, url: &str) -> Option<Vec<u8>> {
-        if let Some(bytes) = self.load_cover_from_disk_cache(url) {
+        if let Some(bytes) = self.load_cover_from_disk_cache(url).await {
             return Some(bytes);
         }
 
         let bytes = self.api.fetch_cover_bytes(url).await.ok()?;
-        if bytes.is_empty() {
-            return None;
-        }
-        self.persist_cover_to_disk_cache(url, &bytes);
-        Some(bytes)
+        Some(self.persist_cover_to_disk_cache(url, bytes).await)
     }
 
     fn apply_cover_fetch_result(&mut self, result: CoverFetchResult) {
-        if self.cover_fetch_inflight_url.as_deref() == Some(result.url.as_str()) {
-            self.cover_fetch_inflight_url = None;
+        if result.generation != self.cover_fetch_generation
+            || self.cover_fetch_inflight_url.as_deref() != Some(result.url.as_str())
+        {
+            return;
         }
+        self.cover_fetch_inflight_url = None;
 
         let Some(now) = self.playback.now_playing.as_ref() else {
             return;
         };
-        if now.song_id != result.song_id {
+        if now.song_id != result.song_id
+            || now.cover_url.as_deref().map(str::trim) != Some(result.url.as_str())
+        {
             return;
         }
 
@@ -5277,7 +5339,6 @@ impl App {
             return;
         };
 
-        self.persist_cover_to_disk_cache(&result.url, &bytes);
         if let Some(now_mut) = self.playback.now_playing.as_mut() {
             now_mut.cover = Some(bytes.clone());
         }
@@ -5306,20 +5367,8 @@ impl App {
             }
         };
 
-        if let Some(bytes) = self.load_cover_from_disk_cache(&url) {
-            if let Some(now_mut) = self.playback.now_playing.as_mut() {
-                now_mut.cover = Some(bytes.clone());
-            }
-            if let Some(index) = self.playback.playback_index {
-                if let Some(slot) = self.playback.playback_queue.get_mut(index) {
-                    slot.cover = Some(bytes);
-                }
-            }
-            self.cover_fetch_inflight_url = None;
-            return;
-        }
-
-        if self.cover_fetch_inflight_url.as_deref() == Some(url.as_str()) {
+        let url = url.trim().to_string();
+        if url.is_empty() || self.cover_fetch_inflight_url.as_deref() == Some(url.as_str()) {
             return;
         }
 
@@ -5330,11 +5379,14 @@ impl App {
             }
         }
 
+        let generation = self.cover_fetch_generation.wrapping_add(1);
         let req = CoverFetchRequest {
             song_id,
-            url: url.trim().into(),
+            url: url.clone(),
+            generation,
         };
         if self.cover_fetch_tx.start_send(req).is_ok() {
+            self.cover_fetch_generation = generation;
             self.cover_fetch_inflight_url = Some(url);
             self.cover_fetch_last_attempt_at = Some(now_at);
         }
@@ -5447,35 +5499,32 @@ impl App {
     }
 
     fn trim_non_current_cover_memory(&mut self, current_index: usize) {
-        let cover_cache_dir = self.cover_cache_dir.clone();
+        let cover_cache_dir = &self.cover_cache_dir;
+        let persistence = &self.persistence;
         for (idx, track) in self.playback.playback_queue.iter_mut().enumerate() {
             if idx == current_index {
                 continue;
             }
 
-            if let (Some(bytes), Some(url)) = (track.cover.as_deref(), track.cover_url.as_deref()) {
-                let mut hasher = DefaultHasher::new();
-                url.hash(&mut hasher);
-                let hash = hasher.finish();
-                let path = cover_cache_dir.join(format!("{hash:016x}.img"));
-                let _ = fs::create_dir_all(&cover_cache_dir);
-                let _ = fs::write(path, bytes);
+            if let (Some(bytes), Some(url)) = (track.cover.take(), track.cover_url.as_deref()) {
+                if let Some(path) = cover_cache_path_for_dir(cover_cache_dir, url) {
+                    let _ = persistence.enqueue(move || {
+                        if let Some(bytes) = validate_cached_cover(bytes) {
+                            write_atomic(&path, &bytes)?;
+                        }
+                        Ok(())
+                    });
+                }
             }
-            track.cover = None;
         }
     }
 
     async fn enrich_track_metadata(&mut self, track: &mut PlaybackTrack, allow_network: bool) {
-        if track.cover.is_none() {
+        // Queue switches hydrate through the cover worker after the new track is
+        // installed. Neither disk IO nor image decoding delays the transition.
+        if allow_network && track.cover.is_none() {
             if let Some(url) = track.cover_url.as_deref() {
-                let bytes = if allow_network {
-                    self.fetch_cover_with_disk_cache(url).await
-                } else {
-                    self.load_cover_from_disk_cache(url)
-                };
-                if let Some(bytes) = bytes {
-                    track.cover = Some(bytes);
-                }
+                track.cover = self.fetch_cover_with_disk_cache(url).await;
             }
         }
 
@@ -10598,6 +10647,25 @@ fn placeholder_cover_ascii(width: u16, height: u16, ch: char) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_cover_requires_decodable_image_and_terminal_marker() {
+        for format in [image::ImageFormat::Png, image::ImageFormat::Jpeg] {
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(2, 2)
+                .write_to(&mut encoded, format)
+                .unwrap();
+            let complete = encoded.into_inner();
+            assert_eq!(validate_cached_cover(complete.clone()), Some(complete.clone()));
+
+            let mut incomplete = complete;
+            incomplete.pop();
+            assert!(validate_cached_cover(incomplete).is_none());
+        }
+
+        assert!(validate_cached_cover(Vec::new()).is_none());
+        assert!(validate_cached_cover(b"not an image\xff\xd9".to_vec()).is_none());
+    }
 
     /// 无后缀默认走混合搜索；后缀命中时只搜该类型（`@artist` 与 `@author` 同义）。
     #[test]

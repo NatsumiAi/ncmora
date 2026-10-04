@@ -1,4 +1,5 @@
 use super::download::DownloadEvent;
+use super::{DownloadManager, DownloadRowCache, DownloadState, PlaylistPageKind};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -12,6 +13,7 @@ pub(crate) struct DownloadController {
     pub now_playing_state: DownloadState,
     pub root: Option<PathBuf>,
     pub page_kind: PlaylistPageKind,
+    pub pending_intent: Option<super::DownloadCandidate>,
 }
 impl DownloadController {
     pub fn poll(&mut self) -> Vec<DownloadEvent> {
