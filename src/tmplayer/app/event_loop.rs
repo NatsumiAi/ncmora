@@ -376,7 +376,8 @@ pub async fn run(
     )
     .await;
 
-    loop {
+    let loop_result: Result<()> = async {
+        loop {
         let frame_start = Instant::now();
         let mut state_changed = false;
 
@@ -506,11 +507,21 @@ pub async fn run(
         if tui.should_quit {
             break;
         }
+        }
+        Ok(())
     }
+    .await;
 
-    tui.exit()?;
-    disable_raw_mode()?;
-    let _ = compio::runtime::spawn_blocking(move || cava.shutdown_blocking()).await;
+    let exit_result = tui.exit();
+    let raw_result = disable_raw_mode();
+    let cava_result = compio::runtime::spawn_blocking(move || cava.shutdown_blocking())
+        .await
+        .map_err(|_| anyhow::anyhow!("cava shutdown task panicked"));
+    loop_result?;
+    exit_result?;
+    raw_result?;
+    cava_result?;
+
 
     let exit = match app.exit_request {
         Some(exit) => exit,

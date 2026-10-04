@@ -2185,8 +2185,10 @@ mod tests {
             halfblocks.poll();
             halfblocks.paint(&mut first, content, 1, from.cover.as_deref().unwrap());
             halfblocks.paint(&mut second, content, 2, to.cover.as_deref().unwrap());
-            if first[(content.x, content.y)].fg == red && second[(content.x, content.y)].fg == blue
-            {
+            let first_cell = &first[(content.x, content.y)];
+            let second_cell = &second[(content.x, content.y)];
+            if (first_cell.fg == red || first_cell.bg == red)
+                && (second_cell.fg == blue || second_cell.bg == blue) {
                 break;
             }
             assert!(
@@ -2202,23 +2204,25 @@ mod tests {
                 let started_at = Instant::now();
                 app.start_cover_anim(from.clone(), to.clone(), dir, started_at);
                 app.last_frame = started_at + Duration::from_millis(110);
-                let (_, buffer) = render_to_buffer_sized(120, 40, &mut app, |f, app, _| {
+                let (_, original) = render_to_buffer_sized(120, 40, &mut app, |f, app, _| {
                     info_panel::render(f, f.area(), 120, app);
-                    paint_halfblock_cover(f.buffer_mut(), &mut halfblocks, cover, app);
                 });
-                let left = &buffer[(cover.x + cover.width / 4, content.y)];
-                let right = &buffer[(cover.x + cover.width * 3 / 4, content.y)];
-                assert_eq!(left.symbol(), "▀");
-                assert_eq!(right.symbol(), "▀");
-                assert_eq!(left.fg, if dir < 0 { red } else { blue });
-                assert_eq!(right.fg, if dir < 0 { blue } else { red });
-                for y in buffer.area.top()..buffer.area.bottom() {
-                    for x in buffer.area.left()..buffer.area.right() {
-                        if buffer[(x, y)].symbol() == "▀" {
-                            assert!(cover.contains((x, y).into()), "cover escaped its clip");
+                let mut expected = original.clone();
+                let anim = app.cover_anim.as_ref().unwrap();
+                let (from_dx, to_dx) = anim.slide_offsets(cover.width, app.last_frame);
+                for (source, dx) in [(&first, from_dx), (&second, to_dx)] {
+                    for y in content.top()..content.bottom() {
+                        for x in content.left()..content.right() {
+                            let dest_x = i32::from(x) + i32::from(dx);
+                            if dest_x >= i32::from(cover.left()) && dest_x < i32::from(cover.right()) {
+                                expected[(dest_x as u16, y)] = source[(x, y)].clone();
+                            }
                         }
                     }
                 }
+                let mut actual = original;
+                paint_halfblock_cover(&mut actual, &mut halfblocks, cover, &app);
+                assert_eq!(actual, expected, "slide must preserve every chafa glyph/color and clip to the cover");
             }
         }
     }

@@ -305,12 +305,14 @@ fn service_worker(
         match child_status {
             Some((cfg, Ok(Some(status)))) => {
                 stop_process(&mut active);
+                clear_snapshot(&snapshot);
                 failed_cfg = Some(cfg);
                 *error.lock() = Some(format!("cava exited with status {status}"));
             }
             Some((_, Ok(None))) | None => {}
             Some((cfg, Err(err))) => {
                 stop_process(&mut active);
+                clear_snapshot(&snapshot);
                 failed_cfg = Some(cfg);
                 *error.lock() = Some(format!("wait for cava: {err}"));
             }
