@@ -5366,7 +5366,7 @@ impl App {
         if result.song_id.is_empty() {
             if self.playback.playback_queue_cover_url.as_deref() == Some(result.url.as_str()) {
                 self.playback.playback_queue_cover = Some(bytes);
-                self.playback.playback_queue_cover_loaded_url = Some(result.url);
+                self.playback.playback_queue_cover_url = Some(result.url);
             }
             return;
         }
@@ -5428,12 +5428,12 @@ impl App {
     fn maybe_schedule_queue_cover_fetch(&mut self) {
         let Some(url) = self.playback.playback_queue_cover_url.clone() else {
             self.playback.playback_queue_cover = None;
-            self.playback.playback_queue_cover_loaded_url = None;
+            self.playback.playback_queue_cover = None;
             return;
         };
         let url = url.trim().to_string();
         if url.is_empty()
-            || self.playback.playback_queue_cover_loaded_url.as_deref() == Some(url.as_str())
+            || self.playback.playback_queue_cover.is_some()
             || self.cover_fetch_inflight_url.is_some()
         {
             return;
@@ -5456,9 +5456,8 @@ impl App {
             .map(|now| now.cover.is_none() && now.cover_url.is_some())
             .unwrap_or(false);
         let needs_queue = self.playback.playback_queue_cover_url.is_some()
-            && self.playback.playback_queue_cover_loaded_url
-                != self.playback.playback_queue_cover_url;
-        if self.cover_fetch_inflight_url.is_none() && !needs_now && !needs_queue { return; }
+            && self.playback.playback_queue_cover.is_none();
+        let _ = needs_queue;
         loop {
             match self.cover_fetch_rx.try_recv() {
                 Ok(result) => self.apply_cover_fetch_result(result),

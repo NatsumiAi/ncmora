@@ -8,6 +8,7 @@ pub(crate) struct PlaybackController {
     pub(super) like_machine: LikeMachine,
     pub playback_queue: Vec<PlaybackTrack>,
     pub playback_queue_cover_url: Option<String>,
+    pub playback_queue_cover: Option<Vec<u8>>,
     pub playback_queue_source_id: Option<String>,
     pub playback_index: Option<usize>,
     pub playback_repeat_mode: PlaybackRepeatMode,
@@ -23,6 +24,7 @@ impl PlaybackController {
             like_machine: LikeMachine::default(),
             playback_queue: Vec::new(),
             playback_queue_cover_url: None,
+            playback_queue_cover: None,
             playback_queue_source_id: None,
             playback_index: None,
             playback_repeat_mode: PlaybackRepeatMode::Sequence,
@@ -45,7 +47,7 @@ impl PlaybackController {
         self.playback_state = PlaybackRuntimeState::Stopped;
         self.playback_repeat_mode = PlaybackRepeatMode::Sequence;
         self.playback_queue_cover_url = None;
-        self.playback_queue_source_id = None;
+        self.playback_queue_cover = None;
     }
 
     pub fn replace_queue(
@@ -58,6 +60,7 @@ impl PlaybackController {
         self.playback_queue = queue;
         self.playback_index = index;
         self.playback_queue_cover_url = cover_url;
+        self.playback_queue_cover = None;
         self.playback_queue_source_id = source_id;
     }
 }

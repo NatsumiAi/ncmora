@@ -74,6 +74,7 @@ pub enum HostRepeatMode {
 pub struct HostPlaybackSnapshot {
     pub playlist: Vec<FullscreenPlaylistItemSeed>,
     pub current_index: Option<usize>,
+    pub playlist_cover: Option<Vec<u8>>,
     pub current_track: Option<FullscreenTrackSeed>,
     pub current_liked: bool,
     pub state: HostPlaybackState,

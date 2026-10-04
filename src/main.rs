@@ -134,6 +134,7 @@ impl tmplayer::HostPlaybackBridge for AppFullscreenBridge<'_> {
 
         tmplayer::HostPlaybackSnapshot {
             playlist,
+            current_index: snapshot.current_index,
             playlist_cover: snapshot.playlist_cover,
             current_track,
             current_liked: snapshot.now_playing_liked,
