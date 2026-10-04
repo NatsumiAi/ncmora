@@ -5314,10 +5314,12 @@ impl App {
         let path = self.playback.audio_player.cached_song_path(id, quality);
 
         if is_nonempty_file(&path).await {
-            return match self.playback.audio_player.play_from_file(&path).await {
-                Ok(_) => ok(self),
-                Err(err) => fail(err, self),
-            };
+            // Startup cache cleanup runs in the background. The existence check and
+            // decoder open are intentionally not one atomic operation; if cleanup
+            // wins that race, treat the cache as stale and use the normal stream path.
+            if let Ok(()) = self.playback.audio_player.play_from_file(&path).await {
+                return ok(self);
+            }
         }
 
         // Song not cached - start streaming playback while prefetching in background.
