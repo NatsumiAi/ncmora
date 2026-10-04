@@ -11,7 +11,7 @@ The notice below documents attribution and licensing for that code.
 - Declared upstream license: WTFPL (Version 2)
 - License text in this repository: `ncm-api-rs/LICENSE`
 - Usage in this project: NetEase Cloud Music API client used by CNMPlayer networking features
-- Local modification status: source copied from upstream for repository self-containment; the local license file preserves the upstream WTFPL text
+- Local modification status: vendored source includes CNMPlayer maintenance changes; the local license file preserves the upstream WTFPL text
 
 ### Upstream license text (WTFPL v2)
 

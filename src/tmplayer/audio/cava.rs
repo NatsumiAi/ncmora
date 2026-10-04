@@ -501,16 +501,22 @@ mod tests {
         let config_prefix = format!("tmplayer-cava-{}-", std::process::id());
         let config_before: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(Result::ok).map(|entry| entry.path()).filter(|path| path.file_name().is_some_and(|name| name.to_string_lossy().starts_with(&config_prefix))).collect();
         let script = dir.join(format!("tmplayer-cava-test-{nonce}.sh"));
+        let spawn_fail = dir.join(format!("tmplayer-cava-test-{nonce}.noexec"));
         let marker = dir.join(format!("tmplayer-cava-test-{nonce}.count"));
         let script_text = format!("#!/bin/sh\nprintf x >> '{}'\nexit 17\n", marker.display());
         fs::write(&script, script_text).unwrap();
+        fs::write(&spawn_fail, "not executable").unwrap();
         let mut permissions = fs::metadata(&script).unwrap().permissions();
         permissions.set_mode(0o700);
         fs::set_permissions(&script, permissions).unwrap();
         let previous = std::env::var_os("TMPLAYER_CAVA");
-        unsafe { std::env::set_var("TMPLAYER_CAVA", &script); }
+        unsafe { std::env::set_var("TMPLAYER_CAVA", &spawn_fail); }
 
         let service = CavaService::new();
+        service.set_desired(Some(CavaConfig { framerate_hz: 30, bars: 3, channels: CavaChannels::Mono, reverse: false }));
+        thread::sleep(Duration::from_millis(140));
+        assert!(service.failure().is_some());
+        unsafe { std::env::set_var("TMPLAYER_CAVA", &script); }
         service.set_desired(Some(CavaConfig { framerate_hz: 30, bars: 3, channels: CavaChannels::Stereo, reverse: false }));
         thread::sleep(Duration::from_millis(140));
         assert!(service.failure().is_some());
@@ -532,6 +538,7 @@ mod tests {
         let config_after: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(Result::ok).map(|entry| entry.path()).filter(|path| path.file_name().is_some_and(|name| name.to_string_lossy().starts_with(&config_prefix))).collect();
         assert_eq!(config_after, config_before);
         let _ = fs::remove_file(script);
+        let _ = fs::remove_file(spawn_fail);
         let _ = fs::remove_file(marker);
     }
 }
