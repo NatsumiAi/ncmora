@@ -1,13 +1,12 @@
 use crate::app::{SIDEBAR_ANIM_DURATION, cubic_bezier_y};
 use crate::data::config::Language;
 use crate::tmplayer::audio::smoother::Ema;
-use crate::tmplayer::data::config::Config;
+use crate::data::config::{Config, VisualizeMode};
 use crate::tmplayer::data::playlist::Playlist;
-use crate::tmplayer::playback::remote_fetch::TrackKey;
 use crate::tmplayer::render::cover_cache::CoverCache;
 use crate::tmplayer::render::cover_cache::CoverKey;
 use crate::tmplayer::render::cover_renderer::render_cover_ascii;
-use crate::tmplayer::ui::theme::Theme;
+use crate::ui::theme::Theme;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -16,10 +15,6 @@ use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlayMode {
-    Idle,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackState {
@@ -100,7 +95,6 @@ pub struct TrackMetadata {
     pub duration: Duration,
     pub cover: Option<Vec<u8>>,
     pub cover_hash: Option<u64>,
-    pub cover_folder: Option<PathBuf>,
     pub lyrics: Option<Vec<LyricLine>>,
 }
 
@@ -111,7 +105,6 @@ pub struct CoverSnapshot {
     pub album: String,
     pub cover: Option<Vec<u8>>,
     pub cover_hash: Option<u64>,
-    pub cover_folder: Option<PathBuf>,
 }
 
 impl From<&TrackMetadata> for CoverSnapshot {
@@ -122,7 +115,6 @@ impl From<&TrackMetadata> for CoverSnapshot {
             album: t.album.clone(),
             cover: t.cover.clone(),
             cover_hash: t.cover_hash,
-            cover_folder: t.cover_folder.clone(),
         }
     }
 }
@@ -137,19 +129,6 @@ pub struct CoverAnim {
     pub duration: Duration,
 }
 
-#[derive(Debug, Clone)]
-pub struct PlaylistAlbumAnim {
-    pub from_cover: Option<Vec<u8>>,
-    pub from_hash: Option<u64>,
-    pub from_folder: Option<PathBuf>,
-    pub to_cover: Option<Vec<u8>>,
-    pub to_hash: Option<u64>,
-    pub to_folder: Option<PathBuf>,
-    // -1 => slide left (next), +1 => slide right (prev)
-    pub dir: i8,
-    pub started_at: Instant,
-    pub duration: Duration,
-}
 
 impl Default for TrackMetadata {
     fn default() -> Self {
@@ -160,7 +139,6 @@ impl Default for TrackMetadata {
             duration: Duration::from_secs(0),
             cover: None,
             cover_hash: None,
-            cover_folder: None,
             lyrics: None,
         }
     }
@@ -318,7 +296,6 @@ impl ScopeGain {
 
 #[derive(Debug)]
 pub struct PlayerState {
-    pub mode: PlayMode,
     pub playback: PlaybackState,
     pub position: Duration,
     pub volume: f32,
@@ -332,7 +309,6 @@ pub struct PlayerState {
 impl Default for PlayerState {
     fn default() -> Self {
         Self {
-            mode: PlayMode::Idle,
             playback: PlaybackState::Stopped,
             position: Duration::from_secs(0),
             volume: 0.0,
@@ -350,24 +326,16 @@ pub enum Overlay {
     Playlist,
     SettingsModal,
     BarSettingsModal,
-    LocalAudioSettingsModal,
     LyricsSettingsModal,
     /// 「下载设置」页：音质 / 路径 / 恢复默认。
     DownloadSettingsModal,
     /// 下载路径的行内编辑（独立 overlay，字符按键因此直接进输入框）。
     DownloadPathEditModal,
     AboutModal,
-    AcoustIdModal,
     HelpModal,
     EqModal,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalFolderKind {
-    Plain,
-    Album,
-    MultiAlbum,
-}
 
 #[derive(Debug)]
 pub struct AppState {
@@ -401,13 +369,11 @@ pub struct AppState {
     cover_render_tx: Sender<CoverRenderRequest>,
     cover_render_rx: Receiver<CoverRenderResult>,
     cover_render_inflight: RefCell<HashSet<CoverKey>>,
-    remote_last_sent: Option<TrackKey>,
 
     pub overlay: Overlay,
 
     pub settings_selected: usize,
     pub bar_settings_selected: usize,
-    pub local_audio_settings_selected: usize,
     pub lyrics_settings_selected: usize,
     pub help_keybind_selected: usize,
     /// 按键提示弹窗的滚动偏移：与主应用/应用内列表一致，仅当焦点行越过
@@ -429,25 +395,10 @@ pub struct AppState {
     pub eq: EqSettings,
     pub eq_selected: usize,
 
-    pub acoustid_input: String,
 
-    // Folder that backs the *current playback queue* (contains audio files).
-    pub local_folder: Option<PathBuf>,
-
-    pub local_folder_kind: LocalFolderKind,
-
-    // For MultiAlbum: all album folders under `local_root_folder`.
-    pub local_album_folders: Vec<PathBuf>,
-    // Which album folder is currently being *viewed* in the playlist overlay.
-    pub local_view_album_index: usize,
-    pub local_view_album_folder: Option<PathBuf>,
-
-    // Album cover shown in the playlist overlay's top area.
-    pub local_view_album_cover: Option<Vec<u8>>,
-    pub local_view_album_cover_hash: Option<u64>,
-    pub ncm_cover_cache_dir: Option<PathBuf>,
-
-    pub playlist_album_anim: Option<PlaylistAlbumAnim>,
+    // Host-provided playlist cover shown in the playlist overlay.
+    pub playlist_cover: Option<Vec<u8>>,
+    pub playlist_cover_hash: Option<u64>,
 
     pub cover_anim: Option<CoverAnim>,
     pub pending_system_cover_anim: Option<(CoverSnapshot, i8, Instant)>,
@@ -483,7 +434,6 @@ struct CoverRenderRequest {
     key: CoverKey,
     bytes: Vec<u8>,
     placeholder: char,
-    persist_folder: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -512,15 +462,6 @@ impl AppState {
                 let ascii = render_cover_ascii(&req.bytes, req.key.width, req.key.height)
                     .unwrap_or_else(|| fill_ascii(req.key.width, req.key.height, req.placeholder));
 
-                if let Some(folder) = req.persist_folder.as_deref() {
-                    let _ = crate::tmplayer::playback::local_player::write_cover_ascii_cache(
-                        folder,
-                        req.key.hash,
-                        req.key.width,
-                        req.key.height,
-                        &ascii,
-                    );
-                }
                 let _ = cover_render_res_tx.send(CoverRenderResult {
                     key: req.key,
                     ascii,
@@ -548,11 +489,9 @@ impl AppState {
             cover_render_tx,
             cover_render_rx,
             cover_render_inflight: RefCell::new(HashSet::new()),
-            remote_last_sent: None,
             overlay: Overlay::None,
             settings_selected: 0,
             bar_settings_selected: 0,
-            local_audio_settings_selected: 0,
             lyrics_settings_selected: 0,
             help_keybind_selected: 0,
             help_keybind_scroll: 0,
@@ -566,21 +505,10 @@ impl AppState {
 
             eq: EqSettings::default(),
             eq_selected: 0,
+    playlist_cover: None,
+    playlist_cover_hash: None,
 
-            acoustid_input: String::new(),
-
-            local_folder: None,
-            local_folder_kind: LocalFolderKind::Plain,
-            local_album_folders: Vec::new(),
-            local_view_album_index: 0,
-            local_view_album_folder: None,
-            local_view_album_cover: None,
-            local_view_album_cover_hash: None,
-            ncm_cover_cache_dir: None,
-
-            playlist_album_anim: None,
-
-            cover_anim: None,
+    cover_anim: None,
             pending_system_cover_anim: None,
             toast: None,
             request_host_settings_open: false,
@@ -598,9 +526,6 @@ impl AppState {
         }
     }
 
-    pub fn reset_remote_fetch_state(&mut self) {
-        self.remote_last_sent = None;
-    }
 
     pub fn cover_dominant_rgb(&self, hash: u64, bytes: &[u8]) -> Option<(u8, u8, u8)> {
         if let Some(rgb) = self.cover_dominant_rgb_cache.borrow().get(&hash).copied() {
@@ -644,7 +569,6 @@ impl AppState {
         key: CoverKey,
         bytes: &[u8],
         placeholder: char,
-        persist_folder: Option<PathBuf>,
     ) {
         if self.cover_cache.borrow().contains(key) {
             return;
@@ -657,7 +581,6 @@ impl AppState {
             key,
             bytes: bytes.to_vec(),
             placeholder,
-            persist_folder,
         });
     }
 
@@ -685,11 +608,6 @@ impl AppState {
             }
         }
 
-        if let Some(anim) = &self.playlist_album_anim {
-            if now.duration_since(anim.started_at) >= anim.duration {
-                self.playlist_album_anim = None;
-            }
-        }
 
         if let Some((_, _, at)) = &self.pending_system_cover_anim {
             if now.duration_since(*at) > Duration::from_secs(2) {
@@ -708,7 +626,7 @@ impl AppState {
             .tick(self.player.playback == PlaybackState::Playing, dt);
 
         self.vector.tick(
-            self.config.visualize == crate::tmplayer::data::config::VisualizeMode::Vector,
+            self.config.visualize == VisualizeMode::Vector,
             self.player.playback == PlaybackState::Playing,
             dt,
         );
@@ -772,10 +690,7 @@ impl AppState {
             return true;
         }
 
-        if self.cover_anim.is_some()
-            || self.playlist_album_anim.is_some()
-            || self.pending_system_cover_anim.is_some()
-        {
+        if self.cover_anim.is_some() || self.pending_system_cover_anim.is_some() {
             return true;
         }
 
@@ -796,7 +711,7 @@ impl AppState {
     }
 
     pub fn active_render_fps(&self) -> u32 {
-        use crate::tmplayer::data::config::VisualizeMode;
+        use crate::data::config::VisualizeMode;
 
         let base = self.config.ui_fps.clamp(10, 60);
         // 频谱靠 cava 的拖尾衰减，示波器靠自己的收尾动画：暂停后两者都还在动。
@@ -837,19 +752,19 @@ impl AppState {
     fn scope_is_animating(&self) -> bool {
         matches!(
             self.config.visualize,
-            crate::tmplayer::data::config::VisualizeMode::Oscilloscope
+            VisualizeMode::Oscilloscope
         ) && self.scope_gain.is_animating()
     }
 
     /// 矢量模式的快动画（分散 / 回位）进行中，需要持续重绘把它推完。
     fn vector_is_animating(&self) -> bool {
-        self.config.visualize == crate::tmplayer::data::config::VisualizeMode::Vector
+        self.config.visualize == VisualizeMode::Vector
             && self.vector.is_animating()
     }
 
     /// 矢量模式停稳后的尘埃按 Astra Sparkle 持续明灭，暂停下也要维持基础帧率重绘。
     fn vector_is_floating(&self) -> bool {
-        self.config.visualize == crate::tmplayer::data::config::VisualizeMode::Vector
+        self.config.visualize == VisualizeMode::Vector
             && self.vector.is_floating()
     }
 

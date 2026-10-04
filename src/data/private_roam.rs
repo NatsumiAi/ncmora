@@ -1,4 +1,4 @@
-use crate::data::assets;
+use crate::data::{assets, atomic_file};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -19,11 +19,8 @@ pub struct PrivateRoamTrack {
 pub struct PrivateRoamRecord {
     #[serde(default)]
     pub tracks: Vec<PrivateRoamTrack>,
-    /// 上次播放歌曲在列表中的索引
     pub last_played_index: Option<usize>,
-    /// 最后播放的漫游歌曲封面（切到别的列表播放后仍保留）
     pub last_played_cover_url: Option<String>,
-    /// 每日刷新标记：上次刷新的日期（UTC 天数）
     pub last_refresh_day: Option<i64>,
     pub updated_at: i64,
 }
@@ -34,8 +31,10 @@ pub fn load() -> Result<Option<PrivateRoamRecord>> {
         return Ok(None);
     }
 
-    let raw = fs::read_to_string(&path)?;
-    let record: PrivateRoamRecord = toml::from_str(&raw).unwrap_or_default();
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("read {}", path.display()))?;
+    let record: PrivateRoamRecord = toml::from_str(&raw)
+        .with_context(|| format!("parse {}", path.display()))?;
     if record.tracks.is_empty() && record.last_played_cover_url.is_none() {
         return Ok(None);
     }
@@ -45,15 +44,10 @@ pub fn load() -> Result<Option<PrivateRoamRecord>> {
 
 pub fn save(record: &PrivateRoamRecord) -> Result<()> {
     let path = session_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
-    }
-
     let mut payload = record.clone();
     payload.updated_at = now_unix();
-    let raw = toml::to_string_pretty(&payload).unwrap_or_default();
-    fs::write(&path, raw).with_context(|| format!("write {}", path.display()))?;
-    Ok(())
+    let raw = toml::to_string_pretty(&payload).context("serialize private roam session")?;
+    atomic_file::write_atomic(&path, raw.as_bytes())
 }
 
 pub fn clear() -> Result<()> {
@@ -72,5 +66,5 @@ fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_secs() as i64)
-        .unwrap_or_default()
+        .unwrap_or(0)
 }

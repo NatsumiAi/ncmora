@@ -2,11 +2,13 @@
 name = "ncm-api"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.86"
 description = "Netease Cloud Music API Rust SDK"
 license = "WTFPL"
 repository = "https://github.com/imsyy/ncm-api-rs"
 homepage = "https://github.com/imsyy/ncm-api-rs"
-
+documentation = "https://docs.rs/ncm-api"
+keywords = ["netease", "cloud-music", "api"]
 [dependencies]
 http = "1.4"
 cyper = { version = "0.9", default-features = false }

@@ -116,7 +116,7 @@ fn draw_root_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
     ];
 
     let item_style = |idx: usize| {
-        if idx == app.settings_selected {
+        if idx == app.settings.selected {
             Style::default()
                 .fg(app.theme.color_accent2())
                 .add_modifier(Modifier::BOLD)
@@ -251,7 +251,7 @@ fn draw_playback_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
         .iter()
         .enumerate()
         .map(|(idx, text)| {
-            let style = if idx == app.settings_playback_selected {
+            let style = if idx == app.settings.playback_selected {
                 Style::default()
                     .fg(app.theme.color_accent2())
                     .add_modifier(Modifier::BOLD)
@@ -327,7 +327,7 @@ fn draw_lyrics_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
         .enumerate()
         .map(|(idx, text)| {
             let disabled = idx == 2 && !drag_enabled;
-            let style = if idx == app.settings_lyrics_selected {
+            let style = if idx == app.settings.lyrics_selected {
                 if disabled {
                     Style::default().fg(app.theme.color_subtext())
                 } else {
@@ -395,11 +395,11 @@ fn draw_download_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
     let buff = app.theme.color_buff();
     let surface = app.theme.color_surface();
 
-    let selected = app.settings_download_selected;
+    let selected = app.settings.download_selected;
     let quality = audio_quality_label(app, app.config.download_audio_quality);
     let path_prefix = format!("{}: ", l(app, "下载路径", "Download Path"));
     let path_display = app.download_display_path();
-    let reset_label = if app.download_reset_armed {
+    let reset_label = if app.settings.download_reset_armed {
         l(app, "确认恢复", "Confirm Restore")
     } else {
         l(app, "恢复默认", "Restore Defaults")
@@ -434,7 +434,7 @@ fn draw_download_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
                 let avail = usize::from(rows[1].width)
                     .saturating_sub(display_width(&path_prefix) + 2)
                     .max(1);
-                if let Some(edit) = app.download_path_edit.as_mut() {
+                if let Some(edit) = app.settings.download_path_edit.as_mut() {
                     // 编辑态：只有**路径值**这一段的底色变 buff（标签保持行样式），
                     // 光标所在字符反显；窗口只在光标撞到边界时才横向滚动。
                     let caret_col = caret_display_col(&edit.buffer, edit.cursor);
@@ -463,7 +463,7 @@ fn draw_download_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
                 }
             }
             _ => {
-                let style = if app.download_reset_armed {
+                let style = if app.settings.download_reset_armed {
                     Style::default().fg(warning).add_modifier(Modifier::BOLD)
                 } else {
                     style
@@ -604,12 +604,12 @@ fn draw_keybind_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
 
     let mut lines: Vec<Line> = (0..crate::app::SETTINGS_KEYBIND_ITEMS)
         .map(|idx| {
-            let is_rebinding = app.settings_keybind_rebinding == Some(idx);
+            let is_rebinding = app.settings.keybind_rebinding == Some(idx);
             let style = if is_rebinding {
                 Style::default()
                     .fg(app.theme.color_accent())
                     .add_modifier(Modifier::BOLD)
-            } else if idx == app.settings_keybind_selected {
+            } else if idx == app.settings.keybind_selected {
                 Style::default()
                     .fg(app.theme.color_accent2())
                     .add_modifier(Modifier::BOLD)
@@ -656,18 +656,17 @@ fn draw_keybind_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
         Style::default().fg(app.theme.color_subtext()),
     )));
 
-    let focus_index = app
-        .settings_keybind_rebinding
-        .unwrap_or(app.settings_keybind_selected);
+    let focus_index = app.settings.keybind_rebinding
+        .unwrap_or(app.settings.keybind_selected);
     let visible_rows = rows[1].height as usize;
     let total_rows = lines.len();
     let scroll = scroll_for_focus(
-        app.settings_keybind_scroll,
+        app.settings.keybind_scroll,
         total_rows,
         visible_rows,
         focus_index,
     );
-    app.settings_keybind_scroll = scroll;
+    app.settings.keybind_scroll = scroll;
 
     frame.render_widget(
         Paragraph::new(lines)
@@ -676,7 +675,7 @@ fn draw_keybind_settings(frame: &mut Frame, app: &mut App, inner: Rect) {
         rows[1],
     );
 
-    let hint = if let Some(index) = app.settings_keybind_rebinding {
+    let hint = if let Some(index) = app.settings.keybind_rebinding {
         format!(
             "{}: {}  {}",
             l(app, "正在重绑", "Rebinding"),

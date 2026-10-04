@@ -1,5 +1,5 @@
 use crate::tmplayer::app::state::Overlay;
-use crate::tmplayer::data::config::Config;
+use crate::data::config::Config;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -581,7 +581,7 @@ mod tests {
     /// `match ev.code` 分支吃掉）。
     #[test]
     fn ctrl_d_maps_to_toggle_download() {
-        let config = crate::tmplayer::data::config::Config::default();
+        let config = crate::data::config::Config::default();
         assert_eq!(
             config.keybind_download_fullscreen, "Ctrl+D",
             "默认键位变了？"
@@ -597,7 +597,7 @@ mod tests {
     /// 在歌词浮窗子页按 Esc 会直接把全屏页关掉。
     #[test]
     fn esc_in_settings_submodals_closes_the_modal() {
-        let config = crate::tmplayer::data::config::Config::default();
+        let config = crate::data::config::Config::default();
 
         for overlay in [
             Overlay::SettingsModal,

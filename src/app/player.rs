@@ -17,7 +17,8 @@ use std::io::BufReader;
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +59,7 @@ struct SeekState {
 
 fn error_cb(error: MaybeError) -> impl Fn(Error) {
     move |e| {
-        let mut error = error.lock().unwrap();
+        let mut error = error.lock();
         *error = Some(e)
     }
 }
@@ -72,7 +73,7 @@ fn build_player(error: MaybeError) -> Result<(Player, MixerDeviceSink)> {
 
 impl AudioPlayer {
     fn rebuild_on_error(&mut self) -> Result<()> {
-        let mut error = self.error.lock().unwrap();
+        let mut error = self.error.lock();
         if error.is_some() {
             let (player, sink) = build_player(self.error.clone())?;
             self._device_sink = sink;
@@ -91,7 +92,7 @@ impl AudioPlayer {
             handle.cancel();
         }
         let had_pending_seek = self.invalidate_seek_on_next_play
-            || self.seek_state.lock().unwrap().pending_target.is_some();
+            || self.seek_state.lock().pending_target.is_some();
         self.player.stop();
         // 环内还是上一首的样本；不清掉的话示波器会先画一段前一首的波形。
         self.pcm_ring.reset();
@@ -100,7 +101,7 @@ impl AudioPlayer {
         if had_pending_seek {
             // 让可能残留的旧 seek 指令失效：换成归零指令（新源上瞬时完成），
             // 同时旧 seek 的后台线程会因反馈通道关闭而立即退出。
-            let mut state = self.seek_state.lock().unwrap();
+            let mut state = self.seek_state.lock();
             state.generation = state.generation.wrapping_add(1);
             state.pending_target = None;
             drop(state);
@@ -121,10 +122,15 @@ impl AudioPlayer {
         let eq_params = Arc::new(EqParams::new());
         eq_params.set_from(eq.clamp());
 
-        if config.cache.clean_on_startup {
-            let _ = cleanup_cache_dir(&cache_dir, &config.cache);
-        }
-        let _ = fs::create_dir_all(&cache_dir);
+        let startup_dir = cache_dir.clone();
+        let cache_policy = config.cache.clone();
+        compio::runtime::spawn_blocking(move || {
+            let _ = fs::create_dir_all(&startup_dir);
+            if cache_policy.clean_on_startup {
+                let _ = cleanup_cache_dir(&startup_dir, &cache_policy);
+            }
+        })
+        .detach();
 
         let player = Self {
             _device_sink: sink,
@@ -159,10 +165,15 @@ impl AudioPlayer {
         self.lufs_meter.clone()
     }
 
-    pub fn play_from_file(&mut self, file_path: &PathBuf) -> Result<()> {
-        let file = File::open(file_path)?;
-        let builder = DecoderBuilder::new().with_byte_len(file.metadata()?.len());
-        let decoder = builder.with_data(BufReader::new(file)).build()?;
+    pub async fn play_from_file(&mut self, file_path: &Path) -> Result<()> {
+        let file_path = file_path.to_path_buf();
+        let decoder = compio::runtime::spawn_blocking(move || -> Result<_> {
+            let file = File::open(file_path)?;
+            let builder = DecoderBuilder::new().with_byte_len(file.metadata()?.len());
+            Ok(builder.with_data(BufReader::new(file)).build()?)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("audio decoder task panicked"))??;
         let total_duration = decoder.total_duration();
         let source = EqSource::new(
             decoder,
@@ -185,7 +196,9 @@ impl AudioPlayer {
         let stream_handle = StreamingReaderHandle::from(&reader);
         let builder = DecoderBuilder::new().with_byte_len(reader.total());
         let f = move || builder.with_data(BufReader::new(reader)).build();
-        let decoder = compio::runtime::spawn_blocking(f).await.unwrap()?;
+        let decoder = compio::runtime::spawn_blocking(f)
+            .await
+            .map_err(|_| anyhow::anyhow!("streaming decoder task panicked"))??;
         let total_duration = decoder.total_duration();
         let source = EqSource::new(
             decoder,
@@ -239,9 +252,9 @@ impl AudioPlayer {
         self.progress_rx = None;
         self.total_duration = None;
         // 丢弃未完成的跳转：切歌后旧的 seek 结果不再有意义
-        let had_pending = self.seek_state.lock().unwrap().pending_target.is_some();
+        let had_pending = self.seek_state.lock().pending_target.is_some();
         self.invalidate_seek_on_next_play |= had_pending;
-        let mut state = self.seek_state.lock().unwrap();
+        let mut state = self.seek_state.lock();
         state.generation = state.generation.wrapping_add(1);
         state.pending_target = None;
     }
@@ -274,7 +287,7 @@ impl AudioPlayer {
 
         // 记录跳转意图：UI 立即把进度条显示到目标位置，并进入“加载中”状态。
         let generation = {
-            let mut state = self.seek_state.lock().unwrap();
+            let mut state = self.seek_state.lock();
             state.generation = state.generation.wrapping_add(1);
             state.pending_target = Some(target);
             state.generation
@@ -289,7 +302,7 @@ impl AudioPlayer {
         let seek_state = self.seek_state.clone();
         compio::runtime::spawn_blocking(move || {
             let _ = player.try_seek(target);
-            let mut state = seek_state.lock().unwrap();
+            let mut state = seek_state.lock();
             if state.generation == generation {
                 state.pending_target = None;
             }
@@ -301,14 +314,12 @@ impl AudioPlayer {
 
     /// 是否正在后台加载跳转目标（UI 据此显示加载动画）。
     pub fn is_seeking(&self) -> bool {
-        self.seek_state.lock().unwrap().pending_target.is_some()
+        self.seek_state.lock().pending_target.is_some()
     }
 
     /// 用于界面显示的播放位置：后台加载期间直接显示跳转目标。
     pub fn display_position(&self) -> Duration {
-        self.seek_state
-            .lock()
-            .unwrap()
+        self.seek_state.lock()
             .pending_target
             .unwrap_or_else(|| self.player.get_pos())
     }
@@ -517,11 +528,10 @@ where
     }
 }
 
-pub fn is_nonempty_file(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    fs::metadata(path).map(|meta| meta.len()).unwrap_or(0) > 0
+pub async fn is_nonempty_file(path: &Path) -> bool {
+    compio::fs::metadata(path)
+        .await
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
 }
 
 fn sanitize_cache_key(raw: &str) -> String {
@@ -623,13 +633,17 @@ fn list_cache_entries(cache_dir: &Path) -> Result<Vec<CacheEntry>> {
     {
         let entry = entry?;
         let path = entry.path();
-        if !path.is_file() {
+        // Active writers own temporary files; maintenance must never delete them.
+        if path.extension().is_some_and(|ext| ext == "part") {
             continue;
         }
 
         let metadata = entry
             .metadata()
             .with_context(|| format!("read cache metadata failed: {}", path.display()))?;
+        if !metadata.is_file() {
+            continue;
+        }
         let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
         out.push(CacheEntry {

@@ -1,6 +1,6 @@
 use crate::app::{App, FlatPanel};
 use crate::data::config::Language;
-use crate::tmplayer::data::config::BarChannels;
+use crate::data::config::BarChannels;
 use crate::tmplayer::render::spectrum_renderer::{compute_bar_layout, density_char, smooth_char};
 use crate::ui::{page_lyrics, player_bar};
 use ratatui::Frame;

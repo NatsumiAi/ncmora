@@ -14,7 +14,7 @@
 
 use crate::tmplayer::app::state::AppState;
 use crate::tmplayer::audio::pcm_tap::PcmSnapshot;
-use crate::tmplayer::ui::theme::Theme;
+use crate::ui::theme::Theme;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -307,7 +307,7 @@ fn mix(a: Color, b: Color, t: f32) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tmplayer::ui::theme::{ColorCapability, Theme, ThemePalette};
+    use crate::ui::theme::{ColorCapability, Theme, ThemePalette};
 
     const RATE: u32 = 48_000;
 

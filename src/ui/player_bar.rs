@@ -1,4 +1,5 @@
 use crate::app::{App, HitRect, PlaybackRuntimeState, PlayerBarHitTargets};
+use crate::data::icons::UiIcons;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
@@ -143,18 +144,20 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         height: 1,
     };
 
-    let prev_label = "[]";
-    let play_label = if app.playback_state == PlaybackRuntimeState::Playing {
-        "[]"
-    } else {
-        "[]"
+    let icons = UiIcons::for_mode(app.config.icon_mode);
+    let prev_label = icons.previous();
+    let play_label = icons.play_pause(app.playback.playback_state == PlaybackRuntimeState::Playing);
+    let next_label = icons.next();
+    let mode_symbol = match app.playback.playback_repeat_mode {
+        crate::app::PlaybackRepeatMode::Sequence => icons.sequence(),
+        crate::app::PlaybackRepeatMode::Shuffle => icons.shuffle(),
+        crate::app::PlaybackRepeatMode::LoopAll => icons.loop_all(),
+        crate::app::PlaybackRepeatMode::LoopOne => icons.loop_one(),
     };
-    let next_label = "[]";
-    let mode_symbol = app.playback_repeat_mode.symbol();
     let controls = format!("{prev_label} {play_label} {next_label} {mode_symbol}");
 
     let spectrum =
-        if app.now_playing.is_some() && app.playback_state != PlaybackRuntimeState::Stopped {
+        if app.playback.now_playing.is_some() && app.playback.playback_state != PlaybackRuntimeState::Stopped {
             app.main_spectrum_braille()
         } else {
             " ".repeat(10)
@@ -189,7 +192,7 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         height: 1,
     };
 
-    let left_text = match app.now_playing.as_ref() {
+    let left_text = match app.playback.now_playing.as_ref() {
         Some(track) if !track.title.trim().is_empty() => {
             if app.now_playing_artist_text().trim().is_empty() {
                 track.title.clone()
@@ -200,7 +203,7 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         _ => String::new(),
     };
 
-    let left_style = if app.now_playing.is_some() {
+    let left_style = if app.playback.now_playing.is_some() {
         Style::default()
             .fg(app.theme.color_accent3())
             .add_modifier(Modifier::BOLD)
@@ -212,19 +215,15 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     // 免得两处各写一份宽度计算；下载图标（可用时）在它左侧隔一格。
     let download_state = app.current_download_state();
     let download_glyph = download_state
-        .map(|state| crate::app::download::state_glyph(state, app.download_spinner_phase()));
+        .map(|state| crate::app::download::state_glyph(state, app.download_spinner_phase(), icons));
     // 下载图标与折叠栏里除爱心以外的按钮同色（控制行 prev/play/next/mode 用的 text 色），
     // 不按下载状态换色；状态由字形表达（转圈 / 对勾）。
     let download_style = Style::default().fg(app.theme.color_text());
 
     let mut like_hit = None;
     let mut download_hit = None;
-    let left_render = if app.now_playing.is_some() {
-        let heart = if app.now_playing_liked {
-            HEART_LIKED
-        } else {
-            HEART_UNLIKED
-        };
+    let left_render = if app.playback.now_playing.is_some() {
+        let heart = icons.heart(app.playback.now_playing_liked);
         let suffix = match download_glyph {
             Some(glyph) => format!("{glyph} {heart}"),
             None => heart.to_string(),
@@ -239,12 +238,8 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
     let mut tail: Vec<(String, Style)> = Vec::new();
     let mut head = left_render.as_str();
-    if app.now_playing.is_some() {
-        let heart = if app.now_playing_liked {
-            HEART_LIKED
-        } else {
-            HEART_UNLIKED
-        };
+    if app.playback.now_playing.is_some() {
+        let heart = icons.heart(app.playback.now_playing_liked);
         let split = split_left_tail(head, heart, download_glyph);
         head = split.head;
         if let Some(glyph) = split.glyph {
@@ -582,14 +577,15 @@ mod tests {
     /// 下载图标本身必须是 1 格宽（否则左列排版会漂）。
     #[test]
     fn download_glyphs_are_single_cell() {
-        use crate::app::download::{DownloadState, state_glyph};
+        use crate::data::icons::{IconMode, UiIcons};
+        let icons = UiIcons::for_mode(IconMode::Nerd);
         let phase = Duration::from_millis(0);
         for state in [
             DownloadState::NotDownloaded,
             DownloadState::Downloading,
             DownloadState::Done,
         ] {
-            let glyph = state_glyph(state, phase);
+            let glyph = state_glyph(state, phase, icons);
             assert_eq!(
                 display_width(&glyph.to_string()),
                 1,
@@ -604,13 +600,13 @@ mod tests {
         for heart in [HEART_LIKED, HEART_UNLIKED] {
             assert_eq!(display_width(heart), 1, "爱心应为 1 格宽：{heart:?}");
         }
-        for mode in [
-            crate::app::PlaybackRepeatMode::Sequence,
-            crate::app::PlaybackRepeatMode::Shuffle,
-            crate::app::PlaybackRepeatMode::LoopAll,
-            crate::app::PlaybackRepeatMode::LoopOne,
+        let icons = UiIcons::for_mode(crate::data::icons::IconMode::Nerd);
+        for symbol in [
+            icons.sequence(),
+            icons.shuffle(),
+            icons.loop_all(),
+            icons.loop_one(),
         ] {
-            let symbol = mode.symbol();
             assert_eq!(display_width(symbol), 1, "模式符号应为 1 格宽：{symbol:?}");
         }
     }

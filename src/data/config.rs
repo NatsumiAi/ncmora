@@ -1,5 +1,5 @@
-use crate::data::assets;
-use anyhow::Result;
+use crate::data::{assets, atomic_file};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -74,8 +74,9 @@ pub struct Config {
     #[serde(default)]
     pub graphics_protocol: GraphicsProtocol,
 
-    #[serde(default = "default_kitty_cover_scale_percent")]
-    pub kitty_cover_scale_percent: u8,
+    #[serde(default)]
+    pub icon_mode: crate::data::icons::IconMode,
+
 
     #[serde(default)]
     pub super_smooth_bar: bool,
@@ -92,20 +93,6 @@ pub struct Config {
     #[serde(default)]
     pub bar_channel_reverse: bool,
 
-    #[serde(default)]
-    pub lyrics_cover_fetch: bool,
-
-    #[serde(default)]
-    pub lyrics_cover_download: bool,
-
-    #[serde(default)]
-    pub audio_fingerprint: bool,
-
-    #[serde(default)]
-    pub acoustid_api_key: String,
-
-    #[serde(default)]
-    pub resume_last_position: bool,
 
     #[serde(default)]
     pub default_opening_title: String,
@@ -443,9 +430,6 @@ fn default_album_border() -> bool {
     true
 }
 
-fn default_kitty_cover_scale_percent() -> u8 {
-    100
-}
 
 fn default_bar_number() -> BarNumber {
     BarNumber::Auto
@@ -613,17 +597,12 @@ impl Default for Config {
             transparent_background: true,
             album_border: default_album_border(),
             graphics_protocol: GraphicsProtocol::default(),
-            kitty_cover_scale_percent: default_kitty_cover_scale_percent(),
+            icon_mode: crate::data::icons::IconMode::default(),
             super_smooth_bar: false,
             bars_gap: false,
             bar_number: default_bar_number(),
             bar_channels: default_bar_channels(),
             bar_channel_reverse: false,
-            lyrics_cover_fetch: false,
-            lyrics_cover_download: false,
-            audio_fingerprint: false,
-            acoustid_api_key: String::new(),
-            resume_last_position: false,
             default_opening_title: String::new(),
             language: default_language(),
             page_lyrics: default_page_lyrics(),
@@ -667,19 +646,20 @@ impl Default for Config {
 
 impl Config {
     pub fn load_or_default() -> Result<Self> {
-        let _ = assets::ensure_assets_ready();
+        assets::ensure_assets_ready()?;
         let path = Self::default_path();
         if !path.exists() {
             let cfg = Self::default();
-            let _ = cfg.save();
+            cfg.save()?;
             return Ok(cfg);
         }
 
-        let raw = fs::read_to_string(path)?;
+        let raw = fs::read_to_string(&path)?;
         let legacy_startup_folder_key_present = raw.contains(LEGACY_STARTUP_FOLDER_KEY_KEBAB)
             || raw.contains(LEGACY_STARTUP_FOLDER_KEY);
         let graphics_protocol_needs_save = graphics_protocol_needs_save(&raw);
-        let mut cfg: Config = toml::from_str(&raw).unwrap_or_default();
+        let mut cfg: Config = toml::from_str(&raw)
+            .with_context(|| format!("parse {}", path.display()))?;
 
         if cfg.ui_fps == 0 {
             cfg.ui_fps = 30;
@@ -688,13 +668,11 @@ impl Config {
             cfg.spectrum_hz = 30;
         }
 
-        // 手改配置可能越界，浮窗位置统一钳到内容区内。
         cfg.page_lyrics_pos_x = cfg.page_lyrics_pos_x.clamp(0.0, 1.0);
         cfg.page_lyrics_pos_y = cfg.page_lyrics_pos_y.clamp(0.0, 1.0);
 
         let mut forced_visualize_fallback = false;
         if !cfg.visualize.is_available() {
-            // 只有依赖 cava 的模式会落到这里；退到同样无需外部进程的示波器。
             cfg.visualize = VisualizeMode::Oscilloscope;
             forced_visualize_fallback = true;
         }
@@ -721,6 +699,7 @@ impl Config {
             || !raw.contains("bar_number")
             || !raw.contains("bar_channels")
             || !raw.contains("bar_channel_reverse")
+            || !raw.contains("icon_mode")
             || graphics_protocol_needs_save
             || !raw.contains("keybind_search_box")
             || !raw.contains("keybind_fullscreen")
@@ -751,21 +730,17 @@ impl Config {
             || legacy_startup_folder_key_present
             || migrated_legacy_sidebar
         {
-            let _ = cfg.save();
+            cfg.save()?;
         }
 
         Ok(cfg)
     }
 
     pub fn save(&self) -> Result<()> {
-        let _ = assets::ensure_assets_ready();
+        assets::ensure_assets_ready()?;
         let path = Self::default_path();
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let raw = toml::to_string_pretty(self).unwrap_or_default();
-        fs::write(path, raw)?;
-        Ok(())
+        let raw = toml::to_string_pretty(self).context("serialize configuration")?;
+        atomic_file::write_atomic(&path, raw.as_bytes())
     }
 
     fn default_path() -> PathBuf {

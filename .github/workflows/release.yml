@@ -116,9 +116,53 @@ jobs:
           path: CNMPlayer_${{ needs.guard.outputs.tag }}_linux_${{ matrix.arch }}.tar.xz
           if-no-files-found: error
 
+  gate:
+    name: Release gate
+    needs: [guard, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.tag }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config \
+            libasound2-dev libchafa-dev libpipewire-0.3-dev libssl-dev libglib2.0-dev libclang-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test root crate
+        run: cargo test --locked --bin cnmplayer --all-targets
+
+      - name: Test vendored ncm-api crate
+        run: cargo test --manifest-path ncm-api-rs/Cargo.toml --locked --all-targets
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rel-*
+          merge-multiple: true
+          path: dist
+
+      - name: Generate SHA256SUMS
+        run: sha256sum dist/*.tar.xz | sort -k2 > dist/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-checksums
+          path: dist/SHA256SUMS
+          if-no-files-found: error
+
   publish:
     name: GitHub Release
-    needs: [guard, build]
+    needs: [guard, build, gate]
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -137,6 +181,10 @@ jobs:
           pattern: rel-*
           merge-multiple: true
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-checksums
+          path: dist
 
       # create 已存在时回退为 upload，保证 re-run 幂等
       - name: Create release with tarballs
@@ -144,14 +192,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.guard.outputs.tag }}
         run: |
-          gh release create "$TAG" --verify-tag --generate-notes dist/*.tar.xz \
-            || gh release upload "$TAG" --clobber dist/*.tar.xz
+          gh release create "$TAG" --verify-tag --generate-notes dist/*.tar.xz dist/SHA256SUMS \
+            || gh release upload "$TAG" --clobber dist/*.tar.xz dist/SHA256SUMS
 
   aur:
     name: Sync AUR packages
-    needs: [guard, build, publish]
+    needs: [guard, build, gate, publish]
     # push：随发布自动同步；dispatch+sync_aur：手动补同步（此时 publish 被跳过）
-    if: ${{ !cancelled() && needs.publish.result != 'failed' && (github.event_name == 'push' || inputs.sync_aur == true) }}
+    if: ${{ always() && !cancelled() && needs.gate.result == 'success' && needs.publish.result != 'failed' && (github.event_name == 'push' || inputs.sync_aur == true) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:

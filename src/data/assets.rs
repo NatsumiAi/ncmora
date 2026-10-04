@@ -1,8 +1,10 @@
+use crate::data::atomic_file;
 use crate::STORAGE;
 use anyhow::{Context, Result};
 use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, OnceLock};
 
 const ENV_ASSET_DIR: &str = "CNMPLAYER_ASSET_DIR";
 
@@ -29,13 +31,17 @@ const THEME_ZENBURN_TOML: &str = include_str!("../../themes/zenburn.toml");
 const THEME_ZINC_DARK_TOML: &str = include_str!("../../themes/shadcn_zinc_dark.toml");
 const THEME_ZINC_LIGHT_TOML: &str = include_str!("../../themes/shadcn_zinc_light.toml");
 
-pub fn resolve_asset_root() -> Cow<'static, PathBuf> {
-    if let Some(path) = std::env::var_os(ENV_ASSET_DIR) {
-        return Cow::Owned(PathBuf::from(path));
-    }
+static ASSET_ROOT: OnceLock<PathBuf> = OnceLock::new();
+static ASSETS_READY: LazyLock<Result<(), String>> = LazyLock::new(|| {
+    ensure_all_assets(resolve_asset_root().as_ref()).map_err(|error| error.to_string())
+});
 
-    let _ = ensure_all_assets(&STORAGE.config);
-    Cow::Borrowed(&STORAGE.config)
+pub fn resolve_asset_root() -> Cow<'static, PathBuf> {
+    Cow::Borrowed(ASSET_ROOT.get_or_init(|| {
+        std::env::var_os(ENV_ASSET_DIR)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| STORAGE.config.clone())
+    }))
 }
 
 pub fn resolve_asset_path(rel: &Path) -> PathBuf {
@@ -47,8 +53,10 @@ pub fn resolve_config_path() -> PathBuf {
 }
 
 pub fn ensure_assets_ready() -> Result<&'static PathBuf> {
-    ensure_all_assets(&STORAGE.config)?;
-    Ok(&STORAGE.config)
+    ASSETS_READY
+        .as_ref()
+        .map(|_| ASSET_ROOT.get().expect("asset root initialized"))
+        .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 fn ensure_all_assets(root: &Path) -> Result<()> {
@@ -135,5 +143,5 @@ fn write_if_missing(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
     }
-    fs::write(path, contents).with_context(|| format!("write {}", path.display()))
+    atomic_file::write_atomic(path, contents.as_bytes())
 }

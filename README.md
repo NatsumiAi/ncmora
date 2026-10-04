@@ -28,7 +28,7 @@ CNMPlayer (Customized NetEase Music Player) is a NetEase Cloud Music client that
 A single process carries two UIs:
 
 - the **host UI** — login, home recommendations, playlist / artist / search pages, a sliding sidebar and a 5-row collapsed player bar;
-- the **embedded fullscreen playback page** (TMPlayer) — cover, lyrics, playlist overlay and a 10-band EQ. The fullscreen keybind (default `Ctrl+F`) hands playback over to it; inside, `Ctrl+F` or `Esc` returns to the host.
+- the **fullscreen playback page** — cover, lyrics, playlist overlay and a 10-band EQ. The fullscreen keybind (default `Ctrl+F`) opens it; inside, `Ctrl+F` or `Esc` returns to the host.
 
 Playback belongs to the host: streaming with a local cache, queue memory, private roam, VIP-aware audio quality, and the visualizers (cava bars, a real-PCM oscilloscope, a Lissajous vector mode, a LUFS VU meter) that the other UIs draw.
 
@@ -122,7 +122,7 @@ The flat player bar keeps its mouse targets (previous, play-pause, next, like, r
 - UI language: `zh` / `en`
 - Startup: a loading page (ASCII title plus progress bar, no text) appears first; login restore and recommendation fetches run in the background step by step, and an unusable saved session hands over to the login page
 - Transparent background, album-cover border and hint lines
-- 20 rebindable shortcuts with conflict detection; `Ctrl+Alt+R` restores the defaults
+- 22 rebindable shortcuts with conflict detection; `Ctrl+Alt+R` restores the defaults
 - About modal with braille art, and a hidden easter egg inside it (the `easter-egg` cargo feature, compiled in by default and removable with `--no-default-features`)
 
 ## Installation
@@ -172,7 +172,7 @@ sudo apt install -y build-essential cmake pkg-config \
 
 - Linux with PipeWire for audio (the ALSA backend is deprecated), and the chafa shared library at runtime
 - An optional `cava` binary for the `bars` visualizer
-- A Nerd Font is strongly recommended: the UI uses icon glyphs in several places, and without such a font some icons may render as missing-glyph boxes
+- A Nerd Font is optional: `icon_mode = "auto"` uses ASCII icons in a Linux TTY such as `KMSCON`, while normal terminal emulators use Nerd glyphs by default.
 
 ## cava
 
@@ -209,14 +209,14 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 
 ## Configuration
 
-`config/default.toml` is rewritten on startup whenever a known field is missing, legacy values are found (`graphics_protocol = "auto|sixel|kitty|iterm2"`, the old `Alt+B` sidebar binding) or the saved visualizer is unavailable. A malformed file is replaced by the defaults, so keep a copy if you like to hand-edit it.
+`config/default.toml` is rewritten on startup whenever a known field is missing, the legacy `Alt+B` sidebar binding is found, or the saved visualizer is unavailable. A malformed file is replaced by the defaults, so keep a copy if you like to hand-edit it.
 
 | Key | Default | Values / notes |
 | --- | --- | --- |
 | `theme` | `frappe` | Any theme key from `themes/*.toml` (20 built-ins, custom files picked up); a broken file falls back to the default |
 | `language` | `zh` | `zh`, `en` |
 | `visualize` | cava present → `bars`, otherwise `oscilloscope` | `hidden` (shown as "Off" in settings), `lyrics` ("Lyrics"; the old `off` means the same), `bars`, `oscilloscope`, `vector`; only `bars` needs cava |
-| `graphics_protocol` | `halfblocks` | `off`, `halfblocks`; `off` draws covers as ASCII art |
+| `icon_mode` | `auto` | `auto`, `ascii`, `nerd`; `auto` uses ASCII in a Linux `KMSCON`/plain TTY and Nerd glyphs in a normal terminal emulator; `ascii` and `nerd` force the corresponding icon set |
 | `transparent_background` | `true` | Use the terminal background |
 | `album_border` | `true` | Border around the fullscreen cover |
 | `show_hints` | `true` | Hint line on the content pages and in the fullscreen page's panel border |
@@ -241,10 +241,6 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 | `ui_fps` | `30` | Fullscreen page frame-rate cap |
 | `spectrum_hz` | `30` (shipped file says `60`) | Spectrum refresh rate; the host clamps its own cava to 1–30 Hz |
 | `mpris_poll_ms` | `100` | Fullscreen-side MPRIS poll interval |
-| `kitty_cover_scale_percent` | `100` | Fullscreen cover scale percentage |
-| `lyrics_cover_fetch` / `lyrics_cover_download` | `false` | Reserved for the standalone TMPlayer |
-| `audio_fingerprint` / `acoustid_api_key` | `false` / `""` | Reserved for the standalone TMPlayer |
-| `resume_last_position` | `false` | Declared but not implemented: playback memory restores the queue, not the position |
 | `cache.path` | unset | Cache directory override (defaults to the OS cache directory) |
 | `cache.clean_strategy` | `both` | `size`, `age`, `both` |
 | `cache.max_size_mb` | `500` | Size ceiling for the LRU pass |
@@ -334,10 +330,9 @@ Fullscreen page:
 
 ## Notes
 
-- There are no command line flags. The environment variables are `CNMPLAYER_ASSET_DIR` (asset root), `TMPLAYER_CAVA` (explicit cava binary) and `COLORTERM` / `TERM` (color capability detection).
-- `graphics_protocol` only implements `off` and `halfblocks`; the legacy `auto`, `sixel`, `kitty` and `iterm2` values are migrated to `halfblocks`.
+- There are no command line flags. The environment variables are `CNMPLAYER_ASSET_DIR` (asset root), `TMPLAYER_CAVA` (explicit cava binary, retained for compatibility) and `COLORTERM` / `TERM` (color capability detection).
+- `icon_mode = "auto"` selects ASCII icons when `TERM` identifies a Linux TTY and Nerd glyphs in a normal terminal emulator; use `ascii` or `nerd` to force one set. `KMSCON` is the reference plain-TTY environment.
 - There is no dedicated album page; album search results and artist-page albums are shown with the playlist-page layout.
-- Several settings are only consumed by the fullscreen page or are placeholders: `ui_fps`, `mpris_poll_ms`, `kitty_cover_scale_percent`, `lyrics_cover_fetch`, `lyrics_cover_download`, `audio_fingerprint`, `acoustid_api_key` and `resume_last_position`.
 - Native audio backends write warnings straight to stderr; CNMPlayer redirects fd 2 into `Player.stderr.log` so those messages cannot smear the TUI.
 - Prebuilt artifacts and AUR packages are produced for Linux `amd64` and `aarch64` only. MPRIS is Linux-only as well.
 
@@ -352,23 +347,23 @@ Fullscreen page:
 - Image rendering: ratatui-image + chafa
 - Visualization: external `cava`, plus an internal PCM tap that feeds the oscilloscope and the LUFS meter
 - Linux media control: mpris-server
-- Fullscreen playback integration: TMPlayer
+- Fullscreen playback: shared application controllers and `src/ui/` panels
 
 ## Development
 
 ```bash
-cargo run                 # development build
-cargo build --release     # release build
-cargo test                # unit tests
-cargo check --locked --all-targets   # what CI runs on pull requests
+cargo run                              # development build
+cargo build --release                  # release build
+cargo test --workspace --all-targets   # root and vendored crate tests
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-CI (`ci.yml`) runs `cargo check --locked --all-targets` on pull requests against `main` / `develop` and on pushes to `develop`.
-Release (`release.yml`) triggers on a `v*` tag: it verifies that the tag matches the `Cargo.toml` version, builds `x86_64` and `aarch64` tarballs, creates the GitHub Release and syncs the `cnmplayer` and `cnmplayer-bin` AUR packages.
+CI (`ci.yml`) runs check and test for default and `--no-default-features` on Rust 1.90 and stable, then runs fmt and clippy gates for both the root and vendored crates.
+Release (`release.yml`) runs the root and vendored test gates before publishing, publishes `SHA256SUMS` alongside the `x86_64` and `aarch64` tarballs, and preserves the tag, dispatch dry-run and AUR sync paths.
 
 ## Related Projects
 
-- [TMPlayer](https://github.com/professor-lee/TMPlayer): the fullscreen playback UI, embedded into CNMPlayer
 - [ncm-api-rs](https://github.com/imsyy/ncm-api-rs): the NetEase Cloud Music API client vendored in `ncm-api-rs/`
 
 ## Disclaimer

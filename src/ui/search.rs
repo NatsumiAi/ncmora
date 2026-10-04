@@ -1,4 +1,6 @@
-use crate::app::{ARTIST_CARD_ROWS, App, SearchItemKind, SearchState};
+use crate::app::{ARTIST_CARD_ROWS, App, SearchItemKind};
+use crate::data::icons::UiIcons;
+use crate::app::controllers::SearchController;
 use crate::data::config::Language;
 use crate::ui::page_lyrics;
 use crate::ui::player_bar;
@@ -100,17 +102,11 @@ fn draw_result_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let top_row = app.search.effective_scroll_rows();
     let bottom_row = top_row.saturating_add(usize::from(list_area.height));
 
-    for item_idx in 0..app.search.results.len() {
+    for item_idx in app.search.visible_range(top_row, bottom_row) {
         let start_row = app.search.item_start_row(item_idx);
-        if start_row >= bottom_row {
-            break;
-        }
         let end_row = app.search.item_end_row(item_idx);
-        if end_row <= top_row {
-            continue;
-        }
 
-        let kind = app.search.results[item_idx].kind;
+        let kind = app.search.results()[item_idx].kind;
         let divider = app.search.divider_rows(item_idx);
         let item_top_row = start_row + divider;
 
@@ -209,8 +205,8 @@ fn render_artist_card(
         return;
     }
 
-    let name = app.search.results[item_idx].left_label.clone();
-    let tag = app.search.results[item_idx]
+    let name = app.search.results()[item_idx].left_label.clone();
+    let tag = app.search.results()[item_idx]
         .kind
         .tag()
         .unwrap_or_default()
@@ -320,7 +316,7 @@ fn render_artist_card(
         };
         let draw_ascii = app.draw_ascii();
         let text_style = Style::default().fg(app.theme.color_text());
-        app.search.results[item_idx].cover.render_rows(
+        app.search.results()[item_idx].cover.render_rows(
             frame,
             &mut app.graphics_picker,
             avatar_area,
@@ -333,16 +329,11 @@ fn render_artist_card(
     }
 }
 
-/// 分区内序号（同一 kind 内的第几条）。带后缀搜索只有一种 kind，等价于旧版的行号。
-fn search_item_ordinal(state: &SearchState, index: usize) -> usize {
-    let kind = state.results[index].kind;
-    state.results[..index]
-        .iter()
-        .filter(|item| item.kind == kind)
-        .count()
-        + 1
+/// 分区内序号（同一 kind 内的第几条）。由 `SearchController` 在结果变更时预计算，
+/// 渲染阶段只做 O(1) 查表。
+fn search_item_ordinal(state: &SearchController, index: usize) -> usize {
+    state.item_ordinal(index)
 }
-
 fn draw_search_divider(frame: &mut Frame, app: &App, row: Rect) {
     if row.width == 0 || row.height == 0 {
         return;
@@ -364,7 +355,7 @@ fn render_search_row(
     focused: bool,
     download_state: Option<crate::app::download::DownloadState>,
 ) {
-    let song_id = app.search.results[item_idx].song_id.clone();
+    let song_id = app.search.results()[item_idx].song_id.clone();
     let is_now_playing = app.is_now_playing_song(song_id.as_deref());
     let zebra_bg = if app.config.transparent_background {
         None
@@ -394,14 +385,14 @@ fn render_search_row(
         style
     };
 
-    let right = app.search.results[item_idx]
+    let right = app.search.results()[item_idx]
         .kind
         .tag()
         .map(str::to_string)
-        .unwrap_or_else(|| app.search.results[item_idx].right_label.clone());
+        .unwrap_or_else(|| app.search.results()[item_idx].right_label.clone());
     let left = format!(
         "{:02}. {}",
-        ordinal, app.search.results[item_idx].left_label
+        ordinal, app.search.results()[item_idx].left_label
     );
 
     // 下载图标落在右侧标签（单曲行就是时长）左边：图标 + 一列分隔空格。
@@ -442,8 +433,12 @@ fn render_search_row(
             .x
             .saturating_add((display_width(&clipped_left) + space) as u16);
         spans.push(Span::styled(
-            crate::app::download::state_glyph(state, app.download_spinner_phase()).to_string(),
-            download_style,
+            crate::app::download::state_glyph(
+                state,
+                app.download_spinner_phase(),
+                UiIcons::for_mode(app.config.icon_mode),
+            )
+            .to_string(),
         ));
         spans.push(Span::styled(" ", row_style));
         app.push_search_item_download_hit(
@@ -519,7 +514,7 @@ mod tests {
     /// 序号按分区重新开始（同 kind 计数），跨窗口滚动时也不受影响。
     #[test]
     fn ordinal_restarts_per_section() {
-        let mut state = SearchState::default();
+        let mut state = SearchController::default();
         state.set_results(
             vec![
                 item(SearchItemKind::Artist, "artist-1"),

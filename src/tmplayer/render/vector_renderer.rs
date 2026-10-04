@@ -32,7 +32,7 @@
 use crate::tmplayer::app::state::AppState;
 use crate::tmplayer::audio::pcm_tap::PcmSnapshot;
 use crate::tmplayer::render::oscilloscope_renderer::{braille_bit, set_pixel};
-use crate::tmplayer::ui::theme::Theme;
+use crate::ui::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
@@ -1645,7 +1645,7 @@ mod tests {
     /// 面板底色的中点插值，全可见粒子与示波器同色。
     #[test]
     fn fading_particles_blend_colors_toward_background() {
-        use crate::tmplayer::ui::theme::{ColorCapability, Theme, ThemePalette};
+        use crate::ui::theme::{ColorCapability, Theme, ThemePalette};
         use ratatui::buffer::Buffer;
 
         let theme = Theme {
@@ -1711,7 +1711,7 @@ mod tests {
     /// 纯粒子格仍按自身透明度渐变。
     #[test]
     fn recovering_trace_cells_stay_full_bright() {
-        use crate::tmplayer::ui::theme::{ColorCapability, Theme, ThemePalette};
+        use crate::ui::theme::{ColorCapability, Theme, ThemePalette};
         use ratatui::buffer::Buffer;
 
         let theme = Theme {

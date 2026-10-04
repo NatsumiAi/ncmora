@@ -4,6 +4,7 @@
 /// - weapi: 双层 AES-128-CBC + RSA
 /// - eapi: MD5 签名 + AES-128-ECB
 /// - linuxapi: AES-128-ECB
+use crate::error::{NcmError, Result};
 use aes::cipher::{block_padding::Pkcs7, BlockModeDecrypt, BlockModeEncrypt, KeyInit, KeyIvInit};
 use md5::{Digest, Md5};
 use rand::RngExt;
@@ -39,12 +40,16 @@ fn aes_ecb_encrypt_hex(plaintext: &[u8], key: &[u8; 16]) -> String {
 }
 
 /// AES-128-ECB 解密（输入大写 Hex）
-fn aes_ecb_decrypt_hex(ciphertext_hex: &str, key: &[u8; 16]) -> Result<Vec<u8>, String> {
-    let ciphertext = hex::decode(ciphertext_hex).map_err(|e| e.to_string())?;
-    let cipher = Aes128EcbDec::new(key.into());
-    cipher
-        .decrypt_padded_vec::<Pkcs7>(&ciphertext)
-        .map_err(|e| e.to_string())
+fn aes_ecb_decrypt_hex(ciphertext_hex: &str, key: &[u8; 16]) -> Result<Vec<u8>> {
+    let ciphertext = hex::decode(ciphertext_hex)
+        .map_err(|error| NcmError::Crypto(format!("Invalid ciphertext hex: {error}")))?;
+    aes_ecb_decrypt(&ciphertext, key)
+}
+
+fn aes_ecb_decrypt(ciphertext: &[u8], key: &[u8; 16]) -> Result<Vec<u8>> {
+    Aes128EcbDec::new(key.into())
+        .decrypt_padded_vec::<Pkcs7>(ciphertext)
+        .map_err(|_| NcmError::Crypto("Invalid AES-128-ECB ciphertext or PKCS#7 padding".to_string()))
 }
 
 /// RSA 加密（NONE / raw / textbook RSA，无 padding）
@@ -127,32 +132,82 @@ pub fn eapi(url: &str, object: &serde_json::Value) -> HashMap<String, String> {
     result
 }
 
-/// eapi 响应解密
-pub fn eapi_res_decrypt(encrypted_hex: &str) -> Option<serde_json::Value> {
-    let decrypted = aes_ecb_decrypt_hex(encrypted_hex, EAPI_KEY).ok()?;
-    let text = String::from_utf8(decrypted).ok()?;
-    serde_json::from_str(&text).ok()
+/// eapi 响应解密；无效密文、UTF-8 或 JSON 返回明确错误
+pub fn eapi_res_decrypt(encrypted_hex: &str) -> Result<serde_json::Value> {
+    let ciphertext = hex::decode(encrypted_hex)
+        .map_err(|error| NcmError::Crypto(format!("Invalid ciphertext hex: {error}")))?;
+    eapi_res_decrypt_bytes(&ciphertext)
 }
 
-/// eapi 请求解密（调试用）
-pub fn eapi_req_decrypt(encrypted_hex: &str) -> Option<(String, serde_json::Value)> {
-    let decrypted = aes_ecb_decrypt_hex(encrypted_hex, EAPI_KEY).ok()?;
-    let text = String::from_utf8(decrypted).ok()?;
+pub(crate) fn eapi_res_decrypt_bytes(ciphertext: &[u8]) -> Result<serde_json::Value> {
+    let decrypted = aes_ecb_decrypt(ciphertext, EAPI_KEY)?;
+    let text = std::str::from_utf8(&decrypted)
+        .map_err(|error| NcmError::Crypto(format!("Invalid decrypted response UTF-8: {error}")))?;
+    serde_json::from_str(text)
+        .map_err(|source| NcmError::response_decode("eapi", decrypted.len(), source))
+}
 
-    // 按 "-36cd479b6b5-" 分隔符拆分
-    let parts: Vec<&str> = text.splitn(3, "-36cd479b6b5-").collect();
-    if parts.len() >= 2 {
-        let url = parts[0].to_string();
-        let data: serde_json::Value = serde_json::from_str(parts[1]).ok()?;
-        Some((url, data))
-    } else {
-        None
-    }
+/// eapi 请求解密（调试用）；保留请求 URL 和 JSON 参数
+pub fn eapi_req_decrypt(encrypted_hex: &str) -> Result<(String, serde_json::Value)> {
+    let decrypted = aes_ecb_decrypt_hex(encrypted_hex, EAPI_KEY)?;
+    let text = std::str::from_utf8(&decrypted)
+        .map_err(|error| NcmError::Crypto(format!("Invalid decrypted request UTF-8: {error}")))?;
+
+    let mut parts = text.splitn(3, "-36cd479b6b5-");
+    let url = parts.next().unwrap_or_default();
+    let json = parts.next().ok_or_else(|| {
+        NcmError::Crypto("Missing eapi request envelope delimiter".to_string())
+    })?;
+    let data = serde_json::from_str(json)
+        .map_err(|source| NcmError::response_decode("eapi request", json.len(), source))?;
+    Ok((url.to_string(), data))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Fixed vectors generated independently with OpenSSL AES-128-ECB/PKCS#7.
+    #[test]
+    fn eapi_response_decodes_fixed_vector() {
+        let body = eapi_res_decrypt("51B05E35C69B2F9FF4967735DED68881").unwrap();
+        assert_eq!(body, serde_json::json!({"code": 200}));
+    }
+
+    #[test]
+    fn eapi_response_rejects_invalid_hex_and_padding() {
+        assert!(matches!(eapi_res_decrypt("not hex"), Err(NcmError::Crypto(_))));
+        assert!(matches!(eapi_res_decrypt("00"), Err(NcmError::Crypto(_))));
+        assert!(matches!(eapi_res_decrypt(""), Err(NcmError::Crypto(_))));
+    }
+
+    #[test]
+    fn eapi_request_rejects_missing_envelope() {
+        assert!(matches!(
+            eapi_req_decrypt("51B05E35C69B2F9FF4967735DED68881"),
+            Err(NcmError::Crypto(_))
+        ));
+    }
+
+    #[test]
+    fn eapi_response_rejects_invalid_utf8() {
+        assert!(matches!(
+            eapi_res_decrypt("9DF6853B4BD91D9D60D42478618B540C"),
+            Err(NcmError::Crypto(_))
+        ));
+    }
+
+    #[test]
+    fn eapi_response_rejects_malformed_json() {
+        assert!(matches!(
+            eapi_res_decrypt("67E8E46C291AD4030FDF54CF200490C6"),
+            Err(NcmError::ResponseDecode { body_len: 4, .. })
+        ));
+        assert!(matches!(
+            eapi_res_decrypt("6AA3B102FBE7296AB0DB9EA5C46AD12B"),
+            Err(NcmError::ResponseDecode { body_len: 0, .. })
+        ));
+    }
 
     #[test]
     fn test_aes_ecb_roundtrip() {

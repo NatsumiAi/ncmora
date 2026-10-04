@@ -26,28 +26,20 @@ impl ThemeLoader {
     /// 文件缺失或格式校验不过（坏 TOML / 缺必填字段）都返回 Err，由调用方
     /// 回退默认主题。
     pub fn load(name: &str) -> Result<Theme> {
-        let _ = assets::ensure_assets_ready();
         let key = sanitize_theme_key(name);
         let dir = assets::resolve_asset_path(&PathBuf::from("themes"));
         let direct = dir.join(format!("{key}.toml"));
         let path = if direct.exists() {
             direct
         } else {
-            // 内置 catppuccin_* 文件名与 key 不一致：按文件内 name 字段反查，
-            // 保证旧配置里的 "frappe" 等值仍能加载。
             find_theme_file_by_name_field(&dir, &key)?
         };
         let raw = fs::read_to_string(&path)?;
         let parsed: ThemeToml = toml::from_str(&raw)?;
-        let buff_hex = if let Some(buff) = parsed.buff.clone() {
-            buff
-        } else {
-            // 老主题缺 buff：推导并回写进文件（与内置主题同一升级机制）。
-            let generated = derive_buff_hex(&parsed.surface);
-            let upgraded = inject_buff_entry(&raw, &generated);
-            let _ = fs::write(&path, upgraded);
-            generated
-        };
+        let buff_hex = parsed
+            .buff
+            .clone()
+            .unwrap_or_else(|| derive_buff_hex(&parsed.surface));
 
         Ok(Theme {
             name: key,
@@ -74,7 +66,6 @@ impl ThemeLoader {
     /// `name` 字段，缺省用文件名主干），按 key 排序去重；坏文件直接跳过，
     /// 不让主题循环崩掉。目录不可读时兜底 `system`。
     pub fn list_themes() -> Vec<String> {
-        let _ = assets::ensure_assets_ready();
         let dir = assets::resolve_asset_path(&PathBuf::from("themes"));
         let mut keys: Vec<String> = fs::read_dir(&dir)
             .into_iter()

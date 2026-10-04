@@ -1,5 +1,5 @@
 use crate::tmplayer::app::state::AppState;
-use crate::tmplayer::data::config::BarChannels;
+use crate::data::config::BarChannels;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};

@@ -1,25 +1,16 @@
 theme = "frappe"
-ui_fps = 30
 spectrum_hz = 60
-mpris_poll_ms = 100
+icon_mode = "auto"
 visualize = "bars"
 transparent_background = true
 album_border = true
-graphics_protocol = "halfblocks"
-kitty_graphics = false
-kitty_cover_scale_percent = 100
 super_smooth_bar = false
 bars_gap = false
 bar_number = "auto"
 bar_channels = "mono"
 bar_channel_reverse = false
 
-lyrics_cover_fetch = false
-lyrics_cover_download = false
-audio_fingerprint = false
-acoustid_api_key = ""
-resume_last_position = false
-# 自定义启动标题。支持换行，格式如： "Line1\nLine2".
+# 自定义启动标题。支持换行，格式如： "Line1\nLine2"。
 default_opening_title = ""
 language = "zh"
 page_lyrics = false
@@ -33,25 +24,10 @@ download_audio_quality = "exhigh"
 # 下载目录（绝对路径，默认 <系统音乐目录>/cnmplayer/；没有音乐目录时回退 ~/Music/cnmplayer/）。
 # download_path = "/home/user/Music/cnmplayer"
 playback_memory = false
+eq_bands_db = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 show_hints = true
 small_window_display = true
 home_more_recommend = false
-
-[cache]
-# 缓存根目录 (默认使用系统标准路径)
-# path = "缓存目录"
-
-# 自动清理策略：size (按容量) | age (按时间) | both (同时满足)
-clean_strategy = "both"
-
-# 缓存最大容量 (单位: MB)，超过后按 LRU 删除旧文件
-max_size_mb = 500
-
-# 缓存有效期 (单位: 天)，超过该时间的缓存文件将被清理
-max_age_days = 7
-
-# 启动时是否执行检查
-clean_on_startup = true
 
 keybind_search_box = "Ctrl+S"
 keybind_fullscreen = "Ctrl+F"
@@ -68,8 +44,27 @@ keybind_fullscreen_prev = "Left"
 keybind_fullscreen_next = "Right"
 keybind_fullscreen_toggle_play_pause = "Space"
 keybind_fullscreen_toggle_mode = "M"
+keybind_fullscreen_eq = "E"
+keybind_fullscreen_eq_reset = "Alt+R"
 keybind_toggle_like_fullscreen = "L"
 keybind_toggle_like_collapsed = "Alt+L"
 keybind_small_window_toggle = "Alt+X"
 keybind_download = "Ctrl+Alt+D"
 keybind_download_fullscreen = "Ctrl+D"
+ 
+[cache]
+# 缓存根目录 (默认使用系统标准路径)
+# path = "缓存目录"
+
+# 自动清理策略：size (按容量) | age (按时间) | both (同时满足)
+clean_strategy = "both"
+
+# 缓存最大容量 (单位: MB)，超过后按 LRU 删除旧文件
+max_size_mb = 500
+
+# 缓存有效期 (单位: 天)，超过该时间的缓存文件将被清理
+max_age_days = 7
+
+# 启动时是否执行检查
+clean_on_startup = true
+

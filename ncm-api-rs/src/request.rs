@@ -38,6 +38,50 @@ fn header_value(s: &str) -> HeaderValue {
     })
 }
 
+fn api_endpoint(uri: &str) -> Result<&str> {
+    uri.strip_prefix("/api/")
+        .filter(|endpoint| !endpoint.is_empty())
+        .ok_or_else(|| NcmError::InvalidParam("API URI must start with /api/ and name an endpoint".to_string()))
+}
+
+fn decode_response_body(bytes: &[u8], encrypted: bool) -> Result<Value> {
+    if encrypted {
+        crypto::eapi_res_decrypt_bytes(bytes)
+    } else {
+        serde_json::from_slice(bytes)
+            .map_err(|source| NcmError::response_decode("plain", bytes.len(), source))
+    }
+}
+
+fn response_from_body(status_code: i64, body: Value, cookie: Vec<String>) -> Result<ApiResponse> {
+    let mut status = body
+        .get("code")
+        .and_then(|c| {
+            c.as_i64()
+                .or_else(|| c.as_str().and_then(|s| s.parse().ok()))
+        })
+        .unwrap_or(status_code);
+
+    // Preserve protocol-specific status semantics and the original body.
+    if SPECIAL_STATUS_CODES.contains(&status) {
+        status = 200;
+    }
+    if !(100..600).contains(&status) {
+        status = 400;
+    }
+
+    let answer = ApiResponse { status, body, cookie };
+    if status == 200 {
+        Ok(answer)
+    } else {
+        let msg = answer.body.get("msg")
+            .and_then(|m| m.as_str())
+            .unwrap_or("Unknown error")
+            .to_string();
+        Err(NcmError::from_api(status, msg))
+    }
+}
+
 /// 加密类型
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum CryptoType {
@@ -76,7 +120,6 @@ pub struct RequestOption {
     pub crypto: CryptoType,
     pub cookie: Option<String>,
     pub ua: Option<String>,
-    pub proxy: Option<String>,
     pub real_ip: Option<String>,
     pub random_cn_ip: bool,
     pub e_r: Option<bool>,
@@ -143,6 +186,10 @@ impl ApiClient {
         data: Value,
         options: RequestOption,
     ) -> Result<ApiResponse> {
+        let endpoint = api_endpoint(uri)?;
+        if !data.is_object() {
+            return Err(NcmError::InvalidParam("API request data must be a JSON object".to_string()));
+        }
         let mut headers = HeaderMap::new();
 
         // IP 伪装
@@ -232,6 +279,8 @@ impl ApiClient {
         } else {
             options.crypto.clone()
         };
+        let encrypted_response = crypto_type == CryptoType::Eapi
+            && options.e_r.unwrap_or(ENCRYPT_RESPONSE);
 
         let mut data = data;
         let url: String;
@@ -252,7 +301,7 @@ impl ApiClient {
 
                 data["csrf_token"] = Value::String(csrf_token);
                 encrypt_data = crypto::weapi(&data);
-                url = format!("{}/weapi/{}", ref_domain, &uri[5..]);
+                url = format!("{}/weapi/{}", ref_domain, endpoint);
             }
             CryptoType::Linuxapi => {
                 let ua = options
@@ -364,11 +413,10 @@ impl ApiClient {
                     let header_value = serde_json::to_value(&header_map).unwrap();
                     data["header"] = header_value;
 
-                    let e_r = options.e_r.unwrap_or(ENCRYPT_RESPONSE);
-                    data["e_r"] = Value::Bool(e_r);
+                    data["e_r"] = Value::Bool(encrypted_response);
 
                     encrypt_data = crypto::eapi(uri, &data);
-                    url = format!("{}/eapi/{}", api_domain, &uri[5..]);
+                    url = format!("{}/eapi/{}", api_domain, endpoint);
                 } else {
                     // api 明文
                     encrypt_data = if let Value::Object(map) = &data {
@@ -401,12 +449,6 @@ impl ApiClient {
             HeaderValue::from_static("application/x-www-form-urlencoded"),
         );
 
-        if options.proxy.is_some() {
-            return Err(NcmError::Unknown(
-                "proxy is no longer supported, configure proxy in the Client upfront".to_string(),
-            ));
-        }
-
         let response = self
             .client
             .post(&url)?
@@ -427,53 +469,66 @@ impl ApiClient {
             })
             .collect();
 
-        // 解析响应体
-        let e_r = options.e_r.unwrap_or(false);
         let status_code = response.status().as_u16() as i64;
+        let bytes = response.bytes().await?;
+        let body = decode_response_body(&bytes, encrypted_response)?;
+        response_from_body(status_code, body, resp_cookies)
+    }
+}
 
-        let body: Value = if crypto_type == CryptoType::Eapi && e_r {
-            let bytes = response.bytes().await?;
-            let hex_str = hex::encode_upper(&bytes);
-            crypto::eapi_res_decrypt(&hex_str).unwrap_or(Value::Null)
-        } else {
-            let text = response.text().await?;
-            serde_json::from_str(&text).unwrap_or(Value::String(text))
-        };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        let mut status = body
-            .get("code")
-            .and_then(|c| {
-                c.as_i64()
-                    .or_else(|| c.as_str().and_then(|s| s.parse().ok()))
-            })
-            .unwrap_or(status_code);
-
-        // 特殊状态码视为 200
-        if SPECIAL_STATUS_CODES.contains(&status) {
-            status = 200;
+    #[test]
+    fn api_uri_requires_nonempty_api_endpoint() {
+        assert_eq!(api_endpoint("/api/song/detail").unwrap(), "song/detail");
+        assert_eq!(api_endpoint("/api/歌曲").unwrap(), "歌曲");
+        for uri in ["", "/", "/api", "/api/", "😀", "/abc/endpoint", "/eapi/test", "https://music.163.com/api/test"] {
+            assert!(matches!(api_endpoint(uri), Err(NcmError::InvalidParam(_))));
         }
+    }
 
-        // 状态码范围检查
-        if !(100..600).contains(&status) {
-            status = 400;
+    #[test]
+    fn malformed_plain_response_is_a_typed_error_with_bounded_context() {
+        let mut body = b"not-json SECRET".to_vec();
+        body.resize(16 * 1024, b'x');
+        let error = decode_response_body(&body, false).unwrap_err();
+        assert!(matches!(&error, NcmError::ResponseDecode { format: "plain", body_len: 16384, .. }));
+        let message = error.to_string();
+        assert!(!message.contains("SECRET"));
+        assert!(message.len() < 256);
+        assert!(matches!(decode_response_body(b"", false), Err(NcmError::ResponseDecode { .. })));
+    }
+
+    #[test]
+    fn encrypted_response_decodes_fixed_vector_or_returns_error() {
+        let bytes = hex::decode("51B05E35C69B2F9FF4967735DED68881").unwrap();
+        assert_eq!(decode_response_body(&bytes, true).unwrap(), serde_json::json!({"code": 200}));
+        assert!(matches!(decode_response_body(&[0], true), Err(NcmError::Crypto(_))));
+        let malformed = hex::decode("67E8E46C291AD4030FDF54CF200490C6").unwrap();
+        assert!(matches!(decode_response_body(&malformed, true), Err(NcmError::ResponseDecode { .. })));
+    }
+
+    #[test]
+    fn valid_json_body_shapes_are_preserved() {
+        for body in ["null", "\"body\"", "[1,2]", "{\"code\":502}"] {
+            assert_eq!(decode_response_body(body.as_bytes(), false).unwrap(), serde_json::from_str::<Value>(body).unwrap());
         }
+    }
 
-        let answer = ApiResponse {
-            status,
-            body,
-            cookie: resp_cookies,
-        };
-
-        if status == 200 {
-            Ok(answer)
-        } else {
-            let msg = answer
-                .body
-                .get("msg")
-                .and_then(|m| m.as_str())
-                .unwrap_or("Unknown error")
-                .to_string();
-            Err(NcmError::from_api(status, msg))
+    #[test]
+    fn special_status_codes_preserve_original_response_body() {
+        for code in [201, 302, 400, 502, 800, 801, 802, 803] {
+            let body = serde_json::json!({"code": code});
+            let response = response_from_body(500, body.clone(), vec![]).unwrap();
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body, body);
         }
+        let response = response_from_body(500, serde_json::json!({"code": "800"}), vec![]).unwrap();
+        assert_eq!(response.body["code"], "800");
+        assert_eq!(response.status, 200);
+        assert!(matches!(response_from_body(200, serde_json::json!({"code": 301}), vec![]), Err(NcmError::AuthRequired(_))));
+        assert!(matches!(response_from_body(503, serde_json::json!({}), vec![]), Err(NcmError::RateLimited(_))));
     }
 }

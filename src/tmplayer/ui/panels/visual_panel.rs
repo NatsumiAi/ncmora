@@ -1,5 +1,5 @@
 use crate::tmplayer::app::state::{AppState, LyricLine};
-use crate::tmplayer::data::config::VisualizeMode;
+use crate::data::config::VisualizeMode;
 use crate::tmplayer::render::{oscilloscope_renderer, spectrum_renderer, vector_renderer};
 use crate::tmplayer::ui::borders::SOLID_BORDER;
 use ratatui::Frame;

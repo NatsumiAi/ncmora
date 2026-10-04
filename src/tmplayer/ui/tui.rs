@@ -147,7 +147,7 @@ impl Tui {
 
             // 「关闭」档位把右侧区（可视化 + 歌词）整块收起，歌曲信息区独占整宽。
             let show_right =
-                app.config.visualize != crate::tmplayer::data::config::VisualizeMode::Hidden;
+                app.config.visualize != crate::data::config::VisualizeMode::Hidden;
             let (left, right) = if show_right {
                 let cols = Layout::default()
                     .direction(Direction::Horizontal)
@@ -700,17 +700,17 @@ fn render_bar_settings_modal(
     f.render_widget(Paragraph::new(""), rows[0]);
 
     let bar_number_label = match app.config.bar_number {
-        crate::tmplayer::data::config::BarNumber::Auto => lang_text(app, "自动", "Auto"),
-        crate::tmplayer::data::config::BarNumber::N16 => "16",
-        crate::tmplayer::data::config::BarNumber::N32 => "32",
-        crate::tmplayer::data::config::BarNumber::N48 => "48",
-        crate::tmplayer::data::config::BarNumber::N64 => "64",
-        crate::tmplayer::data::config::BarNumber::N80 => "80",
-        crate::tmplayer::data::config::BarNumber::N96 => "96",
+        crate::data::config::BarNumber::Auto => lang_text(app, "自动", "Auto"),
+        crate::data::config::BarNumber::N16 => "16",
+        crate::data::config::BarNumber::N32 => "32",
+        crate::data::config::BarNumber::N48 => "48",
+        crate::data::config::BarNumber::N64 => "64",
+        crate::data::config::BarNumber::N80 => "80",
+        crate::data::config::BarNumber::N96 => "96",
     };
     let channels_label = match app.config.bar_channels {
-        crate::tmplayer::data::config::BarChannels::Mono => "Mono",
-        crate::tmplayer::data::config::BarChannels::Stereo => "Stereo",
+        crate::data::config::BarChannels::Mono => "Mono",
+        crate::data::config::BarChannels::Stereo => "Stereo",
     };
 
     let items = vec![
@@ -718,16 +718,16 @@ fn render_bar_settings_modal(
             "{}: {}",
             lang_text(app, "可视化", "Visualization"),
             match app.config.visualize {
-                crate::tmplayer::data::config::VisualizeMode::Lyrics =>
+                crate::data::config::VisualizeMode::Lyrics =>
                     lang_text(app, "仅歌词", "Lyrics"),
-                crate::tmplayer::data::config::VisualizeMode::Hidden =>
+                crate::data::config::VisualizeMode::Hidden =>
                     lang_text(app, "关闭", "Off"),
-                crate::tmplayer::data::config::VisualizeMode::Bars =>
+                crate::data::config::VisualizeMode::Bars =>
                     lang_text(app, "频谱", "Bars"),
-                crate::tmplayer::data::config::VisualizeMode::Oscilloscope => {
+                crate::data::config::VisualizeMode::Oscilloscope => {
                     lang_text(app, "示波器", "Oscilloscope")
                 }
-                crate::tmplayer::data::config::VisualizeMode::Vector => {
+                crate::data::config::VisualizeMode::Vector => {
                     lang_text(app, "矢量", "Vector")
                 }
             }
@@ -757,25 +757,25 @@ fn render_bar_settings_modal(
             "{}: {}",
             lang_text(app, "音质", "Audio Quality"),
             match app.config.audio_quality {
-                crate::tmplayer::data::config::AudioQuality::Standard =>
+                crate::data::config::AudioQuality::Standard =>
                     lang_text(app, "标准", "Standard"),
-                crate::tmplayer::data::config::AudioQuality::Higher =>
+                crate::data::config::AudioQuality::Higher =>
                     lang_text(app, "较高", "Higher"),
-                crate::tmplayer::data::config::AudioQuality::Exhigh =>
+                crate::data::config::AudioQuality::Exhigh =>
                     lang_text(app, "极高", "Exhigh"),
-                crate::tmplayer::data::config::AudioQuality::Lossless =>
+                crate::data::config::AudioQuality::Lossless =>
                     lang_text(app, "无损", "Lossless"),
-                crate::tmplayer::data::config::AudioQuality::Hires => "Hi-Res",
-                crate::tmplayer::data::config::AudioQuality::Jyeffect => {
+                crate::data::config::AudioQuality::Hires => "Hi-Res",
+                crate::data::config::AudioQuality::Jyeffect => {
                     lang_text(app, "高清环绕声", "JYEffect")
                 }
-                crate::tmplayer::data::config::AudioQuality::Sky => {
+                crate::data::config::AudioQuality::Sky => {
                     lang_text(app, "沉浸环绕声", "Sky")
                 }
-                crate::tmplayer::data::config::AudioQuality::Dolby => {
+                crate::data::config::AudioQuality::Dolby => {
                     lang_text(app, "杜比全景声", "Dolby")
                 }
-                crate::tmplayer::data::config::AudioQuality::Jymaster => {
+                crate::data::config::AudioQuality::Jymaster => {
                     lang_text(app, "超清母带", "JYMaster")
                 }
             }
@@ -945,17 +945,17 @@ fn render_download_settings_modal(
     let surface = app.theme.color_surface();
 
     let quality_label = match app.config.download_audio_quality {
-        crate::tmplayer::data::config::AudioQuality::Standard => lang_text(app, "标准", "Standard"),
-        crate::tmplayer::data::config::AudioQuality::Higher => lang_text(app, "较高", "Higher"),
-        crate::tmplayer::data::config::AudioQuality::Exhigh => lang_text(app, "极高", "Exhigh"),
-        crate::tmplayer::data::config::AudioQuality::Lossless => lang_text(app, "无损", "Lossless"),
-        crate::tmplayer::data::config::AudioQuality::Hires => "Hi-Res",
-        crate::tmplayer::data::config::AudioQuality::Jyeffect => {
+        crate::data::config::AudioQuality::Standard => lang_text(app, "标准", "Standard"),
+        crate::data::config::AudioQuality::Higher => lang_text(app, "较高", "Higher"),
+        crate::data::config::AudioQuality::Exhigh => lang_text(app, "极高", "Exhigh"),
+        crate::data::config::AudioQuality::Lossless => lang_text(app, "无损", "Lossless"),
+        crate::data::config::AudioQuality::Hires => "Hi-Res",
+        crate::data::config::AudioQuality::Jyeffect => {
             lang_text(app, "高清环绕声", "JYEffect")
         }
-        crate::tmplayer::data::config::AudioQuality::Sky => lang_text(app, "沉浸环绕声", "Sky"),
-        crate::tmplayer::data::config::AudioQuality::Dolby => lang_text(app, "杜比全景声", "Dolby"),
-        crate::tmplayer::data::config::AudioQuality::Jymaster => {
+        crate::data::config::AudioQuality::Sky => lang_text(app, "沉浸环绕声", "Sky"),
+        crate::data::config::AudioQuality::Dolby => lang_text(app, "杜比全景声", "Dolby"),
+        crate::data::config::AudioQuality::Jymaster => {
             lang_text(app, "超清母带", "JYMaster")
         }
     };
@@ -2179,7 +2179,7 @@ fn lang_on_off(app: &AppState, enabled: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tmplayer::ui::theme::{ColorCapability, Theme, ThemePalette};
+    use crate::ui::theme::{ColorCapability, Theme, ThemePalette};
 
     fn rect(x: u16, y: u16, width: u16, height: u16) -> Rect {
         Rect {
@@ -2206,7 +2206,7 @@ mod tests {
             capability: ColorCapability::TrueColor,
         };
         let mut app = AppState::new(
-            crate::tmplayer::data::config::Config::default(),
+            crate::data::config::Config::default(),
             theme,
             crate::data::config::Language::Zh,
         );

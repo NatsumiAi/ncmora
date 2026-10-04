@@ -28,7 +28,7 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 同一个进程里有两套界面：
 
 - **主程序界面**：登录、首页推荐、歌单 / 作者 / 搜索页、可滑出的侧边栏，以及底部 5 行的折叠播放栏；
-- **内置全屏播放页**（TMPlayer）：封面、歌词、歌单浮层和 10 段均衡器。按全屏快捷键（默认 `Ctrl+F`）交给它，页内再按 `Ctrl+F` 或 `Esc` 返回主程序。
+- **全屏播放页**：封面、歌词、歌单浮层和 10 段均衡器。全屏快捷键（默认 `Ctrl+F`）进入该页面，再按 `Ctrl+F` 或 `Esc` 返回主程序。
 
 播放本身由主程序负责：带本地缓存的流式播放、播放记忆、私人漫游、按 VIP 权限裁剪的音质，以及由其它界面绘制的可视化（cava 频谱、真 PCM 示波器、李萨如矢量模式、LUFS 音量条）。
 
@@ -122,7 +122,7 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 - 界面语言：`zh` / `en`
 - 启动：先出加载页（ASCII 标题 + 进度条，不显示文字），登录恢复、推荐加载等网络步骤在后台按步推进；登录态不可用时收尾后进入登录页
 - 透明背景、封面边框、提示行开关
-- 20 个可重绑快捷键，带冲突检测；`Ctrl+Alt+R` 恢复默认
+- 22 个可重绑快捷键，带冲突检测；`Ctrl+Alt+R` 恢复默认
 - about 弹窗含盲文形象画，里面还藏了一个彩蛋（`easter-egg` cargo feature，默认编入，可用 `--no-default-features` 剔除）
 
 ## 安装
@@ -172,7 +172,7 @@ sudo apt install -y build-essential cmake pkg-config \
 
 - Linux 上的 PipeWire 音频（ALSA 后端已弃用），以及运行时的 chafa 共享库
 - 可选的 `cava` 可执行文件，用于 `bars` 频谱
-- 强烈建议使用 Nerd Font：界面中有一些图标字形，没有这类字体时部分图标会显示为缺字方块
+- Nerd Font 不是必需的：`icon_mode = "auto"` 会在 `KMSCON` 等 Linux TTY 使用 ASCII 图标，在普通终端模拟器默认使用 Nerd 字形。
 
 ## cava
 
@@ -209,14 +209,14 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 
 ## 配置
 
-只要缺少任一已知字段、检测到旧值（`graphics_protocol = "auto|sixel|kitty|iterm2"`、旧的 `Alt+B` 侧边栏绑定）或保存的可视化模式不可用，程序就会在启动时重写 `config/default.toml`。文件格式错误时会被默认值覆盖，喜欢手改配置的话建议留一份备份。
+只要缺少任一已知字段、检测到旧的 `Alt+B` 侧边栏绑定或保存的可视化模式不可用，程序就会在启动时重写 `config/default.toml`。文件格式错误时会被默认值覆盖，喜欢手改配置的话建议留一份备份。
 
 | 配置项 | 默认值 | 取值 / 说明 |
 | --- | --- | --- |
 | `theme` | `frappe` | `themes/*.toml` 里的任意主题 key（内置 20 款，自动识别自定义文件）；选中的主题文件损坏时回退默认主题 |
 | `language` | `zh` | `zh`、`en` |
 | `visualize` | 有 cava 时为 `bars`，否则 `oscilloscope` | `hidden`（设置里显示「关闭」）、`lyrics`（「仅歌词」，旧的 `off` 同义）、`bars`、`oscilloscope`、`vector`；只有 `bars` 依赖 cava |
-| `graphics_protocol` | `halfblocks` | `off`、`halfblocks`；`off` 时封面用 ASCII 字符绘制 |
+| `icon_mode` | `auto` | `auto`、`ascii`、`nerd`；`auto` 在 Linux TTY（包括 `KMSCON`）使用 ASCII，在普通终端模拟器使用 Nerd 字形；`ascii` 与 `nerd` 可强制指定图标集 |
 | `transparent_background` | `true` | 使用终端背景 |
 | `album_border` | `true` | 全屏封面边框 |
 | `show_hints` | `true` | 内容页提示行，以及全屏页面板边框内的提示文字 |
@@ -241,10 +241,6 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 | `ui_fps` | `30` | 全屏页帧率上限 |
 | `spectrum_hz` | `30`（仓库内模板写的是 `60`） | 频谱刷新率；主程序自己的 cava 会被限制在 1–30 Hz |
 | `mpris_poll_ms` | `100` | 全屏页的 MPRIS 轮询间隔 |
-| `kitty_cover_scale_percent` | `100` | 全屏封面缩放百分比 |
-| `lyrics_cover_fetch` / `lyrics_cover_download` | `false` | 为独立版 TMPlayer 预留 |
-| `audio_fingerprint` / `acoustid_api_key` | `false` / `""` | 为独立版 TMPlayer 预留 |
-| `resume_last_position` | `false` | 仅声明未实现：播放记忆恢复的是队列，不是播放位置 |
 | `cache.path` | 未设置 | 缓存目录覆盖（默认用系统缓存目录） |
 | `cache.clean_strategy` | `both` | `size`、`age`、`both` |
 | `cache.max_size_mb` | `500` | LRU 阶段的容量上限 |
@@ -334,10 +330,9 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 
 ## 注意事项
 
-- 没有命令行参数。可用的环境变量是 `CNMPLAYER_ASSET_DIR`（资产根目录）、`TMPLAYER_CAVA`（显式指定 cava）与 `COLORTERM` / `TERM`（颜色能力探测）。
-- `graphics_protocol` 当前只实现 `off` 与 `halfblocks`；旧的 `auto`、`sixel`、`kitty`、`iterm2` 会迁移为 `halfblocks`。
+- 没有命令行参数。可用的环境变量是 `CNMPLAYER_ASSET_DIR`（资产根目录）、`TMPLAYER_CAVA`（显式指定 cava，名称为兼容旧配置而保留）与 `COLORTERM` / `TERM`（颜色能力探测）。
+- `icon_mode = "auto"` 会在 Linux TTY（包括 `KMSCON`）使用 ASCII 图标，在普通终端模拟器使用 Nerd 字形；也可用 `ascii` 或 `nerd` 强制指定图标集。
 - 没有独立的专辑页；专辑搜索结果与作者页里的专辑都以歌单页样式展示。
-- 部分配置项只由全屏页消费，或暂时只是占位：`ui_fps`、`mpris_poll_ms`、`kitty_cover_scale_percent`、`lyrics_cover_fetch`、`lyrics_cover_download`、`audio_fingerprint`、`acoustid_api_key`、`resume_last_position`。
 - 原生音频后端会把告警直接写到 stderr；CNMPlayer 把 fd 2 重定向到 `Player.stderr.log`，避免这些信息糊掉 TUI。
 - 预编译产物与 AUR 包只提供 Linux `amd64` 与 `aarch64`；MPRIS 同样仅 Linux 可用。
 
@@ -352,23 +347,23 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 - 图像渲染：ratatui-image + chafa
 - 可视化：外部 `cava`，以及内部 PCM 抽头驱动的示波器、李萨如矢量模式与 LUFS 计量
 - Linux 媒体控制：mpris-server
-- 全屏播放整合：TMPlayer
+- 全屏播放：共享的应用控制器与 `src/ui/` 面板
 
 ## 开发
 
 ```bash
-cargo run                 # 开发构建
-cargo build --release     # release 构建
-cargo test                # 单元测试
-cargo check --locked --all-targets   # CI 在 PR 上执行的内容
+cargo run                              # 开发构建
+cargo build --release                  # release 构建
+cargo test --workspace --all-targets   # 根 crate 与 vendored crate 测试
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-CI（`ci.yml`）在面向 `main` / `develop` 的 PR 以及推送到 `develop` 时执行 `cargo check --locked --all-targets`。
-发版（`release.yml`）由 `v*` tag 触发：先校验 tag 与 `Cargo.toml` 版本一致，再构建 `x86_64` 与 `aarch64` 两个压缩包、创建 GitHub Release，并同步 `cnmplayer` 与 `cnmplayer-bin` 两个 AUR 包。
+CI（`ci.yml`）会在 Rust 1.90 与 stable 上分别执行默认特性和 `--no-default-features` 的 check/test，并对根 crate 与 vendored crate 执行 fmt、clippy 门禁。
+发版（`release.yml`）会在发布前执行根 crate 与 vendored crate 测试，随 `x86_64` 与 `aarch64` 压缩包发布 `SHA256SUMS`，并保留 tag、dispatch 空跑和 AUR 同步路径。
 
 ## 相关项目
 
-- [TMPlayer](https://github.com/professor-lee/TMPlayer)：内置到 CNMPlayer 的全屏播放页实现
 - [ncm-api-rs](https://github.com/imsyy/ncm-api-rs)：vendored 在 `ncm-api-rs/` 目录中的网易云音乐 API 客户端
 
 ## 免责声明

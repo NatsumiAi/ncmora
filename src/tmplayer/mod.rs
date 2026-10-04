@@ -14,11 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::data::config::{
-    AudioQuality as HostAudioQuality, BarChannels as HostBarChannels, BarNumber as HostBarNumber,
-    Config as HostConfig, GraphicsProtocol, Language as HostLanguage, VisualizeMode,
-};
-
+use crate::data::config::Config;
 #[derive(Debug, Clone)]
 pub struct FullscreenPlaylistItemSeed {
     pub id: Option<String>,
@@ -111,36 +107,6 @@ pub enum DownloadIconState {
     Done,
 }
 
-#[derive(Debug, Clone)]
-pub struct HostConfigSync {
-    pub theme: String,
-    pub transparent_background: bool,
-    pub album_border: bool,
-    pub language: HostLanguage,
-    pub graphics_protocol: GraphicsProtocol,
-    pub page_lyrics: bool,
-    pub page_lyrics_drag: bool,
-    pub page_lyrics_snap: bool,
-    pub page_lyrics_pos_x: f32,
-    pub page_lyrics_pos_y: f32,
-    pub audio_quality: HostAudioQuality,
-    /// 下载音质档位（与播放音质同一套可选值）。
-    pub download_audio_quality: HostAudioQuality,
-    /// 下载目录原始配置值（`None` = 用系统音乐目录推导）。
-    pub download_path: Option<String>,
-    pub eq_bands_db: [f32; crate::tmplayer::app::state::EQ_BANDS],
-    pub playback_memory: bool,
-    pub vip_audio_unlocked: bool,
-    pub show_hints: bool,
-    pub small_window_display: bool,
-    pub home_more_recommend: bool,
-    pub visualize: VisualizeMode,
-    pub super_smooth_bar: bool,
-    pub bars_gap: bool,
-    pub bar_number: HostBarNumber,
-    pub bar_channels: HostBarChannels,
-    pub bar_channel_reverse: bool,
-}
 
 pub trait HostPlaybackBridge {
     async fn tick(&mut self);
@@ -149,8 +115,13 @@ pub trait HostPlaybackBridge {
     /// 宿主播放链路上的 PCM 抽头环，示波器由此取真实波形。
     fn pcm_ring(&self) -> Arc<crate::tmplayer::audio::pcm_tap::PcmRing>;
     fn snapshot(&mut self) -> HostPlaybackSnapshot;
-    fn config_snapshot(&self) -> HostConfigSync;
-    async fn apply_config_sync(&mut self, config: HostConfigSync);
+    /// Monotonic host configuration revision; fullscreen only snapshots when it changes.
+    fn config_signature(&self) -> u64;
+    fn config_snapshot(&self) -> Config;
+    /// Submit settings to the host; accepted values are read back with `config_snapshot`.
+    async fn apply_config_sync(&mut self, config: Config);
+    /// Runtime entitlement is intentionally not persisted in fullscreen's Config mirror.
+    fn vip_audio_unlocked(&self) -> bool;
     async fn toggle_play_pause(&mut self);
     async fn play_previous(&mut self);
     async fn play_next(&mut self);
@@ -164,20 +135,14 @@ pub trait HostPlaybackBridge {
 }
 
 pub async fn run_fullscreen(
-    host_config: &HostConfig,
+    host_config: &Config,
     bootstrap: FullscreenBootstrap,
-    host_bridge: Option<&mut impl HostPlaybackBridge>,
+    host_bridge: &mut impl HostPlaybackBridge,
 ) -> Result<FullscreenExit> {
-    let config = tm_config_from_host(host_config);
-    let theme = data::theme_loader::ThemeLoader::load_or_default(&host_config.theme);
+    let config = host_config.clone();
+    let theme = crate::data::theme_loader::ThemeLoader::load_or_default(&host_config.theme);
 
     let mut app = app::state::AppState::new(config, theme, host_config.language);
-    let ncm_cover_cache_dir = resolve_cache_root(host_config).join("tmplayer_ncm_cover");
-    if host_config.cache.clean_on_startup {
-        let _ = cleanup_cache_dir(&ncm_cover_cache_dir, &host_config.cache);
-    }
-    let _ = std::fs::create_dir_all(&ncm_cover_cache_dir);
-    app.ncm_cover_cache_dir = Some(ncm_cover_cache_dir);
     app.eq.bands_db = app.config.eq_bands_db;
     app.refresh_download_root();
 
@@ -186,95 +151,6 @@ pub async fn run_fullscreen(
     app::event_loop::run(&mut app, host_bridge).await
 }
 
-fn tm_config_from_host(host: &HostConfig) -> data::config::Config {
-    data::config::Config {
-        theme: host.theme.clone(),
-        ui_fps: host.ui_fps,
-        spectrum_hz: host.spectrum_hz,
-        mpris_poll_ms: host.mpris_poll_ms,
-        visualize: host.visualize,
-        eq_bands_db: host.eq_bands_db,
-        transparent_background: host.transparent_background,
-        page_lyrics: host.page_lyrics,
-        page_lyrics_drag: host.page_lyrics_drag,
-        page_lyrics_snap: host.page_lyrics_snap,
-        page_lyrics_pos_x: host.page_lyrics_pos_x,
-        page_lyrics_pos_y: host.page_lyrics_pos_y,
-        album_border: host.album_border,
-        graphics_protocol: host.graphics_protocol,
-        kitty_cover_scale_percent: host.kitty_cover_scale_percent,
-        super_smooth_bar: host.super_smooth_bar,
-        bars_gap: host.bars_gap,
-        audio_quality: match host.audio_quality {
-            HostAudioQuality::Standard => data::config::AudioQuality::Standard,
-            HostAudioQuality::Higher => data::config::AudioQuality::Higher,
-            HostAudioQuality::Exhigh => data::config::AudioQuality::Exhigh,
-            HostAudioQuality::Lossless => data::config::AudioQuality::Lossless,
-            HostAudioQuality::Hires => data::config::AudioQuality::Hires,
-            HostAudioQuality::Jyeffect => data::config::AudioQuality::Jyeffect,
-            HostAudioQuality::Sky => data::config::AudioQuality::Sky,
-            HostAudioQuality::Dolby => data::config::AudioQuality::Dolby,
-            HostAudioQuality::Jymaster => data::config::AudioQuality::Jymaster,
-        },
-        playback_memory: host.playback_memory,
-        download_audio_quality: match host.download_audio_quality {
-            HostAudioQuality::Standard => data::config::AudioQuality::Standard,
-            HostAudioQuality::Higher => data::config::AudioQuality::Higher,
-            HostAudioQuality::Exhigh => data::config::AudioQuality::Exhigh,
-            HostAudioQuality::Lossless => data::config::AudioQuality::Lossless,
-            HostAudioQuality::Hires => data::config::AudioQuality::Hires,
-            HostAudioQuality::Jyeffect => data::config::AudioQuality::Jyeffect,
-            HostAudioQuality::Sky => data::config::AudioQuality::Sky,
-            HostAudioQuality::Dolby => data::config::AudioQuality::Dolby,
-            HostAudioQuality::Jymaster => data::config::AudioQuality::Jymaster,
-        },
-        download_path: host.download_path.clone(),
-        show_hints: host.show_hints,
-        small_window_display: host.small_window_display,
-        home_more_recommend: host.home_more_recommend,
-        bar_number: match host.bar_number {
-            HostBarNumber::Auto => data::config::BarNumber::Auto,
-            HostBarNumber::N16 => data::config::BarNumber::N16,
-            HostBarNumber::N32 => data::config::BarNumber::N32,
-            HostBarNumber::N48 => data::config::BarNumber::N48,
-            HostBarNumber::N64 => data::config::BarNumber::N64,
-            HostBarNumber::N80 => data::config::BarNumber::N80,
-            HostBarNumber::N96 => data::config::BarNumber::N96,
-        },
-        bar_channels: match host.bar_channels {
-            HostBarChannels::Stereo => data::config::BarChannels::Stereo,
-            HostBarChannels::Mono => data::config::BarChannels::Mono,
-        },
-        bar_channel_reverse: host.bar_channel_reverse,
-        // Fullscreen page data comes from CNMPlayer API flow; disable TMPlayer local fetch pipeline.
-        lyrics_cover_fetch: false,
-        lyrics_cover_download: false,
-        audio_fingerprint: false,
-        acoustid_api_key: String::new(),
-        resume_last_position: false,
-        keybind_search_box: host.keybind_search_box.clone(),
-        keybind_fullscreen: host.keybind_fullscreen.clone(),
-        keybind_settings: host.keybind_settings.clone(),
-        keybind_sidebar: host.keybind_sidebar.clone(),
-        keybind_quit: host.keybind_quit.clone(),
-        keybind_page_up: host.keybind_page_up.clone(),
-        keybind_page_down: host.keybind_page_down.clone(),
-        keybind_prev: host.keybind_prev.clone(),
-        keybind_next: host.keybind_next.clone(),
-        keybind_toggle_play_pause: host.keybind_toggle_play_pause.clone(),
-        keybind_toggle_mode: host.keybind_toggle_mode.clone(),
-        keybind_fullscreen_prev: host.keybind_fullscreen_prev.clone(),
-        keybind_fullscreen_next: host.keybind_fullscreen_next.clone(),
-        keybind_fullscreen_toggle_play_pause: host.keybind_fullscreen_toggle_play_pause.clone(),
-        keybind_fullscreen_toggle_mode: host.keybind_fullscreen_toggle_mode.clone(),
-        keybind_fullscreen_eq: host.keybind_fullscreen_eq.clone(),
-        keybind_fullscreen_eq_reset: host.keybind_fullscreen_eq_reset.clone(),
-        keybind_toggle_like_fullscreen: host.keybind_toggle_like_fullscreen.clone(),
-        keybind_small_window_toggle: host.keybind_small_window_toggle.clone(),
-        keybind_download: host.keybind_download.clone(),
-        keybind_download_fullscreen: host.keybind_download_fullscreen.clone(),
-    }
-}
 
 fn apply_bootstrap(app: &mut app::state::AppState, bootstrap: FullscreenBootstrap) {
     let mut playlist = data::playlist::Playlist::default();
@@ -312,7 +188,6 @@ fn apply_bootstrap(app: &mut app::state::AppState, bootstrap: FullscreenBootstra
                 duration: item.duration,
                 cover: None,
                 cover_hash: None,
-                cover_folder: None,
                 lyrics: None,
             });
         }
@@ -322,7 +197,6 @@ fn apply_bootstrap(app: &mut app::state::AppState, bootstrap: FullscreenBootstra
         app.api_tracks.clear();
         app.playlist = data::playlist::Playlist::default();
         app.playlist_view = data::playlist::Playlist::default();
-        app.player.mode = app::state::PlayMode::Idle;
         app.player.playback = app::state::PlaybackState::Stopped;
         app.player.position = Duration::from_secs(0);
         app.player.track = app::state::TrackMetadata {
@@ -332,7 +206,6 @@ fn apply_bootstrap(app: &mut app::state::AppState, bootstrap: FullscreenBootstra
             duration: Duration::from_secs(0),
             cover: None,
             cover_hash: None,
-            cover_folder: None,
             lyrics: None,
         };
         app.local_view_album_cover = None;
@@ -364,26 +237,13 @@ fn apply_bootstrap(app: &mut app::state::AppState, bootstrap: FullscreenBootstra
     app.playlist = playlist.clone();
     app.playlist_view = playlist;
 
-    app.player.mode = app::state::PlayMode::Idle;
     app.player.playback = app::state::PlaybackState::Playing;
     app.player.liked = current_liked;
     app.player.position = Duration::from_secs(0);
     app.player.track = app.api_tracks[active_idx].clone();
 
-    app.local_view_album_cover = bootstrap.playlist_cover;
-    app.local_view_album_cover_hash = app
-        .local_view_album_cover
-        .as_deref()
-        .map(hash_bytes)
-        .map(Some)
-        .unwrap_or(None);
-    app.local_folder_kind = if app.local_view_album_cover.is_some() {
-        app::state::LocalFolderKind::Album
-    } else {
-        app::state::LocalFolderKind::Plain
-    };
-    app.local_view_album_folder = None;
-    app.local_folder = None;
+    app.playlist_cover = bootstrap.playlist_cover;
+    app.playlist_cover_hash = app.playlist_cover.as_deref().map(hash_bytes);
 }
 
 fn track_from_seed(seed: &FullscreenTrackSeed) -> app::state::TrackMetadata {
@@ -399,7 +259,6 @@ fn track_from_seed(seed: &FullscreenTrackSeed) -> app::state::TrackMetadata {
             .map(Some)
             .unwrap_or(None),
         cover: seed.cover.clone(),
-        cover_folder: None,
         lyrics: seed.lyrics.clone(),
     }
 }

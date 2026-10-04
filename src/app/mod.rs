@@ -5,6 +5,12 @@ pub(crate) mod player;
 mod startup;
 pub(crate) mod streaming;
 
+pub(crate) mod playback_controller;
+pub(crate) mod settings_controller;
+pub(crate) mod browse_controller;
+pub(crate) mod input_controller;
+pub(crate) mod download_controller;
+pub(crate) mod startup_controller;
 use crate::app::api::error_for_status;
 use crate::app::player::is_nonempty_file;
 use crate::data::config::{AudioQuality, BarChannels, BarNumber, Language, VisualizeMode};
@@ -60,8 +66,14 @@ use download::{
     DownloadTarget,
 };
 use mpris_bridge::{MprisBridge, MprisControlEvent, MprisSyncPayload};
-use player::{AudioPlayer, AudioPlayerState, cleanup_cache_dir, resolve_cache_root};
+use controllers::SearchController;
+use playback_controller::PlaybackController;
+use settings_controller::SettingsController;
 use startup::StartupInit;
+use browse_controller::BrowseController;
+use input_controller::InputController;
+use download_controller::DownloadController;
+use startup_controller::StartupController;
 use streaming::StreamingReader;
 
 const MAX_INPUT_LEN: usize = 64;
@@ -1938,185 +1950,6 @@ impl SearchScope {
     }
 }
 
-pub struct SearchState {
-    pub query: String,
-    pub focused_idx: usize,
-    pub results: Vec<SearchItem>,
-    pub status_line: String,
-    pub scope: SearchScope,
-    pub next_offset: usize,
-    pub has_more: bool,
-    /// 视口顶部距列表起点的**行数**。条目高度不一（作者卡片 4 行），按行滚动
-    /// 才能让顶部与底部同步移动，而不是整条整条地跳。
-    pub scroll_rows: usize,
-    /// 视口高度（行），渲染侧每帧写入。
-    view_rows: usize,
-    /// 作者条目是否按卡片渲染（面板够宽够高），渲染侧每帧写入。
-    card_mode: bool,
-    /// 列表代：结果被替换 / 追加时换号（行内图标缓存据此失效）。
-    generation: u64,
-}
-
-impl Default for SearchState {
-    fn default() -> Self {
-        Self {
-            query: String::new(),
-            focused_idx: 0,
-            results: Vec::new(),
-            status_line: "输入关键词后按 Enter 搜索".to_string(),
-            scope: SearchScope::Mixed,
-            next_offset: 0,
-            has_more: false,
-            scroll_rows: 0,
-            view_rows: 1,
-            card_mode: false,
-            generation: next_list_generation(),
-        }
-    }
-}
-
-impl SearchState {
-    /// 条目的行跨度：分区线（若有）+ 条目自身高度。
-    fn row_span(&self, index: usize) -> usize {
-        let kind = self.results[index].kind;
-        let divider = usize::from(index > 0 && self.results[index - 1].kind != kind);
-        divider + kind.rows(self.card_mode)
-    }
-
-    /// 条目（不含其分区线）首行在列表行空间中的位置。
-    pub fn item_start_row(&self, index: usize) -> usize {
-        (0..index.min(self.results.len()))
-            .map(|i| self.row_span(i))
-            .sum()
-    }
-
-    pub fn item_end_row(&self, index: usize) -> usize {
-        self.item_start_row(index) + self.row_span(index)
-    }
-
-    /// 条目前的分区线占用的行数（0 或 1）。
-    pub fn divider_rows(&self, index: usize) -> usize {
-        usize::from(index > 0 && self.results[index - 1].kind != self.results[index].kind)
-    }
-
-    fn total_rows(&self) -> usize {
-        (0..self.results.len()).map(|i| self.row_span(i)).sum()
-    }
-
-    fn max_scroll_rows(&self) -> usize {
-        self.total_rows().saturating_sub(self.view_rows.max(1))
-    }
-
-    fn clamp_scroll(&mut self) {
-        self.scroll_rows = self.scroll_rows.min(self.max_scroll_rows());
-    }
-
-    /// 聚焦条目必须完整可见：底边对齐就按**该条目推进的行数**下移视口，
-    /// 于是顶部也退同样多的行（卡片被裁切而不是整块移出，底部不会跳变）。
-    fn ensure_focus_visible(&mut self) {
-        if self.results.is_empty() {
-            self.focused_idx = 0;
-            self.scroll_rows = 0;
-            return;
-        }
-
-        self.focused_idx = self.focused_idx.min(self.results.len() - 1);
-        let view = self.view_rows.max(1);
-        let start = self.item_start_row(self.focused_idx);
-        let end = self.item_end_row(self.focused_idx);
-        if end > self.scroll_rows.saturating_add(view) {
-            self.scroll_rows = end - view;
-        }
-        if start < self.scroll_rows {
-            self.scroll_rows = start;
-        }
-        self.clamp_scroll();
-    }
-
-    /// 渲染侧每帧写入视口行数与卡片模式。
-    pub fn set_viewport(&mut self, view_rows: usize, card_mode: bool) {
-        self.view_rows = view_rows.max(1);
-        self.card_mode = card_mode;
-        self.ensure_focus_visible();
-    }
-
-    pub fn effective_scroll_rows(&self) -> usize {
-        self.scroll_rows.min(self.max_scroll_rows())
-    }
-
-    /// 视口内可见的条目数（翻页步长）；卡片只算一条。
-    pub fn page_items(&self) -> usize {
-        let top = self.effective_scroll_rows();
-        let bottom = top.saturating_add(self.view_rows.max(1));
-        let mut row = 0usize;
-        let mut count = 0usize;
-        for index in 0..self.results.len() {
-            let span = self.row_span(index);
-            if row.saturating_add(span) > top && row < bottom {
-                count += 1;
-            }
-            row = row.saturating_add(span);
-        }
-        count.max(1)
-    }
-
-    pub fn set_focus(&mut self, index: usize) {
-        if self.results.is_empty() {
-            self.focused_idx = 0;
-            self.scroll_rows = 0;
-            return;
-        }
-
-        self.focused_idx = index.min(self.results.len() - 1);
-        self.ensure_focus_visible();
-    }
-
-    pub fn focus_next(&mut self) -> bool {
-        if self.results.is_empty() || self.focused_idx + 1 >= self.results.len() {
-            return false;
-        }
-
-        self.focused_idx += 1;
-        self.ensure_focus_visible();
-        true
-    }
-
-    pub fn focus_prev(&mut self) -> bool {
-        if self.results.is_empty() || self.focused_idx == 0 {
-            return false;
-        }
-
-        self.focused_idx -= 1;
-        self.ensure_focus_visible();
-        true
-    }
-
-    /// 整体替换结果。`next_offset` / `has_more` 只描述**可继续分页的分区**
-    /// （混合搜索下即单曲分区，混合列表只有它在末尾追加）。
-    pub fn set_results(&mut self, results: Vec<SearchItem>, next_offset: usize, has_more: bool) {
-        self.results = results;
-        self.focused_idx = 0;
-        self.next_offset = next_offset;
-        self.has_more = has_more;
-        self.scroll_rows = 0;
-        self.generation = next_list_generation();
-        self.ensure_focus_visible();
-    }
-
-    /// 列表代（行内图标的行数据缓存据此失效）。
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
-    /// 追加分区分页结果。游标与 `has_more` 由调用方按分区语义推进。
-    pub fn append_results(&mut self, mut results: Vec<SearchItem>) -> usize {
-        let added = results.len();
-        self.results.append(&mut results);
-        self.generation = next_list_generation();
-        self.clamp_scroll();
-        added
-    }
-}
 
 #[derive(Clone)]
 pub struct PlaylistState {
@@ -2787,14 +2620,14 @@ async fn loop_cover_fetch(
     tx: Sender<CoverFetchResult>,
     client: Client,
 ) {
+    let Ok(api) = ApiState::new(None, client) else {
+        return;
+    };
     let process_fn = async move |req: &CoverFetchRequest| {
         if req.url.is_empty() {
             return None;
         }
-        let resp = client.get(req.url.as_str()).ok()?.send().await.ok()?;
-        let resp = error_for_status(resp).ok()?;
-        let bytes = resp.bytes().await.ok()?;
-        (!bytes.is_empty()).then(|| bytes.to_vec())
+        api.fetch_cover_bytes(&req.url).await.ok()
     };
     while let Ok(req) = rx.recv().await {
         let bytes = process_fn(&req).await;
@@ -2835,8 +2668,7 @@ pub struct App {
     pub page: Page,
     pub overlay: Option<Overlay>,
     pub login: LoginState,
-    pub home: HomeState,
-    pub home_sidebar: HomeSidebarState,
+    pub browse: BrowseController,
     /// 侧边栏歌单的在途拉取（异步填充，不阻塞展开动画）。
     home_sidebar_fetch: Option<HomeSidebarFetchFuture>,
     /// 作者页的在途拉取（全屏页点作者名：页面先落地，数据由 `tick_author_fetch` 搬进来）。
@@ -2846,32 +2678,9 @@ pub struct App {
     /// 上次检查 stderr 日志体积的时刻。
     stderr_trim_checked_at: Option<Instant>,
     home_sidebar_anim_span_cells: u16,
-    pub playlist: PlaylistState,
-    pub private_roam: PrivateRoamState,
-    pub author: AuthorState,
-    pub search: SearchState,
-    pub now_playing: Option<PlaybackTrack>,
-    pub now_playing_liked: bool,
-    /// 收藏的期望/已确认双轨状态机（乐观更新 + 每帧收敛）。
-    like_machine: LikeMachine,
-    pub playback_queue: Vec<PlaybackTrack>,
-    /// 当前播放队列来源列表（专辑/歌单）的封面 URL。
-    /// 与 `self.playlist` 解耦：后者是"最后访问的页面"，会随浏览漂移。
-    playback_queue_cover_url: Option<String>,
-    /// 当前播放队列来源列表的 id（如私人漫游的 tile id）。
-    ///
-    /// 与 `self.playlist.id` 的区别：后者是「当前浏览的页面」，会随浏览漂移，
-    /// 且重启后为 None。来源相关行为（漫游的尾部追加、续播、封面跟随）
-    /// 一律以此字段为判据，并随播放记忆一起持久化。
-    playback_queue_source_id: Option<String>,
-    pub playback_index: Option<usize>,
-    pub playback_repeat_mode: PlaybackRepeatMode,
-    pub playback_state: PlaybackRuntimeState,
-    pub startup_loading_progress: f32,
-    /// 启动初始化任务与加载页进度（真实步数）。
-    pub startup: StartupInit,
-    /// 加载页收尾后进入的页面（登录态可用为 Home，否则 Login）。
-    startup_loading_target: Page,
+    pub search: SearchController,
+    pub playback: PlaybackController,
+    pub startup: StartupController,
     pub player_bar_hits: PlayerBarHitTargets,
     /// 最近一次同步到的终端尺寸（单元格）。
     pub term_width: u16,
@@ -2906,29 +2715,8 @@ pub struct App {
     pub search_item_hits: Vec<(HitRect, usize)>,
     /// 搜索页单曲行内下载图标的命中区。
     pub search_item_download_hits: Vec<(HitRect, usize)>,
-    pub search_box_input: String,
-    pub search_box_cursor: usize,
-    pub search_box_anim_height: u16,
-    /// 搜索框滑出动画的起始时刻（time-based 动画基准）
-    pub search_box_anim_started_at: Option<Instant>,
-    pub settings_selected: usize,
-    pub settings_playback_selected: usize,
-    pub settings_lyrics_selected: usize,
-    pub settings_keybind_selected: usize,
-    pub settings_keybind_rebinding: Option<usize>,
-    /// 按键绑定页的滚动偏移：与应用内列表一致，仅当焦点行越过可视窗口
-    /// 边界时才挪动（不是每次移动焦点都滚动）。
-    pub settings_keybind_scroll: usize,
-    /// 「下载设置」页的选中行。
-    pub settings_download_selected: usize,
-    /// 下载路径行的编辑状态（Some = 正在编辑该行）。
-    pub download_path_edit: Option<DownloadPathEdit>,
-    /// 「恢复默认」的两段式确认：首次选择后进入待确认态（文字换成警戒色）。
-    pub download_reset_armed: bool,
-    /// 设置弹窗当前页的行命中区（每帧由 `draw_settings_modal` 重注册）。
-    pub settings_item_hits: Vec<(HitRect, usize)>,
-    /// 设置弹窗内上一次点击（用于双击判定）。
-    last_settings_click: Option<(Instant, Overlay, usize)>,
+    pub input: InputController,
+    pub settings: SettingsController,
     /// about 弹窗里的形象彩蛋状态。
     #[cfg(feature = "easter-egg")]
     pub about_egg: AboutEasterEgg,
@@ -2942,9 +2730,6 @@ pub struct App {
     author_return_page: Page,
     playlist_section_return_snapshot: Option<PlaylistState>,
     qr_last_poll_at: Option<Instant>,
-    startup_loading_started_at: Option<Instant>,
-    startup_loading_complete_started_at: Option<Instant>,
-    startup_loading_complete_requested: bool,
     last_global_hotkey_at: Option<Instant>,
     last_content_click: Option<(Instant, Page, usize)>,
     pub cava: Option<MiniCavaState>,
@@ -2964,21 +2749,7 @@ pub struct App {
     api: ApiState,
     audio_player: AudioPlayer,
     /// 下载任务表（异步后台任务；状态行与图标都从这里读）。
-    pub download_manager: DownloadManager,
-    /// 行内图标的 memo（歌单页 / 专辑页）：行数据随列表代重建，状态随任务版本重算。
-    playlist_download_cache: DownloadRowCache,
-    /// 行内图标的 memo（搜索页）。
-    search_download_cache: DownloadRowCache,
-    /// 下载根目录代：路径变化时 +1，行数据缓存据此失效。
-    download_rows_epoch: u64,
-    /// 下载图标的动画相位基准（time-based 旋转帧的起点）。
-    download_spinner_start: Instant,
-    /// 当前播放歌曲的下载图标状态缓存（全屏页每帧读，写入在 tick 里）。
-    now_playing_download_state: DownloadState,
-    /// 解析后的下载根目录；`None` = 系统里既没有音乐目录也没有家目录 → 下载禁用。
-    pub download_root: Option<PathBuf>,
-    /// 当前歌单页实际是歌单还是专辑（专辑页下载要落子文件夹 + 写 `cover.*`）。
-    playlist_page_kind: PlaylistPageKind,
+    pub downloads: DownloadController,
     pub graphics_picker: Picker,
 }
 
@@ -3033,29 +2804,15 @@ impl App {
             page: Page::Login,
             overlay: None,
             login: LoginState::default(),
-            home: HomeState::default(),
-            home_sidebar: HomeSidebarState::default(),
+            browse: BrowseController::default(),
             home_sidebar_fetch: None,
             author_fetch: None,
             playlist_fetch: None,
             stderr_trim_checked_at: None,
             home_sidebar_anim_span_cells: 24,
-            playlist: PlaylistState::default(),
-            private_roam: PrivateRoamState::default(),
-            author: AuthorState::default(),
-            search: SearchState::default(),
-            now_playing: None,
-            now_playing_liked: false,
-            like_machine: LikeMachine::default(),
-            playback_queue: Vec::new(),
-            playback_queue_cover_url: None,
-            playback_queue_source_id: None,
-            playback_index: None,
-            playback_repeat_mode: PlaybackRepeatMode::Sequence,
-            playback_state: PlaybackRuntimeState::Stopped,
-            startup_loading_progress: 0.0,
-            startup: StartupInit::detached(),
-            startup_loading_target: Page::Login,
+            search: SearchController::default(),
+            playback: PlaybackController::default(),
+            startup: StartupController::detached(),
             player_bar_hits: PlayerBarHitTargets::default(),
             term_width: 0,
             term_height: 0,
@@ -3079,21 +2836,8 @@ impl App {
             author_tile_hits: Vec::new(),
             search_item_hits: Vec::new(),
             search_item_download_hits: Vec::new(),
-            search_box_input: String::new(),
-            search_box_cursor: 0,
-            search_box_anim_height: 0,
-            search_box_anim_started_at: None,
-            settings_selected: 0,
-            settings_playback_selected: 0,
-            settings_lyrics_selected: 0,
-            settings_keybind_selected: 0,
-            settings_keybind_rebinding: None,
-            settings_keybind_scroll: 0,
-            settings_download_selected: 0,
-            download_path_edit: None,
-            download_reset_armed: false,
-            settings_item_hits: Vec::new(),
-            last_settings_click: None,
+            input: InputController::default(),
+            settings: SettingsController::default(),
             #[cfg(feature = "easter-egg")]
             about_egg: AboutEasterEgg::default(),
             session_cookie: None,
@@ -3105,9 +2849,6 @@ impl App {
             author_return_page: Page::Home,
             playlist_section_return_snapshot: None,
             qr_last_poll_at: None,
-            startup_loading_started_at: None,
-            startup_loading_complete_started_at: None,
-            startup_loading_complete_requested: false,
             last_global_hotkey_at: None,
             last_content_click: None,
             cava: None,
@@ -3126,14 +2867,16 @@ impl App {
             mpris_last_playback: PlaybackRuntimeState::Stopped,
             api,
             audio_player,
-            download_manager,
-            playlist_download_cache: DownloadRowCache::default(),
-            search_download_cache: DownloadRowCache::default(),
-            download_rows_epoch: 0,
-            download_spinner_start: Instant::now(),
-            now_playing_download_state: DownloadState::NotDownloaded,
-            download_root,
-            playlist_page_kind: PlaylistPageKind::Playlist,
+            downloads: DownloadController {
+                manager: download_manager,
+                playlist_cache: DownloadRowCache::default(),
+                search_cache: DownloadRowCache::default(),
+                rows_epoch: 0,
+                spinner_start: Instant::now(),
+                now_playing_state: DownloadState::NotDownloaded,
+                root: download_root,
+                page_kind: PlaylistPageKind::Playlist,
+            },
             graphics_picker: Picker::halfblocks(),
         };
 
@@ -3150,7 +2893,7 @@ impl App {
         // 进备用屏幕之前同步 await 的，终端因此有一段时间毫无反馈。
         let skip_roam = app.private_roam_refreshed_today();
         let (steps, target) = startup::initial_plan(saved_cookie.is_some(), skip_roam);
-        app.startup = StartupInit::spawn(
+        app.startup.init = StartupInit::spawn(
             app.config.clone(),
             app.api.clone(),
             saved_cookie,
@@ -3435,9 +3178,9 @@ impl App {
             }
             Page::Playlist => {
                 if forward {
-                    let _ = self.playlist.focus_next();
+                    let _ = self.browse.playlist.focus_next();
                 } else {
-                    let _ = self.playlist.focus_prev();
+                    let _ = self.browse.playlist.focus_prev();
                 }
             }
             Page::Home => self.scroll_home_sidebar(col, row, forward),
@@ -3448,30 +3191,30 @@ impl App {
     /// 主页侧边栏的滚轮滚动：光标指到哪个分区就滚哪个（没有则滚当前聚焦分区），
     /// 一格一步、到端点即停。侧边栏收起或光标在面板外时不动。
     fn scroll_home_sidebar(&mut self, col: u16, row: u16, forward: bool) {
-        if !self.home_sidebar.expanded {
+        if !self.browse.home_sidebar.expanded {
             return;
         }
 
         let Some(section) = home_sidebar_wheel_target(
             self.home_sidebar_panel_hit,
             &self.home_sidebar_section_hits,
-            self.home_sidebar.focused_section,
+            self.browse.home_sidebar.focused_section,
             col,
             row,
         ) else {
             return;
         };
 
-        self.home_sidebar.scroll_section_by(section, forward);
+        self.browse.home_sidebar.scroll_section_by(section, forward);
     }
 
     async fn advance_search_focus(&mut self) {
-        if self.search.results.is_empty() {
+        if self.search.results().is_empty() {
             return;
         }
 
         if self.search.focus_next() {
-            if self.search.focused_idx + 1 == self.search.results.len() {
+            if self.search.focused_idx + 1 == self.search.results().len() {
                 match self.load_more_search_results().await {
                     Ok(_) => {}
                     Err(err) => {
@@ -3482,7 +3225,7 @@ impl App {
             return;
         }
 
-        let before = self.search.results.len();
+        let before = self.search.results().len();
         match self.load_more_search_results().await {
             Ok(added) if added > 0 => {
                 self.search.set_focus(before);
@@ -3581,11 +3324,11 @@ impl App {
     }
 
     pub fn clear_settings_item_hits(&mut self) {
-        self.settings_item_hits.clear();
+        self.settings.item_hits.clear();
     }
 
     pub fn push_settings_item_hit(&mut self, rect: HitRect, index: usize) {
-        self.settings_item_hits.push((rect, index));
+        self.settings.item_hits.push((rect, index));
     }
 
     pub fn set_home_sidebar_panel_hit(&mut self, rect: Option<HitRect>) {
@@ -3648,12 +3391,12 @@ impl App {
         if self.page_lyrics_grab.is_some() {
             return true;
         }
-        if let Some(started_at) = self.search_box_anim_started_at {
+        if let Some(started_at) = self.input.search_box_anim_started_at {
             if started_at.elapsed() < SEARCH_BOX_ANIM_DURATION {
                 return true;
             }
         }
-        if self.home_sidebar.anim_started_at.is_some() {
+        if self.browse.home_sidebar.anim_started_at.is_some() {
             return true;
         }
         // 作者页数据在途：结果一到就上屏，别让 1s 空闲节流把它压住。
@@ -3665,7 +3408,7 @@ impl App {
             return true;
         }
         // 下载中：图标要一直转（time-based 帧），别被 1s 空闲节流压成 1fps。
-        if self.download_manager.is_active() {
+        if self.downloads.manager.is_active() {
             return true;
         }
         // 加载页全程保持高帧率：进度条本身在缓动，收尾还要等最短可见时长，
@@ -3677,12 +3420,12 @@ impl App {
             return true;
         }
         if self.small_window_mode == Some(SmallWindowMode::Flat)
-            && self.playback_state == PlaybackRuntimeState::Playing
+            && self.playback.playback_state == PlaybackRuntimeState::Playing
         {
             return true;
         }
         if self.small_window_mode == Some(SmallWindowMode::Narrow)
-            && (self.playback_state == PlaybackRuntimeState::Playing || self.vu_animating)
+            && (self.playback.playback_state == PlaybackRuntimeState::Playing || self.vu_animating)
         {
             return true;
         }
@@ -3699,7 +3442,7 @@ impl App {
             return duration;
         }
 
-        if let Some(track) = self.now_playing.as_ref() {
+        if let Some(track) = self.playback.now_playing.as_ref() {
             return Duration::from_millis(track.duration_ms.max(0) as u64);
         }
 
@@ -3713,7 +3456,7 @@ impl App {
     }
 
     pub fn now_playing_artist_text(&self) -> String {
-        self.now_playing
+        self.playback.now_playing
             .as_ref()
             .map(|track| track.artist.clone())
             .unwrap_or_default()
@@ -3839,10 +3582,10 @@ impl App {
         if self.overlay.is_some() {
             self.close_overlay();
         }
-        self.home_sidebar.expanded = false;
-        self.home_sidebar.anim_progress = 0.0;
-        self.home_sidebar.anim_from = 0.0;
-        self.home_sidebar.anim_started_at = None;
+        self.browse.home_sidebar.expanded = false;
+        self.browse.home_sidebar.anim_progress = 0.0;
+        self.browse.home_sidebar.anim_from = 0.0;
+        self.browse.home_sidebar.anim_started_at = None;
         self.clear_content_hits();
         self.clear_player_bar_hits();
     }
@@ -3930,15 +3673,15 @@ impl App {
         self.vu_last_tick_at = Some(now);
 
         let stale = self.vu_last_meter_generation == reading.generation
-            && self.playback_state != PlaybackRuntimeState::Playing;
+            && self.playback.playback_state != PlaybackRuntimeState::Playing;
         self.vu_last_meter_generation = reading.generation;
 
-        let target_left = if stale || self.now_playing.is_none() {
+        let target_left = if stale || self.playback.now_playing.is_none() {
             VU_LUFS_FLOOR
         } else {
             mean_square_to_lufs(reading.left_mean_square)
         };
-        let target_right = if stale || self.now_playing.is_none() {
+        let target_right = if stale || self.playback.now_playing.is_none() {
             VU_LUFS_FLOOR
         } else {
             mean_square_to_lufs(reading.right_mean_square)
@@ -4002,16 +3745,15 @@ impl App {
     }
 
     fn seek_to_ratio(&mut self, ratio: f32) {
-        if self.now_playing.is_none() {
+        if self.playback.now_playing.is_none() {
             return;
         }
 
-        let fallback_total = self
-            .now_playing
+        let fallback_total = self.playback.now_playing
             .as_ref()
             .map(|track| Duration::from_millis(track.duration_ms.max(0) as u64));
         let _ = self.audio_player.seek_to_ratio(ratio, fallback_total);
-        self.playback_state = map_audio_state(self.audio_player.state());
+        self.playback.playback_state = map_audio_state(self.audio_player.state());
     }
 
     pub async fn fullscreen_tick_playback(&mut self) {
@@ -4034,7 +3776,7 @@ impl App {
                 MprisControlEvent::PlayPause => self.toggle_play_pause_hotkey().await,
                 MprisControlEvent::Stop => {
                     self.audio_player.stop();
-                    self.playback_state = PlaybackRuntimeState::Stopped;
+                    self.playback.playback_state = PlaybackRuntimeState::Stopped;
                 }
                 MprisControlEvent::Next => self.play_next_hotkey().await,
                 MprisControlEvent::Previous => self.play_previous_hotkey().await,
@@ -4045,25 +3787,25 @@ impl App {
     }
 
     async fn mpris_play(&mut self) {
-        if self.now_playing.is_none() {
+        if self.playback.now_playing.is_none() {
             return;
         }
-        if self.playback_state == PlaybackRuntimeState::Stopped {
-            if let Some(index) = self.playback_index {
+        if self.playback.playback_state == PlaybackRuntimeState::Stopped {
+            if let Some(index) = self.playback.playback_index {
                 self.play_queue_index(index, false).await;
             }
             return;
         }
-        if self.playback_state == PlaybackRuntimeState::Paused {
+        if self.playback.playback_state == PlaybackRuntimeState::Paused {
             self.audio_player.toggle_play_pause();
-            self.playback_state = map_audio_state(self.audio_player.state());
+            self.playback.playback_state = map_audio_state(self.audio_player.state());
         }
     }
 
     fn mpris_pause(&mut self) {
-        if self.playback_state == PlaybackRuntimeState::Playing {
+        if self.playback.playback_state == PlaybackRuntimeState::Playing {
             self.audio_player.toggle_play_pause();
-            self.playback_state = map_audio_state(self.audio_player.state());
+            self.playback.playback_state = map_audio_state(self.audio_player.state());
         }
     }
 
@@ -4094,14 +3836,13 @@ impl App {
 
     fn sync_mpris_exposure(&mut self) {
         let now = Instant::now();
-        let signature = self
-            .now_playing
+        let signature = self.playback.now_playing
             .as_ref()
             .map(mpris_metadata_signature)
             .unwrap_or(0);
 
         let metadata_changed = self.mpris_last_signature != Some(signature);
-        let playback_changed = self.mpris_last_playback != self.playback_state;
+        let playback_changed = self.mpris_last_playback != self.playback.playback_state;
         let periodic_tick =
             now.duration_since(self.mpris_last_sync_at) >= Duration::from_millis(900);
 
@@ -4110,10 +3851,10 @@ impl App {
         }
 
         let payload = MprisSyncPayload {
-            playback: self.playback_state,
+            playback: self.playback.playback_state,
             position: self.audio_player.display_position(),
             track: if metadata_changed {
-                self.now_playing.clone()
+                self.playback.now_playing.clone()
             } else {
                 None
             },
@@ -4121,7 +3862,7 @@ impl App {
 
         self.mpris_bridge.update(payload);
         self.mpris_last_sync_at = now;
-        self.mpris_last_playback = self.playback_state;
+        self.mpris_last_playback = self.playback.playback_state;
         if metadata_changed {
             self.mpris_last_signature = Some(signature);
         }
@@ -4129,22 +3870,22 @@ impl App {
 
     pub fn fullscreen_playback_snapshot(&self) -> FullscreenPlaybackSnapshot {
         FullscreenPlaybackSnapshot {
-            queue: self.playback_queue.clone(),
-            current_index: self.playback_index,
-            now_playing: self.now_playing.clone(),
-            now_playing_liked: self.now_playing_liked,
-            state: self.playback_state,
-            repeat_mode: self.playback_repeat_mode,
+            queue: self.playback.playback_queue.clone(),
+            current_index: self.playback.playback_index,
+            now_playing: self.playback.now_playing.clone(),
+            now_playing_liked: self.playback.now_playing_liked,
+            state: self.playback.playback_state,
+            repeat_mode: self.playback.playback_repeat_mode,
             position: self.audio_player.display_position(),
         }
     }
 
     pub fn fullscreen_runtime_snapshot(&self) -> FullscreenRuntimeSnapshot {
         FullscreenRuntimeSnapshot {
-            current_index: self.playback_index,
-            now_playing_liked: self.now_playing_liked,
-            state: self.playback_state,
-            repeat_mode: self.playback_repeat_mode,
+            current_index: self.playback.playback_index,
+            now_playing_liked: self.playback.now_playing_liked,
+            state: self.playback.playback_state,
+            repeat_mode: self.playback.playback_repeat_mode,
             position: self.audio_player.display_position(),
             volume: self.audio_player.volume(),
             seeking: self.audio_player.is_seeking(),
@@ -4154,15 +3895,15 @@ impl App {
 
     /// 当前播放歌曲的下载图标状态（每帧缓存一次，全屏页只读不再查磁盘）。
     pub fn current_download_state(&self) -> Option<DownloadState> {
-        if self.download_root.is_none() || self.now_playing.is_none() {
+        if self.downloads.root.is_none() || self.playback.now_playing.is_none() {
             return None;
         }
-        Some(self.now_playing_download_state)
+        Some(self.downloads.now_playing_state)
     }
 
     /// 供全屏页每帧刷新的缓存：任务表与磁盘状态都封在这一处。
     fn refresh_current_download_state(&mut self) {
-        let state = match self.now_playing.clone() {
+        let state = match self.playback.now_playing.clone() {
             Some(track) => self
                 .download_state_for_candidate(&DownloadCandidate {
                     song_id: track.song_id,
@@ -4173,20 +3914,20 @@ impl App {
                 .unwrap_or(DownloadState::NotDownloaded),
             None => DownloadState::NotDownloaded,
         };
-        self.now_playing_download_state = state;
+        self.downloads.now_playing_state = state;
     }
 
     pub fn fullscreen_metadata_signature(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
-        self.playback_queue.len().hash(&mut hasher);
-        self.playback_index.hash(&mut hasher);
+        self.playback.playback_queue.len().hash(&mut hasher);
+        self.playback.playback_index.hash(&mut hasher);
 
-        for track in &self.playback_queue {
+        for track in &self.playback.playback_queue {
             track.song_id.hash(&mut hasher);
             track.duration_ms.hash(&mut hasher);
         }
 
-        if let Some(track) = self.now_playing.as_ref() {
+        if let Some(track) = self.playback.now_playing.as_ref() {
             track.song_id.hash(&mut hasher);
             track.duration_ms.hash(&mut hasher);
             track
@@ -4225,7 +3966,7 @@ impl App {
     }
 
     pub async fn fullscreen_play_queue_index(&mut self, index: usize) {
-        if index < self.playback_queue.len() {
+        if index < self.playback.playback_queue.len() {
             self.play_queue_index(index, false).await;
         }
     }
@@ -4337,25 +4078,25 @@ impl App {
             return;
         }
 
-        if self.home_sidebar.expanded {
-            self.home_sidebar.expanded = false;
+        if self.browse.home_sidebar.expanded {
+            self.browse.home_sidebar.expanded = false;
             self.animate_home_sidebar();
             return;
         }
 
-        self.home_sidebar.expanded = true;
+        self.browse.home_sidebar.expanded = true;
         self.animate_home_sidebar();
 
-        if !self.home_sidebar.created_playlists.is_empty()
-            || !self.home_sidebar.collected_playlists.is_empty()
+        if !self.browse.home_sidebar.created_playlists.is_empty()
+            || !self.browse.home_sidebar.collected_playlists.is_empty()
         {
-            self.home_sidebar.reset_focus();
+            self.browse.home_sidebar.reset_focus();
             return;
         }
 
         // 异步填充：立刻返回，动画照常跑，数据由 tick 搬入。
         if self.home_sidebar_fetch.is_none() {
-            self.home_sidebar.loading = true;
+            self.browse.home_sidebar.loading = true;
             let fut = fetch_home_sidebar_playlists(self.api.clone(), self.config.language);
             let fut: Pin<Box<dyn Future<Output = Option<Result<HomeSidebarFetch, String>>>>> =
                 Box::pin(async move { Some(fut.await) });
@@ -4384,30 +4125,30 @@ impl App {
             return;
         };
         self.home_sidebar_fetch = None;
-        self.home_sidebar.loading = false;
+        self.browse.home_sidebar.loading = false;
 
         match result {
             Ok(data) => {
-                self.home_sidebar.user_id = Some(data.user_id);
-                self.home_sidebar.liked_playlist_id = data.liked_playlist_id;
-                self.home_sidebar.user_name = data.user_name;
-                self.home_sidebar.created_playlists = data.created;
-                self.home_sidebar.collected_playlists = data.collected;
-                self.home_sidebar.clamp_focus();
-                self.home_sidebar.status_line = match self.config.language {
+                self.browse.home_sidebar.user_id = Some(data.user_id);
+                self.browse.home_sidebar.liked_playlist_id = data.liked_playlist_id;
+                self.browse.home_sidebar.user_name = data.user_name;
+                self.browse.home_sidebar.created_playlists = data.created;
+                self.browse.home_sidebar.collected_playlists = data.collected;
+                self.browse.home_sidebar.clamp_focus();
+                self.browse.home_sidebar.status_line = match self.config.language {
                     Language::Zh => format!(
                         "创建 {} 个，收藏 {} 个",
-                        self.home_sidebar.created_playlists.len(),
-                        self.home_sidebar.collected_playlists.len()
+                        self.browse.home_sidebar.created_playlists.len(),
+                        self.browse.home_sidebar.collected_playlists.len()
                     ),
                     Language::En => format!(
                         "{} created, {} collected",
-                        self.home_sidebar.created_playlists.len(),
-                        self.home_sidebar.collected_playlists.len()
+                        self.browse.home_sidebar.created_playlists.len(),
+                        self.browse.home_sidebar.collected_playlists.len()
                     ),
                 };
-                self.home.status_line = self.home_sidebar.status_line.clone();
-                self.home_sidebar.reset_focus();
+                self.browse.home.status_line = self.browse.home_sidebar.status_line.clone();
+                self.browse.home_sidebar.reset_focus();
             }
             Err(err) => {
                 let text = format!(
@@ -4415,8 +4156,8 @@ impl App {
                     self.lang_text("主页歌单加载失败", "Failed to load home playlists"),
                     err
                 );
-                self.home_sidebar.status_line = text.clone();
-                self.home.status_line = text;
+                self.browse.home_sidebar.status_line = text.clone();
+                self.browse.home.status_line = text;
             }
         }
     }
@@ -4440,7 +4181,7 @@ impl App {
                 ));
             }
             Err(message) => {
-                self.author.description = format!(
+                self.browse.author.description = format!(
                     "{}: {message}",
                     self.lang_text("作者页加载失败", "Failed to load the artist page")
                 );
@@ -4462,7 +4203,7 @@ impl App {
         };
         let kind = slot.kind;
         self.playlist_fetch = None;
-        self.playlist_page_kind = kind;
+        self.downloads.page_kind = kind;
 
         match result {
             Ok(fetch) => {
@@ -4471,7 +4212,7 @@ impl App {
                 self.set_runtime_status(format!("{} {}", kind.opened(self.config.language), title));
             }
             Err(message) => {
-                self.playlist.description =
+                self.browse.playlist.description =
                     format!("{}: {message}", kind.failed(self.config.language));
                 self.set_runtime_status(format!(
                     "{}: {message}",
@@ -4483,15 +4224,15 @@ impl App {
 
     async fn open_focused_home_sidebar_playlist(&mut self) {
         let (playlist_id, title) = {
-            let Some(item) = self.home_sidebar.focused_playlist() else {
-                self.home.status_line = self
+            let Some(item) = self.browse.home_sidebar.focused_playlist() else {
+                self.browse.home.status_line = self
                     .lang_text("侧边栏暂无可打开歌单", "No sidebar playlist to open")
                     .to_string();
                 return;
             };
 
             let Some(playlist_id) = item.id.clone() else {
-                self.home.status_line = self
+                self.browse.home.status_line = self
                     .lang_text(
                         "当前歌单缺少 ID，无法打开",
                         "The selected playlist has no ID",
@@ -4508,20 +4249,20 @@ impl App {
             self.refresh_now_playing_like_state();
         }
 
-        self.home.status_line = format!("{} {}", self.lang_text("正在加载", "Loading"), title);
+        self.browse.home.status_line = format!("{} {}", self.lang_text("正在加载", "Loading"), title);
 
         match self.load_playlist_detail(&playlist_id).await {
             Ok(()) => {
                 self.playlist_return_page = Page::Home;
                 self.playlist_section_return_snapshot = None;
-                self.home_sidebar.expanded = false;
-                let target = if self.home_sidebar.expanded { 1.0 } else { 0.0 };
-                self.home_sidebar.anim_progress = target;
+                self.browse.home_sidebar.expanded = false;
+                let target = if self.browse.home_sidebar.expanded { 1.0 } else { 0.0 };
+                self.browse.home_sidebar.anim_progress = target;
                 self.page = Page::Playlist;
-                self.home.status_line = format!("{} {}", self.lang_text("已打开", "Opened"), title);
+                self.browse.home.status_line = format!("{} {}", self.lang_text("已打开", "Opened"), title);
             }
             Err(err) => {
-                self.home.status_line = format!(
+                self.browse.home.status_line = format!(
                     "{}: {}",
                     self.lang_text("打开歌单失败", "Failed to open playlist"),
                     err
@@ -4752,42 +4493,41 @@ impl App {
     }
 
     async fn toggle_play_pause_hotkey(&mut self) {
-        if self.now_playing.is_none() {
+        if self.playback.now_playing.is_none() {
             self.set_runtime_status(
                 self.lang_text("当前没有可控制的播放", "No controllable playback right now"),
             );
             return;
         }
 
-        if self.playback_state == PlaybackRuntimeState::Stopped {
-            if let Some(index) = self.playback_index {
+        if self.playback.playback_state == PlaybackRuntimeState::Stopped {
+            if let Some(index) = self.playback.playback_index {
                 self.play_queue_index(index, false).await;
                 return;
             }
         }
 
         self.audio_player.toggle_play_pause();
-        self.playback_state = map_audio_state(self.audio_player.state());
+        self.playback.playback_state = map_audio_state(self.audio_player.state());
     }
 
     async fn play_previous_hotkey(&mut self) {
-        if self.playback_queue.is_empty() {
+        if self.playback.playback_queue.is_empty() {
             self.set_runtime_status(self.lang_text("当前播放队列为空", "Playback queue is empty"));
             return;
         }
 
-        let current = self
-            .playback_index
+        let current = self.playback.playback_index
             .unwrap_or(0)
-            .min(self.playback_queue.len() - 1);
-        let target = match self.playback_repeat_mode {
+            .min(self.playback.playback_queue.len() - 1);
+        let target = match self.playback.playback_repeat_mode {
             PlaybackRepeatMode::Sequence => current.checked_sub(1),
             PlaybackRepeatMode::LoopAll => {
-                Some((current + self.playback_queue.len() - 1) % self.playback_queue.len())
+                Some((current + self.playback.playback_queue.len() - 1) % self.playback.playback_queue.len())
             }
             PlaybackRepeatMode::LoopOne => Some(current),
             PlaybackRepeatMode::Shuffle => {
-                Some(pick_shuffle_index(self.playback_queue.len(), current))
+                Some(pick_shuffle_index(self.playback.playback_queue.len(), current))
             }
         };
 
@@ -4797,27 +4537,26 @@ impl App {
     }
 
     async fn play_next_hotkey(&mut self) {
-        if self.playback_queue.is_empty() {
+        if self.playback.playback_queue.is_empty() {
             self.set_runtime_status(self.lang_text("当前播放队列为空", "Playback queue is empty"));
             return;
         }
 
-        let current = self
-            .playback_index
+        let current = self.playback.playback_index
             .unwrap_or(0)
-            .min(self.playback_queue.len() - 1);
-        let target = match self.playback_repeat_mode {
+            .min(self.playback.playback_queue.len() - 1);
+        let target = match self.playback.playback_repeat_mode {
             PlaybackRepeatMode::Sequence => {
-                if current + 1 < self.playback_queue.len() {
+                if current + 1 < self.playback.playback_queue.len() {
                     Some(current + 1)
                 } else {
                     None
                 }
             }
-            PlaybackRepeatMode::LoopAll => Some((current + 1) % self.playback_queue.len()),
+            PlaybackRepeatMode::LoopAll => Some((current + 1) % self.playback.playback_queue.len()),
             PlaybackRepeatMode::LoopOne => Some(current),
             PlaybackRepeatMode::Shuffle => {
-                Some(pick_shuffle_index(self.playback_queue.len(), current))
+                Some(pick_shuffle_index(self.playback.playback_queue.len(), current))
             }
         };
 
@@ -4827,11 +4566,11 @@ impl App {
     }
 
     fn cycle_repeat_mode_hotkey(&mut self) {
-        self.playback_repeat_mode = self.playback_repeat_mode.next();
+        self.playback.cycle_repeat_mode();
         self.set_runtime_status(format!(
             "{}: {}",
             self.lang_text("播放模式", "Play Mode"),
-            match self.playback_repeat_mode {
+            match self.playback.playback_repeat_mode {
                 PlaybackRepeatMode::Sequence => self.lang_text("顺序播放", "Sequence"),
                 PlaybackRepeatMode::Shuffle => self.lang_text("随机播放", "Shuffle"),
                 PlaybackRepeatMode::LoopAll => self.lang_text("列表循环", "Loop All"),
@@ -4852,9 +4591,9 @@ impl App {
                 }
             }
             Page::Playlist => {
-                let step = self.playlist.visible_rows.max(1);
+                let step = self.browse.playlist.visible_rows.max(1);
                 for _ in 0..step {
-                    if !self.playlist.focus_prev() {
+                    if !self.browse.playlist.focus_prev() {
                         break;
                     }
                 }
@@ -4869,19 +4608,19 @@ impl App {
                 let step = self.search.page_items();
                 for _ in 0..step {
                     let before_idx = self.search.focused_idx;
-                    let before_len = self.search.results.len();
+                    let before_len = self.search.results().len();
                     self.advance_search_focus().await;
                     if self.search.focused_idx == before_idx
-                        && self.search.results.len() == before_len
+                        && self.search.results().len() == before_len
                     {
                         break;
                     }
                 }
             }
             Page::Playlist => {
-                let step = self.playlist.visible_rows.max(1);
+                let step = self.browse.playlist.visible_rows.max(1);
                 for _ in 0..step {
-                    if !self.playlist.focus_next() {
+                    if !self.browse.playlist.focus_next() {
                         break;
                     }
                 }
@@ -4894,7 +4633,7 @@ impl App {
     /// 交给 `tick_like_sync` 收敛——不再阻塞事件循环。
     fn refresh_now_playing_like_state(&mut self) {
         let Some(song_id) = self.current_song_id() else {
-            self.now_playing_liked = false;
+            self.playback.now_playing_liked = false;
             return;
         };
 
@@ -4902,30 +4641,30 @@ impl App {
 
         let fut = song_like_check_request(self.api.clone(), song_id.clone());
         let fut: LikeVerifyTask = Box::pin(async move { Some(fut.await) });
-        self.like_machine.begin_verify(song_id, shot_and_share(fut));
+        self.playback.like_machine.begin_verify(song_id, shot_and_share(fut));
     }
 
     /// 当前曲目 id。
     fn current_song_id(&self) -> Option<String> {
-        self.now_playing.as_ref().map(|track| track.song_id.clone())
+        self.playback.now_playing.as_ref().map(|track| track.song_id.clone())
     }
 
     /// 重新解析下载根目录（设置里改了路径、或全屏页同步回来时调用）。
     pub fn refresh_download_root(&mut self) {
         let next =
             crate::app::download::resolve_download_root(self.config.download_path.as_deref());
-        if next != self.download_root {
-            self.download_root = next;
-            self.download_manager.clear_disk_cache();
+        if next != self.downloads.root {
+            self.downloads.root = next;
+            self.downloads.manager.clear_disk_cache();
             // 行数据的目录部分变了：整页行数据重建。
-            self.download_rows_epoch = self.download_rows_epoch.wrapping_add(1);
+            self.downloads.rows_epoch = self.downloads.rows_epoch.wrapping_add(1);
         }
     }
 
     /// 当前聚焦的单曲（歌单页 / 搜索页）与它所在页面的下载上下文。
     fn focused_download_song(&self) -> Option<DownloadCandidate> {
         match self.page {
-            Page::Playlist => self.playlist_download_candidate(self.playlist.focused_idx),
+            Page::Playlist => self.playlist_download_candidate(self.browse.playlist.focused_idx),
             Page::Search => self.search_download_candidate(self.search.focused_idx),
             _ => None,
         }
@@ -4933,7 +4672,7 @@ impl App {
 
     /// 歌单页 / 专辑页某一行对应的下载候选（非单曲行返回 `None`）。
     fn playlist_download_candidate(&self, index: usize) -> Option<DownloadCandidate> {
-        let track = self.playlist.tracks.get(index)?;
+        let track = self.browse.playlist.tracks.get(index)?;
         if track.kind != PlaylistTrackKind::Song {
             return None;
         }
@@ -4947,7 +4686,7 @@ impl App {
 
     /// 搜索页某一行对应的下载候选（仅单曲行）。
     fn search_download_candidate(&self, index: usize) -> Option<DownloadCandidate> {
-        let item = self.search.results.get(index)?;
+        let item = self.search.results().get(index)?;
         if item.kind != SearchItemKind::Song {
             return None;
         }
@@ -4964,46 +4703,46 @@ impl App {
 
     /// 下载图标的动画相位（time-based：空闲节流下也按真实时间推进）。
     pub fn download_spinner_phase(&self) -> Duration {
-        self.download_spinner_start.elapsed()
+        self.downloads.spinner_start.elapsed()
     }
 
     /// 歌单页 / 专辑页的行内图标：每帧调一次；列表代与任务版本都不变时几乎零成本。
     pub(crate) fn refresh_playlist_downloads(&mut self) {
-        let epoch = (self.playlist.generation(), self.download_rows_epoch);
-        let root = self.download_root.clone();
-        let tracks = &self.playlist.tracks;
-        self.playlist_download_cache
-            .refresh(epoch, &mut self.download_manager, || {
+        let epoch = (self.browse.playlist.generation(), self.downloads.rows_epoch);
+        let root = self.downloads.root.clone();
+        let tracks = &self.browse.playlist.tracks;
+        self.downloads.playlist_cache
+            .refresh(epoch, &mut self.downloads.manager, || {
                 playlist_download_rows(tracks, root.as_deref())
             });
     }
 
     /// 歌单页 / 专辑页某行的图标状态（先调 `refresh_playlist_downloads`）。
     pub(crate) fn playlist_download_state_at(&self, index: usize) -> Option<DownloadState> {
-        self.playlist_download_cache.state_at(index)
+        self.downloads.playlist_cache.state_at(index)
     }
 
     /// 搜索页的行内图标：每帧调一次。
     pub(crate) fn refresh_search_downloads(&mut self) {
-        let epoch = (self.search.generation(), self.download_rows_epoch);
-        let root = self.download_root.clone();
-        let results = &self.search.results;
-        self.search_download_cache
-            .refresh(epoch, &mut self.download_manager, || {
+        let epoch = (self.search.generation(), self.downloads.rows_epoch);
+        let root = self.downloads.root.clone();
+        let results = &self.search.results();
+        self.downloads.search_cache
+            .refresh(epoch, &mut self.downloads.manager, || {
                 search_download_rows(results, root.as_deref())
             });
     }
 
     /// 搜索页某行的图标状态（先调 `refresh_search_downloads`）。
     pub(crate) fn search_download_state_at(&self, index: usize) -> Option<DownloadState> {
-        self.search_download_cache.state_at(index)
+        self.downloads.search_cache.state_at(index)
     }
 
     fn download_state_for_candidate(
         &mut self,
         candidate: &DownloadCandidate,
     ) -> Option<DownloadState> {
-        let root = self.download_root.clone()?;
+        let root = self.downloads.root.clone()?;
         let target = DownloadTarget {
             dir: root,
             base: crate::app::download::download_file_stem(
@@ -5012,7 +4751,7 @@ impl App {
                 &candidate.album,
             ),
         };
-        Some(self.download_manager.state_of(&candidate.song_id, &target))
+        Some(self.downloads.manager.state_of(&candidate.song_id, &target))
     }
 
     /// 主应用 Ctrl+Alt+D：下载聚焦的单曲（在途则取消）。
@@ -5029,7 +4768,7 @@ impl App {
 
     /// 全屏页 Ctrl+D / 点下载图标：下载当前播放的单曲（在途则取消）。
     pub fn download_current_song(&mut self) {
-        let Some(track) = self.now_playing.clone() else {
+        let Some(track) = self.playback.now_playing.clone() else {
             self.set_runtime_status(
                 self.lang_text("当前没有正在播放的歌曲", "Nothing is playing right now"),
             );
@@ -5046,8 +4785,8 @@ impl App {
 
     /// 发起 / 取消下载（图标点击、两处快捷键共用这一条路径）。
     fn toggle_download(&mut self, candidate: DownloadCandidate) {
-        if self.download_manager.is_downloading(&candidate.song_id) {
-            self.download_manager.cancel(&candidate.song_id);
+        if self.downloads.manager.is_downloading(&candidate.song_id) {
+            self.downloads.manager.cancel(&candidate.song_id);
             self.set_runtime_status(format!(
                 "{}: {}",
                 self.lang_text("已取消下载", "Download cancelled"),
@@ -5056,7 +4795,7 @@ impl App {
             return;
         }
 
-        if self.download_manager.is_busy(&candidate.song_id) {
+        if self.downloads.manager.is_busy(&candidate.song_id) {
             self.set_runtime_status(self.lang_text(
                 "正在取消上一任务，请稍候",
                 "Cancelling the previous download, please wait",
@@ -5064,7 +4803,7 @@ impl App {
             return;
         }
 
-        let Some(root) = self.download_root.clone() else {
+        let Some(root) = self.downloads.root.clone() else {
             self.set_runtime_status(self.lang_text(
                 "下载不可用：没有可用的下载目录",
                 "Download unavailable: no usable download directory",
@@ -5093,8 +4832,8 @@ impl App {
             target,
         };
 
-        let queued = self.download_manager.is_active();
-        match self.download_manager.enqueue(&self.api, request) {
+        let queued = self.downloads.manager.is_active();
+        match self.downloads.manager.enqueue(&self.api, request) {
             Ok(()) => {
                 let status = if queued {
                     format!(
@@ -5120,7 +4859,7 @@ impl App {
     /// 每帧搬运下载结果：完成 / 失败 / 取消都写状态行。
     fn tick_download(&mut self) {
         self.refresh_current_download_state();
-        for event in self.download_manager.poll() {
+        for event in self.downloads.manager.poll() {
             match event {
                 DownloadEvent::Started { title, level } => {
                     self.set_runtime_status(format!(
@@ -5171,7 +4910,7 @@ impl App {
     /// 把某首歌的显示值同步到状态机（未决意图优先，其次已确认值）。
     fn sync_like_display(&mut self, song_id: &str) {
         if self.current_song_id().as_deref() == Some(song_id) {
-            self.now_playing_liked = self.like_machine.displayed(song_id);
+            self.playback.now_playing_liked = self.playback.like_machine.displayed(song_id);
         }
     }
 
@@ -5185,9 +4924,9 @@ impl App {
             return;
         };
 
-        let target = !self.now_playing_liked;
-        self.like_machine.set_intent(song_id, target);
-        self.now_playing_liked = target;
+        let target = !self.playback.now_playing_liked;
+        self.playback.like_machine.set_intent(song_id, target);
+        self.playback.now_playing_liked = target;
     }
 
     /// 每帧收敛收藏状态：先搬在途结果，再按需补发请求。
@@ -5198,7 +4937,7 @@ impl App {
     }
 
     fn pump_like_toggle(&mut self) {
-        let Some(pending) = self.like_machine.toggle.as_ref() else {
+        let Some(pending) = self.playback.like_machine.toggle.as_ref() else {
             return;
         };
         let Some(result) = peek_shared(&pending.fut).cloned() else {
@@ -5207,9 +4946,9 @@ impl App {
 
         let song_id = pending.song_id.clone();
         let target = pending.target;
-        self.like_machine.toggle = None;
+        self.playback.like_machine.toggle = None;
 
-        match self.like_machine.on_toggle_result(&song_id, target, result) {
+        match self.playback.like_machine.on_toggle_result(&song_id, target, result) {
             ToggleOutcome::Settled { liked } => {
                 self.sync_like_display(&song_id);
                 self.set_runtime_status(if liked {
@@ -5235,7 +4974,7 @@ impl App {
     }
 
     fn pump_like_verify(&mut self) {
-        let Some(pending) = self.like_machine.verify.as_ref() else {
+        let Some(pending) = self.playback.like_machine.verify.as_ref() else {
             return;
         };
         let Some(result) = peek_shared(&pending.fut).cloned() else {
@@ -5243,96 +4982,95 @@ impl App {
         };
 
         let song_id = pending.song_id.clone();
-        self.like_machine.verify = None;
+        self.playback.like_machine.verify = None;
 
-        if self.like_machine.on_verify_result(&song_id, result) {
+        if self.playback.like_machine.on_verify_result(&song_id, result) {
             self.sync_like_display(&song_id);
         }
     }
 
     fn dispatch_like_toggle(&mut self) {
-        if let Some(song_id) = self.like_machine.drop_satisfied_intent() {
+        if let Some(song_id) = self.playback.like_machine.drop_satisfied_intent() {
             self.sync_like_display(&song_id);
         }
 
-        let Some((song_id, target)) = self.like_machine.pending_dispatch() else {
+        let Some((song_id, target)) = self.playback.like_machine.pending_dispatch() else {
             return;
         };
 
         let fut = like_song_request(self.api.clone(), song_id.clone(), target);
         let fut: LikeToggleTask = Box::pin(async move { Some(fut.await) });
-        self.like_machine
+        self.playback.like_machine
             .begin_toggle(song_id, target, shot_and_share(fut));
     }
 
     async fn tick_audio(&mut self) {
         let runtime = map_audio_state(self.audio_player.state());
 
-        if self.playback_state == PlaybackRuntimeState::Playing
+        if self.playback.playback_state == PlaybackRuntimeState::Playing
             && runtime == PlaybackRuntimeState::Stopped
         {
             self.play_next_after_finish().await;
             return;
         }
 
-        self.playback_state = runtime;
+        self.playback.playback_state = runtime;
     }
 
     async fn play_next_after_finish(&mut self) {
-        if self.playback_queue.is_empty() {
-            self.playback_state = PlaybackRuntimeState::Stopped;
+        if self.playback.playback_queue.is_empty() {
+            self.playback.playback_state = PlaybackRuntimeState::Stopped;
             return;
         }
 
-        let current = self
-            .playback_index
+        let current = self.playback.playback_index
             .unwrap_or(0)
-            .min(self.playback_queue.len() - 1);
+            .min(self.playback.playback_queue.len() - 1);
 
         // 私人漫游：队列（快照）播完后，若列表已追加新歌则从列表继续顺序播放
-        if self.playback_repeat_mode == PlaybackRepeatMode::Sequence
+        if self.playback.playback_repeat_mode == PlaybackRepeatMode::Sequence
             && self.playback_queue_is_roam()
-            && current + 1 >= self.playback_queue.len()
-            && self.private_roam.tracks.len() > self.playback_queue.len()
+            && current + 1 >= self.playback.playback_queue.len()
+            && self.browse.private_roam.tracks.len() > self.playback.playback_queue.len()
         {
-            let start = self.private_roam.last_played_index.unwrap_or(0) + 1;
-            if start < self.private_roam.tracks.len() {
-                let queue: Vec<PlaybackTrack> = self.private_roam.tracks[start..]
+            let start = self.browse.private_roam.last_played_index.unwrap_or(0) + 1;
+            if start < self.browse.private_roam.tracks.len() {
+                let queue: Vec<PlaybackTrack> = self.browse.private_roam.tracks[start..]
                     .iter()
                     .filter_map(PlaybackTrack::from_playlist_track)
                     .collect();
                 // 来源仍是漫游本身，封面沿用漫游当前封面（跟随播放歌曲）。
-                let source_cover = self.private_roam.cover_url.clone();
+                let source_cover = self.browse.private_roam.cover_url.clone();
                 self.replace_queue_and_play(queue, 0, source_cover).await;
                 return;
             }
         }
 
-        let target = match self.playback_repeat_mode {
+        let target = match self.playback.playback_repeat_mode {
             PlaybackRepeatMode::Sequence => {
-                if current + 1 < self.playback_queue.len() {
+                if current + 1 < self.playback.playback_queue.len() {
                     Some(current + 1)
                 } else {
                     None
                 }
             }
-            PlaybackRepeatMode::LoopAll => Some((current + 1) % self.playback_queue.len()),
+            PlaybackRepeatMode::LoopAll => Some((current + 1) % self.playback.playback_queue.len()),
             PlaybackRepeatMode::LoopOne => Some(current),
             PlaybackRepeatMode::Shuffle => {
-                Some(pick_shuffle_index(self.playback_queue.len(), current))
+                Some(pick_shuffle_index(self.playback.playback_queue.len(), current))
             }
         };
 
         if let Some(index) = target {
             self.play_queue_index(index, false).await;
         } else {
-            self.playback_state = PlaybackRuntimeState::Stopped;
+            self.playback.playback_state = PlaybackRuntimeState::Stopped;
             self.set_runtime_status(self.lang_text("播放结束", "Playback finished"));
         }
     }
 
     async fn play_queue_index(&mut self, index: usize, announce: bool) {
-        let Some(track) = self.playback_queue.get(index).cloned() else {
+        let Some(track) = self.playback.playback_queue.get(index).cloned() else {
             return;
         };
 
@@ -5342,13 +5080,13 @@ impl App {
         let mut enriched = track.clone();
         // Switch UI state immediately and avoid blocking network fetches here.
         self.enrich_track_metadata(&mut enriched, false).await;
-        if let Some(slot) = self.playback_queue.get_mut(index) {
+        if let Some(slot) = self.playback.playback_queue.get_mut(index) {
             slot.cover = enriched.cover.clone();
         }
         self.trim_non_current_cover_memory(index);
-        self.now_playing = Some(enriched.clone());
+        self.playback.now_playing = Some(enriched.clone());
         self.refresh_now_playing_like_state();
-        self.playback_index = Some(index);
+        self.playback.playback_index = Some(index);
         self.cover_fetch_inflight_url = None;
         self.cover_fetch_last_attempt_at = None;
         self.maybe_schedule_now_playing_cover_fetch();
@@ -5359,15 +5097,15 @@ impl App {
 
         let quality = self.config.audio_quality.as_api_level();
         let fail = |err, app: &mut Self| {
-            app.now_playing_liked = false;
-            app.playback_state = PlaybackRuntimeState::Stopped;
+            app.playback.now_playing_liked = false;
+            app.playback.playback_state = PlaybackRuntimeState::Stopped;
             app.set_runtime_status(format!(
                 "{}: {err}",
                 app.lang_text("播放失败", "Playback failed"),
             ));
         };
         let ok = |app: &mut Self| {
-            app.playback_state = PlaybackRuntimeState::Playing;
+            app.playback.playback_state = PlaybackRuntimeState::Playing;
             if announce {
                 app.set_runtime_status(format!(
                     "{}: {} - {}",
@@ -5473,7 +5211,7 @@ impl App {
             self.cover_fetch_inflight_url = None;
         }
 
-        let Some(now) = self.now_playing.as_ref() else {
+        let Some(now) = self.playback.now_playing.as_ref() else {
             return;
         };
         if now.song_id != result.song_id {
@@ -5489,19 +5227,19 @@ impl App {
         };
 
         self.persist_cover_to_disk_cache(&result.url, &bytes);
-        if let Some(now_mut) = self.now_playing.as_mut() {
+        if let Some(now_mut) = self.playback.now_playing.as_mut() {
             now_mut.cover = Some(bytes.clone());
         }
 
-        if let Some(index) = self.playback_index {
-            if let Some(slot) = self.playback_queue.get_mut(index) {
+        if let Some(index) = self.playback.playback_index {
+            if let Some(slot) = self.playback.playback_queue.get_mut(index) {
                 slot.cover = Some(bytes);
             }
         }
     }
 
     fn maybe_schedule_now_playing_cover_fetch(&mut self) {
-        let (song_id, url) = match self.now_playing.as_ref() {
+        let (song_id, url) = match self.playback.now_playing.as_ref() {
             Some(now) if now.cover.is_none() => {
                 let Some(url) = now.cover_url.clone() else {
                     return;
@@ -5518,11 +5256,11 @@ impl App {
         };
 
         if let Some(bytes) = self.load_cover_from_disk_cache(&url) {
-            if let Some(now_mut) = self.now_playing.as_mut() {
+            if let Some(now_mut) = self.playback.now_playing.as_mut() {
                 now_mut.cover = Some(bytes.clone());
             }
-            if let Some(index) = self.playback_index {
-                if let Some(slot) = self.playback_queue.get_mut(index) {
+            if let Some(index) = self.playback.playback_index {
+                if let Some(slot) = self.playback.playback_queue.get_mut(index) {
                     slot.cover = Some(bytes);
                 }
             }
@@ -5552,8 +5290,7 @@ impl App {
     }
 
     fn tick_cover_fetch(&mut self) {
-        let needs_schedule = self
-            .now_playing
+        let needs_schedule = self.playback.now_playing
             .as_ref()
             .map(|now| now.cover.is_none() && now.cover_url.is_some())
             .unwrap_or(false);
@@ -5577,7 +5314,7 @@ impl App {
             self.lyric_fetch_inflight_song_id = None;
         }
 
-        let Some(now) = self.now_playing.as_ref() else {
+        let Some(now) = self.playback.now_playing.as_ref() else {
             return;
         };
         if now.song_id != result.song_id {
@@ -5591,18 +5328,18 @@ impl App {
             return;
         };
 
-        if let Some(now_mut) = self.now_playing.as_mut() {
+        if let Some(now_mut) = self.playback.now_playing.as_mut() {
             now_mut.lyrics = Some(lyrics.clone());
         }
-        if let Some(index) = self.playback_index {
-            if let Some(slot) = self.playback_queue.get_mut(index) {
+        if let Some(index) = self.playback.playback_index {
+            if let Some(slot) = self.playback.playback_queue.get_mut(index) {
                 slot.lyrics = Some(lyrics);
             }
         }
     }
 
     fn maybe_schedule_now_playing_lyric_fetch(&mut self) {
-        let song_id = match self.now_playing.as_ref() {
+        let song_id = match self.playback.now_playing.as_ref() {
             Some(now) if now.lyrics.is_none() => now.song_id.clone(),
             Some(_) => {
                 self.lyric_fetch_inflight_song_id = None;
@@ -5639,8 +5376,7 @@ impl App {
     }
 
     fn tick_lyric_fetch(&mut self) {
-        let needs_schedule = self
-            .now_playing
+        let needs_schedule = self.playback.now_playing
             .as_ref()
             .map(|now| now.lyrics.is_none())
             .unwrap_or(false);
@@ -5661,7 +5397,7 @@ impl App {
 
     fn trim_non_current_cover_memory(&mut self, current_index: usize) {
         let cover_cache_dir = self.cover_cache_dir.clone();
-        for (idx, track) in self.playback_queue.iter_mut().enumerate() {
+        for (idx, track) in self.playback.playback_queue.iter_mut().enumerate() {
             if idx == current_index {
                 continue;
             }
@@ -5740,20 +5476,20 @@ impl App {
             return;
         }
 
-        self.playback_queue = queue;
+        self.playback.playback_queue = queue;
         // 在换队列的此刻记下来源封面，之后浏览别的页面不会影响它。
-        self.playback_queue_cover_url = source_cover_url;
-        self.playback_queue_source_id = self.playlist.id.clone();
-        let target = index.min(self.playback_queue.len() - 1);
+        self.playback.playback_queue_cover_url = source_cover_url;
+        self.playback.playback_queue_source_id = self.browse.playlist.id.clone();
+        let target = index.min(self.playback.playback_queue.len() - 1);
         self.play_queue_index(target, true).await;
     }
 
     fn build_queue_from_playlist(&self) -> (Vec<PlaybackTrack>, usize) {
-        let focused = self.playlist.focused_idx;
+        let focused = self.browse.playlist.focused_idx;
         let mut queue = Vec::new();
         let mut mapped_focus = None;
 
-        for (idx, track) in self.playlist.tracks.iter().enumerate() {
+        for (idx, track) in self.browse.playlist.tracks.iter().enumerate() {
             if let Some(item) = PlaybackTrack::from_playlist_track(track) {
                 if idx == focused {
                     mapped_focus = Some(queue.len());
@@ -5771,7 +5507,7 @@ impl App {
         let mut queue = Vec::new();
         let mut mapped_focus = None;
 
-        for (idx, item) in self.search.results.iter().enumerate() {
+        for (idx, item) in self.search.results().iter().enumerate() {
             if let Some(track) = PlaybackTrack::from_search_item(item) {
                 if idx == focused {
                     mapped_focus = Some(queue.len());
@@ -5785,14 +5521,14 @@ impl App {
     }
 
     async fn play_focused_playlist_track(&mut self) {
-        let Some(track) = self.playlist.tracks.get(self.playlist.focused_idx) else {
+        let Some(track) = self.browse.playlist.tracks.get(self.browse.playlist.focused_idx) else {
             return;
         };
 
         match track.kind {
             PlaylistTrackKind::Song => {
                 let (queue, target) = self.build_queue_from_playlist();
-                let source_cover = self.playlist.cover.url.clone();
+                let source_cover = self.browse.playlist.cover.url.clone();
                 self.replace_queue_and_play(queue, target, source_cover)
                     .await;
             }
@@ -5809,46 +5545,46 @@ impl App {
     }
 
     async fn play_focused_author_tile(&mut self) {
-        let Some(item) = self.author.tiles.get(self.author.focused_idx) else {
+        let Some(item) = self.browse.author.tiles.get(self.browse.author.focused_idx) else {
             return;
         };
 
         let (section_title, tracks, section_cover) = match item.kind {
             AuthorTileKind::HotSong => (
                 self.lang_text("热门歌曲", "Hot Songs").to_string(),
-                self.author.hot_songs.clone(),
-                self.author
+                self.browse.author.hot_songs.clone(),
+                self.browse.author
                     .hot_songs
                     .first()
                     .and_then(|track| track.cover_url.clone())
-                    .or_else(|| self.author.cover.url.clone()),
+                    .or_else(|| self.browse.author.cover.url.clone()),
             ),
             AuthorTileKind::Album => (
                 self.lang_text("专辑", "Albums").to_string(),
-                self.author.albums.clone(),
-                self.author
+                self.browse.author.albums.clone(),
+                self.browse.author
                     .albums
                     .first()
                     .and_then(|track| track.cover_url.clone())
-                    .or_else(|| self.author.cover.url.clone()),
+                    .or_else(|| self.browse.author.cover.url.clone()),
             ),
             AuthorTileKind::Ep => (
                 "EP".to_string(),
-                self.author.eps.clone(),
-                self.author
+                self.browse.author.eps.clone(),
+                self.browse.author
                     .eps
                     .first()
                     .and_then(|track| track.cover_url.clone())
-                    .or_else(|| self.author.cover.url.clone()),
+                    .or_else(|| self.browse.author.cover.url.clone()),
             ),
             AuthorTileKind::Single => (
                 "Single".to_string(),
-                self.author.singles.clone(),
-                self.author
+                self.browse.author.singles.clone(),
+                self.browse.author
                     .singles
                     .first()
                     .and_then(|track| track.cover_url.clone())
-                    .or_else(|| self.author.cover.url.clone()),
+                    .or_else(|| self.browse.author.cover.url.clone()),
             ),
         };
 
@@ -5864,27 +5600,26 @@ impl App {
         self.playlist_section_return_snapshot = None;
         // 这一页换成作者页分区：在途的占位拉取作废（同 `apply_playlist_fetch`）。
         self.playlist_fetch = None;
-        self.playlist.id = self
-            .author
+        self.browse.playlist.id = self.browse.author
             .id
             .as_ref()
             .map(|id| format!("artist:{}:{}", id, section_title));
-        self.playlist.title = format!("{} · {}", self.author.title, section_title);
-        self.playlist.artist = self.author.title.clone();
-        self.playlist.description = self
+        self.browse.playlist.title = format!("{} · {}", self.browse.author.title, section_title);
+        self.browse.playlist.artist = self.browse.author.title.clone();
+        self.browse.playlist.description = self
             .lang_text(
                 "按 Enter 进入专辑或播放歌曲，Esc 返回作者页",
                 "Press Enter to open album or play song, Esc to return",
             )
             .to_string();
-        self.playlist.set_tracks(tracks);
-        section_cover.map(|x| self.playlist.cover.load(self.api.clone(), x));
+        self.browse.playlist.set_tracks(tracks);
+        section_cover.map(|x| self.browse.playlist.cover.load(self.api.clone(), x));
         self.page = Page::Playlist;
     }
 
     async fn open_focused_playlist_album(&mut self) {
         let (album_id, title, fallback_cover_url, track_kind) = {
-            let Some(track) = self.playlist.tracks.get(self.playlist.focused_idx) else {
+            let Some(track) = self.browse.playlist.tracks.get(self.browse.playlist.focused_idx) else {
                 return;
             };
 
@@ -5910,7 +5645,7 @@ impl App {
                 PlaylistTrackKind::Album | PlaylistTrackKind::Ep | PlaylistTrackKind::Single
             );
         let section_snapshot = if is_author_section_album {
-            Some(self.playlist.clone())
+            Some(self.browse.playlist.clone())
         } else {
             None
         };
@@ -5918,8 +5653,8 @@ impl App {
         match self.load_album_detail(&album_id).await {
             Ok(()) => {
                 self.playlist_section_return_snapshot = section_snapshot;
-                match (&self.playlist.cover.image, fallback_cover_url) {
-                    (None, Some(url)) => self.playlist.cover.load(self.api.clone(), url),
+                match (&self.browse.playlist.cover.image, fallback_cover_url) {
+                    (None, Some(url)) => self.browse.playlist.cover.load(self.api.clone(), url),
                     _ => (),
                 }
                 self.set_runtime_status(format!(
@@ -5941,7 +5676,7 @@ impl App {
     /// 搜索页打开作者：立即落占位作者页 + 派发后台拉取（结果由 `tick_author_fetch` 搬进来）。
     fn open_focused_search_author(&mut self) {
         let (artist_id, title, fallback_cover_url) = {
-            let Some(item) = self.search.results.get(self.search.focused_idx) else {
+            let Some(item) = self.search.results().get(self.search.focused_idx) else {
                 return;
             };
 
@@ -5958,7 +5693,7 @@ impl App {
             (artist_id, item.left_label.clone(), item.cover_url.clone())
         };
 
-        self.author = AuthorState::placeholder(
+        self.browse.author = AuthorState::placeholder(
             title,
             self.lang_text("正在加载作者…", "Loading artist…")
                 .to_string(),
@@ -5980,7 +5715,7 @@ impl App {
     /// 搜索页打开专辑：立即落占位歌单页 + 派发后台拉取（结果由 `tick_playlist_fetch` 搬进来）。
     fn open_focused_search_album(&mut self) {
         let (album_id, title, fallback_cover_url) = {
-            let Some(item) = self.search.results.get(self.search.focused_idx) else {
+            let Some(item) = self.search.results().get(self.search.focused_idx) else {
                 return;
             };
 
@@ -6003,7 +5738,7 @@ impl App {
             )
         };
 
-        self.playlist = PlaylistState::placeholder(
+        self.browse.playlist = PlaylistState::placeholder(
             title,
             self.lang_text("正在加载专辑…", "Loading album…")
                 .to_string(),
@@ -6019,7 +5754,7 @@ impl App {
             fallback_cover_url,
         );
         let fut: PlaylistFetchTask = Box::pin(async move { Some(fut.await) });
-        self.playlist_page_kind = PlaylistPageKind::Album;
+        self.downloads.page_kind = PlaylistPageKind::Album;
         self.playlist_fetch = Some(PlaylistFetchSlot {
             kind: PlaylistPageKind::Album,
             future: shot_and_share(fut),
@@ -6029,7 +5764,7 @@ impl App {
     /// 搜索页打开歌单：立即落占位歌单页 + 派发后台拉取（结果由 `tick_playlist_fetch` 搬进来）。
     fn open_focused_search_playlist(&mut self) {
         let (playlist_id, title, fallback_cover_url) = {
-            let Some(item) = self.search.results.get(self.search.focused_idx) else {
+            let Some(item) = self.search.results().get(self.search.focused_idx) else {
                 return;
             };
 
@@ -6046,7 +5781,7 @@ impl App {
             (playlist_id, item.left_label.clone(), item.cover_url.clone())
         };
 
-        self.playlist = PlaylistState::placeholder(
+        self.browse.playlist = PlaylistState::placeholder(
             title,
             self.lang_text("正在加载歌单…", "Loading playlist…")
                 .to_string(),
@@ -6060,11 +5795,11 @@ impl App {
             self.config.language,
             playlist_id,
             fallback_cover_url,
-            self.home_sidebar.liked_playlist_id.clone(),
-            self.home_sidebar.user_id.clone(),
+            self.browse.home_sidebar.liked_playlist_id.clone(),
+            self.browse.home_sidebar.user_id.clone(),
         );
         let fut: PlaylistFetchTask = Box::pin(async move { Some(fut.await) });
-        self.playlist_page_kind = PlaylistPageKind::Playlist;
+        self.downloads.page_kind = PlaylistPageKind::Playlist;
         self.playlist_fetch = Some(PlaylistFetchSlot {
             kind: PlaylistPageKind::Playlist,
             future: shot_and_share(fut),
@@ -6072,9 +5807,7 @@ impl App {
     }
 
     async fn activate_focused_search_result(&mut self) {
-        let Some(kind) = self
-            .search
-            .results
+        let Some(kind) = self.search.results()
             .get(self.search.focused_idx)
             .map(|item| item.kind)
         else {
@@ -6090,22 +5823,22 @@ impl App {
     }
 
     pub fn is_now_playing_song(&self, song_id: Option<&str>) -> bool {
-        match (self.now_playing.as_ref(), song_id) {
+        match (self.playback.now_playing.as_ref(), song_id) {
             (Some(now), Some(song_id)) => now.song_id == song_id,
             _ => false,
         }
     }
 
     fn open_settings(&mut self) {
-        self.settings_selected = 0;
-        self.settings_keybind_rebinding = None;
+        self.settings.selected = 0;
+        self.settings.keybind_rebinding = None;
         self.overlay = Some(Overlay::Settings);
     }
 
     fn open_keybind_settings(&mut self) {
-        self.settings_keybind_selected = 0;
-        self.settings_keybind_rebinding = None;
-        self.settings_keybind_scroll = 0;
+        self.settings.keybind_selected = 0;
+        self.settings.keybind_rebinding = None;
+        self.settings.keybind_scroll = 0;
         self.overlay = Some(Overlay::SettingsKeybinds);
     }
 
@@ -6121,45 +5854,44 @@ impl App {
             KeyCode::Esc => self.close_overlay(),
             KeyCode::Enter => self.execute_search_from_box().await,
             KeyCode::Backspace => {
-                if self.search_box_cursor > 0 {
-                    self.search_box_cursor =
-                        remove_char_before(&mut self.search_box_input, self.search_box_cursor);
+                if self.input.search_box_cursor > 0 {
+                    self.input.search_box_cursor =
+                        remove_char_before(&mut self.input.search_box_input, self.input.search_box_cursor);
                 }
             }
             KeyCode::Delete => {
-                remove_char_at(&mut self.search_box_input, self.search_box_cursor);
+                remove_char_at(&mut self.input.search_box_input, self.input.search_box_cursor);
             }
             KeyCode::Left => {
-                if self.search_box_cursor > 0 {
-                    self.search_box_cursor -= 1;
+                if self.input.search_box_cursor > 0 {
+                    self.input.search_box_cursor -= 1;
                 }
             }
             KeyCode::Right => {
-                let len = char_count(&self.search_box_input);
-                if self.search_box_cursor < len {
-                    self.search_box_cursor += 1;
+                let len = char_count(&self.input.search_box_input);
+                if self.input.search_box_cursor < len {
+                    self.input.search_box_cursor += 1;
                 }
             }
             KeyCode::Home => {
-                self.search_box_cursor = 0;
+                self.input.search_box_cursor = 0;
             }
             KeyCode::End => {
-                self.search_box_cursor = char_count(&self.search_box_input);
+                self.input.search_box_cursor = char_count(&self.input.search_box_input);
             }
             KeyCode::Char(ch) => {
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
-                    if char_count(&self.search_box_input) < MAX_INPUT_LEN {
-                        insert_char_at(&mut self.search_box_input, self.search_box_cursor, ch);
-                        self.search_box_cursor += 1;
+                    if char_count(&self.input.search_box_input) < MAX_INPUT_LEN {
+                        insert_char_at(&mut self.input.search_box_input, self.input.search_box_cursor, ch);
+                        self.input.search_box_cursor += 1;
                     }
                 }
             }
             _ => {}
         }
 
-        self.search_box_cursor = self
-            .search_box_cursor
-            .min(char_count(&self.search_box_input));
+        self.input.search_box_cursor = self.input.search_box_cursor
+            .min(char_count(&self.input.search_box_input));
     }
 
     fn handle_search_box_click(&mut self, col: u16, row: u16) {
@@ -6170,8 +5902,7 @@ impl App {
             return;
         }
 
-        let visible_h = self
-            .search_box_anim_height
+        let visible_h = self.input.search_box_anim_height
             .min(crate::ui::search_box::TARGET_HEIGHT)
             .min(term_h);
         if visible_h < crate::ui::search_box::TARGET_HEIGHT {
@@ -6200,59 +5931,58 @@ impl App {
         }
 
         if col <= inner_x {
-            self.search_box_cursor = 0;
+            self.input.search_box_cursor = 0;
             return;
         }
 
         let max_col = inner_x.saturating_add(inner_w).saturating_sub(1);
         if col >= max_col {
-            self.search_box_cursor = char_count(&self.search_box_input);
+            self.input.search_box_cursor = char_count(&self.input.search_box_input);
             return;
         }
 
         let rel = col.saturating_sub(inner_x);
-        self.search_box_cursor = char_index_for_display_column(&self.search_box_input, rel);
+        self.input.search_box_cursor = char_index_for_display_column(&self.input.search_box_input, rel);
     }
 
     /// 设置弹窗内的鼠标点击：单击聚焦该行，400ms 内再点同一行等同 Enter。
     ///
     /// 弹窗盖住整页，未命中行的点击由调用方直接丢弃（不穿透到底层页面）。
     async fn handle_settings_modal_click(&mut self, overlay: Overlay, col: u16, row: u16) {
-        let Some((_, index)) = self
-            .settings_item_hits
+        let Some((_, index)) = self.settings.item_hits
             .iter()
             .find(|(rect, _)| rect.contains(col, row))
             .copied()
         else {
-            self.last_settings_click = None;
+            self.settings.last_click = None;
             return;
         };
 
         match overlay {
             Overlay::Settings => {
-                self.settings_selected = index;
+                self.settings.selected = index;
                 if self.is_double_settings_click(overlay, index) {
                     self.activate_settings_root_item().await;
                 }
             }
             Overlay::SettingsPlayback => {
-                self.settings_playback_selected = index;
+                self.settings.playback_selected = index;
                 if self.is_double_settings_click(overlay, index) {
                     self.apply_settings_playback_delta(1);
                 }
             }
             Overlay::SettingsLyrics => {
                 // 这三行都是开关：左键直接改值（不用双击）。
-                self.settings_lyrics_selected = index;
+                self.settings.lyrics_selected = index;
                 self.apply_settings_lyrics_delta(1);
             }
             Overlay::SettingsDownload => {
                 // 与歌词浮窗同构：单击即执行（音质改值 / 路径进编辑 / 恢复默认两段式）。
-                self.settings_download_selected = index;
+                self.settings.download_selected = index;
                 self.activate_settings_download_item();
             }
             Overlay::SettingsKeybinds => {
-                self.settings_keybind_selected = index;
+                self.settings.keybind_selected = index;
                 if self.is_double_settings_click(overlay, index) {
                     self.begin_keybind_rebind(index);
                 }
@@ -6283,16 +6013,16 @@ impl App {
         }
 
         match self.overlay {
-            Some(Overlay::Settings) => step(&mut self.settings_selected, SETTINGS_ROOT_ITEMS),
+            Some(Overlay::Settings) => step(&mut self.settings.selected, SETTINGS_ROOT_ITEMS),
             Some(Overlay::SettingsPlayback) => step(
-                &mut self.settings_playback_selected,
+                &mut self.settings.playback_selected,
                 SETTINGS_PLAYBACK_ITEMS,
             ),
             Some(Overlay::SettingsLyrics) => {
-                step(&mut self.settings_lyrics_selected, SETTINGS_LYRICS_ITEMS)
+                step(&mut self.settings.lyrics_selected, SETTINGS_LYRICS_ITEMS)
             }
             Some(Overlay::SettingsKeybinds) => {
-                step(&mut self.settings_keybind_selected, SETTINGS_KEYBIND_ITEMS)
+                step(&mut self.settings.keybind_selected, SETTINGS_KEYBIND_ITEMS)
             }
             _ => {}
         }
@@ -6300,29 +6030,28 @@ impl App {
 
     fn is_double_settings_click(&mut self, overlay: Overlay, index: usize) -> bool {
         let now = Instant::now();
-        let is_double = self
-            .last_settings_click
+        let is_double = self.settings.last_click
             .map(|(at, o, i)| {
                 o == overlay
                     && i == index
                     && now.duration_since(at) <= Duration::from_millis(CONTENT_DOUBLE_CLICK_MS)
             })
             .unwrap_or(false);
-        self.last_settings_click = Some((now, overlay, index));
+        self.settings.last_click = Some((now, overlay, index));
         is_double
     }
 
     /// 设置根页选中项的执行（键盘 Enter 与双击共用）。
     async fn activate_settings_root_item(&mut self) {
-        match self.settings_selected {
+        match self.settings.selected {
             0..=3 => self.apply_settings_root_delta(1).await,
             4 => {
-                self.settings_playback_selected = 0;
+                self.settings.playback_selected = 0;
                 self.overlay = Some(Overlay::SettingsPlayback);
             }
             5 => self.open_keybind_settings(),
             6 => {
-                self.settings_lyrics_selected = 0;
+                self.settings.lyrics_selected = 0;
                 self.overlay = Some(Overlay::SettingsLyrics);
             }
             7..=9 => self.apply_settings_root_delta(1).await,
@@ -6337,7 +6066,7 @@ impl App {
 
     /// 开始重绑某条快捷键（键盘 Enter 与双击共用）。
     fn begin_keybind_rebind(&mut self, index: usize) {
-        self.settings_keybind_rebinding = Some(index);
+        self.settings.keybind_rebinding = Some(index);
         self.set_runtime_status(format!(
             "{} [{}]，{}",
             self.lang_text("正在重绑", "Rebinding"),
@@ -6355,7 +6084,7 @@ impl App {
             return;
         }
 
-        match self.settings_lyrics_selected {
+        match self.settings.lyrics_selected {
             0 => {
                 self.config.page_lyrics = !self.config.page_lyrics;
                 let _ = self.config.save();
@@ -6389,15 +6118,15 @@ impl App {
             KeyCode::Left => self.apply_settings_lyrics_delta(-1),
             KeyCode::Right | KeyCode::Enter => self.apply_settings_lyrics_delta(1),
             KeyCode::Up | KeyCode::BackTab => {
-                if self.settings_lyrics_selected == 0 {
-                    self.settings_lyrics_selected = SETTINGS_LYRICS_ITEMS - 1;
+                if self.settings.lyrics_selected == 0 {
+                    self.settings.lyrics_selected = SETTINGS_LYRICS_ITEMS - 1;
                 } else {
-                    self.settings_lyrics_selected -= 1;
+                    self.settings.lyrics_selected -= 1;
                 }
             }
             KeyCode::Down | KeyCode::Tab => {
-                self.settings_lyrics_selected =
-                    (self.settings_lyrics_selected + 1) % SETTINGS_LYRICS_ITEMS;
+                self.settings.lyrics_selected =
+                    (self.settings.lyrics_selected + 1) % SETTINGS_LYRICS_ITEMS;
             }
             _ => {}
         }
@@ -6405,9 +6134,9 @@ impl App {
 
     /// 打开「下载设置」子页：光标落在第一个可选中行（禁用态下就是路径行）。
     fn open_download_settings(&mut self) {
-        self.download_path_edit = None;
-        self.download_reset_armed = false;
-        self.settings_download_selected = self
+        self.settings.download_path_edit = None;
+        self.settings.download_reset_armed = false;
+        self.settings.download_selected = self
             .download_selectable_rows()
             .first()
             .copied()
@@ -6417,7 +6146,7 @@ impl App {
 
     /// 下载目录可用（系统里能找到可写位置）。不可用时除路径行外全部灰置。
     pub fn download_settings_enabled(&self) -> bool {
-        self.download_root.is_some()
+        self.downloads.root.is_some()
     }
 
     /// 某一行是否可选中：下载不可用时只有「音质」灰置——路径行是自救入口，
@@ -6439,17 +6168,17 @@ impl App {
         }
         let current = rows
             .iter()
-            .position(|row| *row == self.settings_download_selected)
+            .position(|row| *row == self.settings.download_selected)
             .unwrap_or(0) as i32;
         let next = (current + delta).rem_euclid(rows.len() as i32) as usize;
-        self.settings_download_selected = rows[next];
+        self.settings.download_selected = rows[next];
         // 换行即撤下待确认态：恢复默认必须连着选两次同一个地方。
-        self.download_reset_armed = false;
+        self.settings.download_reset_armed = false;
     }
 
     /// 下载设置页的「执行」：Enter、双击与单击共用。
     fn activate_settings_download_item(&mut self) {
-        match self.settings_download_selected {
+        match self.settings.download_selected {
             0 => self.apply_settings_download_delta(1),
             1 => self.begin_download_path_edit(),
             2 => self.activate_download_reset(),
@@ -6459,7 +6188,7 @@ impl App {
 
     /// 音质行：与播放设置同一套可选值（按会员放开）。
     fn apply_settings_download_delta(&mut self, delta: i32) {
-        if delta == 0 || self.settings_download_selected != 0 || !self.download_settings_enabled() {
+        if delta == 0 || self.settings.download_selected != 0 || !self.download_settings_enabled() {
             return;
         }
         let next = self
@@ -6476,8 +6205,8 @@ impl App {
     ///
     /// 下载不可用（显式 `Null` / 系统没有可写位置）时也允许：它就是那个出口。
     fn activate_download_reset(&mut self) {
-        if !self.download_reset_armed {
-            self.download_reset_armed = true;
+        if !self.settings.download_reset_armed {
+            self.settings.download_reset_armed = true;
             self.set_runtime_status(self.lang_text(
                 "再按一次确认恢复下载设置",
                 "Press again to restore download settings",
@@ -6485,7 +6214,7 @@ impl App {
             return;
         }
 
-        self.download_reset_armed = false;
+        self.settings.download_reset_armed = false;
         self.config.download_audio_quality = crate::data::config::default_download_audio_quality();
         self.config.download_path = None;
         let _ = self.config.save();
@@ -6500,12 +6229,11 @@ impl App {
     ///
     /// 填字面量 `Null` 回车 = 显式禁用下载；填绝对路径恢复。
     fn begin_download_path_edit(&mut self) {
-        let current = self
-            .download_root
+        let current = self.downloads.root
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| self.download_display_path());
-        self.download_path_edit = Some(DownloadPathEdit {
+        self.settings.download_path_edit = Some(DownloadPathEdit {
             cursor: current.chars().count(),
             buffer: current,
             window_col: 0,
@@ -6513,7 +6241,7 @@ impl App {
     }
 
     fn download_path_edit_insert(&mut self, ch: char) {
-        let Some(edit) = self.download_path_edit.as_mut() else {
+        let Some(edit) = self.settings.download_path_edit.as_mut() else {
             return;
         };
         if edit.cursor >= DOWNLOAD_PATH_MAX_CHARS {
@@ -6525,7 +6253,7 @@ impl App {
     }
 
     fn download_path_edit_backspace(&mut self) {
-        let Some(edit) = self.download_path_edit.as_mut() else {
+        let Some(edit) = self.settings.download_path_edit.as_mut() else {
             return;
         };
         if edit.cursor == 0 {
@@ -6537,7 +6265,7 @@ impl App {
     }
 
     fn download_path_edit_delete(&mut self) {
-        let Some(edit) = self.download_path_edit.as_mut() else {
+        let Some(edit) = self.settings.download_path_edit.as_mut() else {
             return;
         };
         if edit.cursor >= char_count(&edit.buffer) {
@@ -6548,7 +6276,7 @@ impl App {
     }
 
     fn download_path_edit_move(&mut self, delta: i32) {
-        let Some(edit) = self.download_path_edit.as_mut() else {
+        let Some(edit) = self.settings.download_path_edit.as_mut() else {
             return;
         };
         let last = char_count(&edit.buffer) as i32;
@@ -6556,20 +6284,20 @@ impl App {
     }
 
     fn download_path_edit_home(&mut self) {
-        if let Some(edit) = self.download_path_edit.as_mut() {
+        if let Some(edit) = self.settings.download_path_edit.as_mut() {
             edit.cursor = 0;
         }
     }
 
     fn download_path_edit_end(&mut self) {
-        if let Some(edit) = self.download_path_edit.as_mut() {
+        if let Some(edit) = self.settings.download_path_edit.as_mut() {
             edit.cursor = char_count(&edit.buffer);
         }
     }
 
     /// 回车确认：`Null` = 显式禁用；非法（空 / 非绝对 / 不可写）保留修改前的值。
     fn commit_download_path_edit(&mut self) {
-        let Some(edit) = self.download_path_edit.take() else {
+        let Some(edit) = self.settings.download_path_edit.take() else {
             return;
         };
         let raw = edit.buffer.trim().to_string();
@@ -6616,7 +6344,7 @@ impl App {
 
     /// 设置弹窗里显示的下载路径（`Null` = 系统里没有可用位置）。
     pub fn download_display_path(&self) -> String {
-        self.download_root
+        self.downloads.root
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| crate::app::download::DOWNLOAD_PATH_NULL.to_string())
@@ -6626,10 +6354,10 @@ impl App {
     ///
     /// 编辑态下所有按键都进输入框（含 `t`）；非编辑态沿用设置弹窗的习惯（Esc 返回、t 关闭）。
     fn handle_settings_download_key(&mut self, key: KeyEvent) {
-        if self.download_path_edit.is_some() {
+        if self.settings.download_path_edit.is_some() {
             match key.code {
                 KeyCode::Esc => {
-                    self.download_path_edit = None;
+                    self.settings.download_path_edit = None;
                     self.set_runtime_status(
                         self.lang_text("已取消修改下载路径", "Download path edit cancelled"),
                     );
@@ -6657,12 +6385,12 @@ impl App {
 
         match key.code {
             KeyCode::Esc => {
-                self.download_reset_armed = false;
+                self.settings.download_reset_armed = false;
                 self.overlay = Some(Overlay::Settings);
             }
             KeyCode::Char('t') | KeyCode::Char('T') => {
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
-                    self.download_reset_armed = false;
+                    self.settings.download_reset_armed = false;
                     self.close_overlay();
                 }
             }
@@ -6683,14 +6411,14 @@ impl App {
                 }
             }
             KeyCode::Up | KeyCode::BackTab => {
-                if self.settings_selected == 0 {
-                    self.settings_selected = SETTINGS_ROOT_ITEMS - 1;
+                if self.settings.selected == 0 {
+                    self.settings.selected = SETTINGS_ROOT_ITEMS - 1;
                 } else {
-                    self.settings_selected -= 1;
+                    self.settings.selected -= 1;
                 }
             }
             KeyCode::Down | KeyCode::Tab => {
-                self.settings_selected = (self.settings_selected + 1) % SETTINGS_ROOT_ITEMS;
+                self.settings.selected = (self.settings.selected + 1) % SETTINGS_ROOT_ITEMS;
             }
             KeyCode::Left => self.apply_settings_root_delta(-1).await,
             KeyCode::Right => self.apply_settings_root_delta(1).await,
@@ -6714,25 +6442,25 @@ impl App {
                 self.apply_settings_playback_delta(1);
             }
             KeyCode::Up | KeyCode::BackTab => {
-                if self.settings_playback_selected == 0 {
-                    self.settings_playback_selected = SETTINGS_PLAYBACK_ITEMS - 1;
+                if self.settings.playback_selected == 0 {
+                    self.settings.playback_selected = SETTINGS_PLAYBACK_ITEMS - 1;
                 } else {
-                    self.settings_playback_selected -= 1;
+                    self.settings.playback_selected -= 1;
                 }
             }
             KeyCode::Down | KeyCode::Tab => {
-                self.settings_playback_selected =
-                    (self.settings_playback_selected + 1) % SETTINGS_PLAYBACK_ITEMS;
+                self.settings.playback_selected =
+                    (self.settings.playback_selected + 1) % SETTINGS_PLAYBACK_ITEMS;
             }
             _ => {}
         }
     }
 
     fn handle_settings_keybinds_key(&mut self, key: KeyEvent) {
-        if let Some(index) = self.settings_keybind_rebinding {
+        if let Some(index) = self.settings.keybind_rebinding {
             match key.code {
                 KeyCode::Esc => {
-                    self.settings_keybind_rebinding = None;
+                    self.settings.keybind_rebinding = None;
                     self.set_runtime_status(
                         self.lang_text("已取消快捷键重绑", "Cancelled keybind rebinding"),
                     );
@@ -6777,7 +6505,7 @@ impl App {
                             binding
                         ));
                     }
-                    self.settings_keybind_rebinding = None;
+                    self.settings.keybind_rebinding = None;
                 }
             }
             return;
@@ -6794,32 +6522,32 @@ impl App {
 
         match key.code {
             KeyCode::Esc => {
-                self.settings_keybind_rebinding = None;
+                self.settings.keybind_rebinding = None;
                 self.overlay = Some(Overlay::Settings);
             }
             KeyCode::Char('t') | KeyCode::Char('T') => {
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
-                    self.settings_keybind_rebinding = None;
+                    self.settings.keybind_rebinding = None;
                     self.close_overlay();
                 }
             }
             KeyCode::Left => {
-                self.settings_keybind_rebinding = None;
+                self.settings.keybind_rebinding = None;
                 self.overlay = Some(Overlay::Settings);
             }
             KeyCode::Up | KeyCode::BackTab => {
-                if self.settings_keybind_selected == 0 {
-                    self.settings_keybind_selected = SETTINGS_KEYBIND_ITEMS - 1;
+                if self.settings.keybind_selected == 0 {
+                    self.settings.keybind_selected = SETTINGS_KEYBIND_ITEMS - 1;
                 } else {
-                    self.settings_keybind_selected -= 1;
+                    self.settings.keybind_selected -= 1;
                 }
             }
             KeyCode::Down | KeyCode::Tab => {
-                self.settings_keybind_selected =
-                    (self.settings_keybind_selected + 1) % SETTINGS_KEYBIND_ITEMS;
+                self.settings.keybind_selected =
+                    (self.settings.keybind_selected + 1) % SETTINGS_KEYBIND_ITEMS;
             }
             KeyCode::Enter => {
-                let idx = self.settings_keybind_selected;
+                let idx = self.settings.keybind_selected;
                 self.begin_keybind_rebind(idx);
             }
             _ => {}
@@ -6886,7 +6614,7 @@ impl App {
     }
 
     async fn apply_settings_root_delta(&mut self, delta: i32) {
-        match self.settings_selected {
+        match self.settings.selected {
             0 => {
                 let themes = ThemeLoader::list_themes();
                 let current = themes
@@ -6951,7 +6679,7 @@ impl App {
                     let _ = self.config.save();
                     if self.page == Page::Home {
                         if let Err(err) = self.load_home_recommendations().await {
-                            self.home.status_line = format!(
+                            self.browse.home.status_line = format!(
                                 "{}: {}",
                                 self.lang_text(
                                     "推荐歌单刷新失败",
@@ -6972,7 +6700,7 @@ impl App {
             return;
         }
 
-        match self.settings_playback_selected {
+        match self.settings.playback_selected {
             0 => {
                 self.config.visualize = self.config.visualize.cycle(delta);
                 let _ = self.config.save();
@@ -7069,15 +6797,15 @@ impl App {
     }
 
     async fn handle_home_key(&mut self, key: KeyEvent) {
-        if self.home_sidebar.expanded {
+        if self.browse.home_sidebar.expanded {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
                 match key.code {
                     KeyCode::Up => {
-                        self.home_sidebar.switch_section_prev();
+                        self.browse.home_sidebar.switch_section_prev();
                         return;
                     }
                     KeyCode::Down => {
-                        self.home_sidebar.switch_section_next();
+                        self.browse.home_sidebar.switch_section_next();
                         return;
                     }
                     _ => {}
@@ -7086,11 +6814,11 @@ impl App {
 
             match key.code {
                 KeyCode::Esc => {
-                    self.home_sidebar.expanded = false;
+                    self.browse.home_sidebar.expanded = false;
                     self.animate_home_sidebar();
                 }
-                KeyCode::Up | KeyCode::BackTab => self.home_sidebar.focus_prev(),
-                KeyCode::Down | KeyCode::Tab => self.home_sidebar.focus_next(),
+                KeyCode::Up | KeyCode::BackTab => self.browse.home_sidebar.focus_prev(),
+                KeyCode::Down | KeyCode::Tab => self.browse.home_sidebar.focus_next(),
                 KeyCode::Enter => self.open_focused_home_sidebar_playlist().await,
                 _ => {}
             }
@@ -7098,12 +6826,12 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Tab => self.home.focus_next(),
-            KeyCode::BackTab => self.home.focus_prev(),
-            KeyCode::Left => self.home.focus_left(),
-            KeyCode::Right => self.home.focus_right(),
-            KeyCode::Up => self.home.focus_up(),
-            KeyCode::Down => self.home.focus_down(),
+            KeyCode::Tab => self.browse.home.focus_next(),
+            KeyCode::BackTab => self.browse.home.focus_prev(),
+            KeyCode::Left => self.browse.home.focus_left(),
+            KeyCode::Right => self.browse.home.focus_right(),
+            KeyCode::Up => self.browse.home.focus_up(),
+            KeyCode::Down => self.browse.home.focus_down(),
             KeyCode::Enter => self.enter_home_tile().await,
             _ => {}
         }
@@ -7120,15 +6848,15 @@ impl App {
 
         match key.code {
             KeyCode::Up | KeyCode::BackTab => {
-                let _ = self.playlist.focus_prev();
+                let _ = self.browse.playlist.focus_prev();
             }
             KeyCode::Down | KeyCode::Tab => {
-                let _ = self.playlist.focus_next();
+                let _ = self.browse.playlist.focus_next();
             }
             KeyCode::Enter => self.play_focused_playlist_track().await,
             KeyCode::Esc | KeyCode::Left => {
                 if let Some(snapshot) = self.playlist_section_return_snapshot.take() {
-                    self.playlist = snapshot;
+                    self.browse.playlist = snapshot;
                     return;
                 }
                 self.page = match self.playlist_return_page {
@@ -7152,18 +6880,18 @@ impl App {
 
         match key.code {
             KeyCode::Tab => {
-                let _ = self.author.focus_next();
+                let _ = self.browse.author.focus_next();
             }
             KeyCode::BackTab => {
-                let _ = self.author.focus_prev();
+                let _ = self.browse.author.focus_prev();
             }
-            KeyCode::Left => self.author.focus_left(),
-            KeyCode::Right => self.author.focus_right(),
+            KeyCode::Left => self.browse.author.focus_left(),
+            KeyCode::Right => self.browse.author.focus_right(),
             KeyCode::Up => {
-                let _ = self.author.focus_up();
+                let _ = self.browse.author.focus_up();
             }
             KeyCode::Down => {
-                let _ = self.author.focus_down();
+                let _ = self.browse.author.focus_down();
             }
             KeyCode::Enter => self.play_focused_author_tile().await,
             KeyCode::Esc => {
@@ -7176,22 +6904,21 @@ impl App {
     fn tick_search_box_animation(&mut self) {
         if matches!(self.overlay, Some(Overlay::SearchBox)) {
             // time-based：动画时长与驱动帧率解耦，与 startup_loading 同风格
-            let started_at = self
-                .search_box_anim_started_at
+            let started_at = self.input.search_box_anim_started_at
                 .get_or_insert_with(Instant::now);
             let elapsed = started_at.elapsed();
             if elapsed >= SEARCH_BOX_ANIM_DURATION {
-                self.search_box_anim_height = SEARCH_BOX_TARGET_HEIGHT;
+                self.input.search_box_anim_height = SEARCH_BOX_TARGET_HEIGHT;
                 return;
             }
             let t = elapsed.as_secs_f32() / SEARCH_BOX_ANIM_DURATION.as_secs_f32();
             // ease-out：先快后慢（cubic-bezier y 曲线，p2y=0.7）
             let eased = cubic_bezier_y(t, 0.0, 0.7);
-            self.search_box_anim_height =
+            self.input.search_box_anim_height =
                 ((SEARCH_BOX_TARGET_HEIGHT as f32) * eased).round() as u16;
         } else {
-            self.search_box_anim_height = 0;
-            self.search_box_anim_started_at = None;
+            self.input.search_box_anim_height = 0;
+            self.input.search_box_anim_started_at = None;
         }
     }
 
@@ -7237,8 +6964,8 @@ impl App {
     }
 
     fn tick_home_sidebar_animation(&mut self) {
-        let target = if self.home_sidebar.expanded { 1.0 } else { 0.0 };
-        let state = &mut self.home_sidebar;
+        let target = if self.browse.home_sidebar.expanded { 1.0 } else { 0.0 };
+        let state = &mut self.browse.home_sidebar;
         if (state.anim_progress - target).abs() < 0.001 {
             state.anim_progress = target;
             state.anim_started_at = None;
@@ -7262,31 +6989,31 @@ impl App {
 
     /// 启动一次侧边栏滑出/收起动画（记录当前进度作为动画起点，支持中途反向）。
     fn animate_home_sidebar(&mut self) {
-        let target = if self.home_sidebar.expanded { 1.0 } else { 0.0 };
-        if (self.home_sidebar.anim_progress - target).abs() < 0.001 {
+        let target = if self.browse.home_sidebar.expanded { 1.0 } else { 0.0 };
+        if (self.browse.home_sidebar.anim_progress - target).abs() < 0.001 {
             // 已在目标态：无需动画，清掉可能的残留状态
-            self.home_sidebar.anim_progress = target;
-            self.home_sidebar.anim_started_at = None;
+            self.browse.home_sidebar.anim_progress = target;
+            self.browse.home_sidebar.anim_started_at = None;
             return;
         }
-        self.home_sidebar.anim_from = self.home_sidebar.anim_progress;
-        self.home_sidebar.anim_started_at = Some(Instant::now());
+        self.browse.home_sidebar.anim_from = self.browse.home_sidebar.anim_progress;
+        self.browse.home_sidebar.anim_started_at = Some(Instant::now());
     }
 
     fn begin_startup_loading(&mut self, target: Page) {
         self.page = Page::Loading;
         self.overlay = None;
-        self.startup_loading_progress = 0.0;
-        self.startup_loading_started_at = Some(Instant::now());
-        self.startup_loading_complete_started_at = None;
-        self.startup_loading_complete_requested = false;
-        self.startup_loading_target = target;
+        self.startup.progress = 0.0;
+        self.startup.started_at = Some(Instant::now());
+        self.startup.complete_started_at = None;
+        self.startup.complete_requested = false;
+        self.startup.target = target;
     }
 
     fn finish_startup_loading(&mut self) {
-        self.startup_loading_complete_requested = true;
-        if self.startup_loading_complete_started_at.is_none() {
-            self.startup_loading_complete_started_at = Some(Instant::now());
+        self.startup.complete_requested = true;
+        if self.startup.complete_started_at.is_none() {
+            self.startup.complete_started_at = Some(Instant::now());
         }
     }
 
@@ -7295,43 +7022,42 @@ impl App {
             return;
         }
 
-        let Some(started_at) = self.startup_loading_started_at else {
-            self.startup_loading_started_at = Some(Instant::now());
+        let Some(started_at) = self.startup.started_at else {
+            self.startup.started_at = Some(Instant::now());
             return;
         };
 
         let elapsed = started_at.elapsed().as_secs_f32();
-        self.startup_loading_progress = self.startup_loading_progress();
+        self.startup.progress = self.startup_loading_progress();
 
         // 让位条件：数据齐了、进度条收尾 ramp 跑满、且满足最短可见时长。
         // 少了 ramp 这一条，进度条会停在一半就消失。
-        let ramp_done = self
-            .startup_loading_complete_started_at
+        let ramp_done = self.startup.complete_started_at
             .map(|completed_at| {
                 completed_at.elapsed().as_secs_f32() >= STARTUP_LOADING_COMPLETE_RAMP_SECS
             })
             .unwrap_or(false);
-        if self.startup_loading_complete_requested
+        if self.startup.complete_requested
             && ramp_done
             && elapsed >= STARTUP_LOADING_MIN_VISIBLE_SECS
         {
-            self.page = self.startup_loading_target;
-            self.startup_loading_progress = 0.0;
-            self.startup_loading_started_at = None;
-            self.startup_loading_complete_started_at = None;
-            self.startup_loading_complete_requested = false;
+            self.page = self.startup.target;
+            self.startup.progress = 0.0;
+            self.startup.started_at = None;
+            self.startup.complete_started_at = None;
+            self.startup.complete_requested = false;
         }
     }
 
     /// 加载页进度：后台初始化完成的步数 + 当前步的时间缓动。
     fn startup_loading_progress(&self) -> f32 {
         startup_loading_progress(
-            self.startup.step_done(),
-            self.startup.step_total(),
-            self.startup.step_elapsed(),
-            self.startup_loading_complete_started_at
+            self.startup.init.step_done(),
+            self.startup.init.step_total(),
+            self.startup.init.step_elapsed(),
+            self.startup.complete_started_at
                 .map(|completed_at| completed_at.elapsed().as_secs_f32()),
-            self.startup_loading_complete_requested,
+            self.startup.complete_requested,
         )
     }
 
@@ -7340,7 +7066,7 @@ impl App {
             return 0.0;
         }
 
-        if self.startup_loading_started_at.is_none() {
+        if self.startup.started_at.is_none() {
             return 0.0;
         }
 
@@ -7373,7 +7099,7 @@ impl App {
     async fn handle_content_click(&mut self, col: u16, row: u16) -> bool {
         match self.page {
             Page::Home => {
-                if self.home_sidebar.is_visible() {
+                if self.browse.home_sidebar.is_visible() {
                     if let Some(panel) = self.home_sidebar_panel_hit {
                         if panel.contains(col, row) {
                             let sidebar_hit = self
@@ -7382,8 +7108,8 @@ impl App {
                                 .find(|(rect, _)| rect.contains(col, row))
                                 .map(|(_, hit)| *hit);
                             if let Some(hit) = sidebar_hit {
-                                if self.home_sidebar.expanded {
-                                    self.home_sidebar.set_focus(hit.section, hit.index);
+                                if self.browse.home_sidebar.expanded {
+                                    self.browse.home_sidebar.set_focus(hit.section, hit.index);
                                     if self.is_double_content_click(
                                         Page::Home,
                                         Self::home_sidebar_double_click_index(hit),
@@ -7398,7 +7124,7 @@ impl App {
                         }
                     }
 
-                    if self.home_sidebar.expanded {
+                    if self.browse.home_sidebar.expanded {
                         self.last_content_click = None;
                         return true;
                     }
@@ -7410,8 +7136,8 @@ impl App {
                     .find(|(rect, _)| rect.contains(col, row))
                     .map(|(_, idx)| *idx);
                 if let Some(idx) = hit {
-                    if idx < self.home.tiles.len() {
-                        self.home.focused_idx = idx;
+                    if idx < self.browse.home.tiles.len() {
+                        self.browse.home.focused_idx = idx;
                         if self.is_double_content_click(Page::Home, idx) {
                             self.enter_home_tile().await;
                         }
@@ -7439,8 +7165,8 @@ impl App {
                     .find(|(rect, _)| rect.contains(col, row))
                     .map(|(_, idx)| *idx);
                 if let Some(idx) = hit {
-                    if idx < self.playlist.tracks.len() {
-                        self.playlist.set_focus(idx);
+                    if idx < self.browse.playlist.tracks.len() {
+                        self.browse.playlist.set_focus(idx);
                         if self.is_double_content_click(Page::Playlist, idx) {
                             self.play_focused_playlist_track().await;
                         }
@@ -7455,8 +7181,8 @@ impl App {
                     .find(|(rect, _)| rect.contains(col, row))
                     .map(|(_, idx)| *idx);
                 if let Some(idx) = hit {
-                    if idx < self.author.tiles.len() {
-                        self.author.set_focus(idx);
+                    if idx < self.browse.author.tiles.len() {
+                        self.browse.author.set_focus(idx);
                         if self.is_double_content_click(Page::Author, idx) {
                             self.play_focused_author_tile().await;
                         }
@@ -7483,7 +7209,7 @@ impl App {
                     .find(|(rect, _)| rect.contains(col, row))
                     .map(|(_, idx)| *idx);
                 if let Some(idx) = hit {
-                    if idx < self.search.results.len() {
+                    if idx < self.search.results().len() {
                         self.search.set_focus(idx);
                         if self.is_double_content_click(Page::Search, idx) {
                             self.activate_focused_search_result().await;
@@ -7501,25 +7227,25 @@ impl App {
         if self.page != Page::Search {
             self.search_return_page = Page::Home;
         }
-        self.search_box_input = self.search.query.clone();
-        self.search_box_cursor = char_count(&self.search_box_input);
-        self.search_box_anim_height = 0;
-        self.search_box_anim_started_at = Some(Instant::now());
+        self.input.search_box_input = self.search.query.clone();
+        self.input.search_box_cursor = char_count(&self.input.search_box_input);
+        self.input.search_box_anim_height = 0;
+        self.input.search_box_anim_started_at = Some(Instant::now());
         self.overlay = Some(Overlay::SearchBox);
     }
 
     fn close_overlay(&mut self) {
         self.overlay = None;
-        self.search_box_anim_height = 0;
-        self.search_box_anim_started_at = None;
-        self.last_settings_click = None;
-        self.download_path_edit = None;
-        self.download_reset_armed = false;
+        self.input.search_box_anim_height = 0;
+        self.input.search_box_anim_started_at = None;
+        self.settings.last_click = None;
+        self.settings.download_path_edit = None;
+        self.settings.download_reset_armed = false;
         self.clear_settings_item_hits();
     }
 
     async fn execute_search_from_box(&mut self) {
-        let raw_query = self.search_box_input.trim().to_string();
+        let raw_query = self.input.search_box_input.trim().to_string();
         let (keywords, filter) = parse_search_input(&raw_query);
         if keywords.is_empty() && !is_followed_author_query(&keywords, filter) {
             self.search.status_line = self
@@ -7563,8 +7289,7 @@ impl App {
             return;
         };
 
-        let artist_line = self
-            .now_playing
+        let artist_line = self.playback.now_playing
             .as_ref()
             .map(|track| track.artist.clone())
             .unwrap_or_default();
@@ -7583,7 +7308,7 @@ impl App {
             }
         };
 
-        self.author = AuthorState::placeholder(
+        self.browse.author = AuthorState::placeholder(
             title,
             self.lang_text("正在加载作者…", "Loading artist…")
                 .to_string(),
@@ -7617,8 +7342,7 @@ impl App {
 
         // 标题先显示正在播放的专辑名；解析失败时也只是把错误写进简介。
         let title = {
-            let album = self
-                .now_playing
+            let album = self.playback.now_playing
                 .as_ref()
                 .map(|track| track.album.trim().to_string())
                 .unwrap_or_default();
@@ -7629,7 +7353,7 @@ impl App {
             }
         };
 
-        self.playlist = PlaylistState::placeholder(
+        self.browse.playlist = PlaylistState::placeholder(
             title,
             self.lang_text("正在加载专辑…", "Loading album…")
                 .to_string(),
@@ -7641,7 +7365,7 @@ impl App {
 
         let fut = fetch_album_page_from_song(self.api.clone(), self.config.language, song_id);
         let fut: PlaylistFetchTask = Box::pin(async move { Some(fut.await) });
-        self.playlist_page_kind = PlaylistPageKind::Album;
+        self.downloads.page_kind = PlaylistPageKind::Album;
         self.playlist_fetch = Some(PlaylistFetchSlot {
             kind: PlaylistPageKind::Album,
             future: shot_and_share(fut),
@@ -7842,7 +7566,7 @@ impl App {
 
         if home_more_recommend_changed && self.page != Page::Login {
             if let Err(err) = self.load_home_recommendations().await {
-                self.home.status_line = format!(
+                self.browse.home.status_line = format!(
                     "{}: {}",
                     self.lang_text("推荐歌单刷新失败", "Failed to refresh home recommendations",),
                     err
@@ -7854,7 +7578,7 @@ impl App {
     pub async fn build_fullscreen_bootstrap(&mut self) -> crate::tmplayer::FullscreenBootstrap {
         let mut bootstrap = crate::tmplayer::FullscreenBootstrap::default();
 
-        if self.now_playing.is_none() {
+        if self.playback.now_playing.is_none() {
             return bootstrap;
         }
 
@@ -7864,15 +7588,14 @@ impl App {
 
         if playlist_cover.is_none() {
             // 用播放队列的来源封面，而非最后访问的页面封面。
-            if let Some(cover_url) = self.playback_queue_cover_url.clone() {
+            if let Some(cover_url) = self.playback.playback_queue_cover_url.clone() {
                 playlist_cover = self.fetch_cover_with_disk_cache(&cover_url).await
             }
         }
 
         // Prefer persistent now-playing queue so fullscreen follows actual playback state.
-        if !self.playback_queue.is_empty() {
-            bootstrap.playlist = self
-                .playback_queue
+        if !self.playback.playback_queue.is_empty() {
+            bootstrap.playlist = self.playback.playback_queue
                 .iter()
                 .map(|track| crate::tmplayer::FullscreenPlaylistItemSeed {
                     id: Some(track.song_id.clone()),
@@ -7883,15 +7606,14 @@ impl App {
                 })
                 .collect();
             if !bootstrap.playlist.is_empty() {
-                bootstrap.current_index = self
-                    .playback_index
+                bootstrap.current_index = self.playback.playback_index
                     .map(|index| index.min(bootstrap.playlist.len() - 1));
             }
         }
 
         // Keep fullscreen in true idle state when nothing is actually playing.
         if bootstrap.playlist.is_empty() {
-            if let Some(track) = self.now_playing.as_ref() {
+            if let Some(track) = self.playback.now_playing.as_ref() {
                 bootstrap
                     .playlist
                     .push(crate::tmplayer::FullscreenPlaylistItemSeed {
@@ -7911,7 +7633,7 @@ impl App {
                 .unwrap_or(0)
                 .min(bootstrap.playlist.len() - 1);
 
-            if let Some(now) = self.now_playing.as_ref() {
+            if let Some(now) = self.playback.now_playing.as_ref() {
                 if let Some(found) = bootstrap.playlist.iter().position(|item| {
                     item.id
                         .as_deref()
@@ -7930,12 +7652,12 @@ impl App {
                 artist: active.artist,
                 album: active.album,
                 duration: active.duration,
-                liked: self.now_playing_liked,
+                liked: self.playback.now_playing_liked,
                 cover: None,
                 lyrics: None,
             };
 
-            if let Some(now) = self.now_playing.as_ref() {
+            if let Some(now) = self.playback.now_playing.as_ref() {
                 seed.title = now.title.clone();
                 seed.artist = now.artist.clone();
                 seed.album = now.album.clone();
@@ -7944,8 +7666,7 @@ impl App {
                 seed.lyrics = now.lyrics.clone();
             }
 
-            let song_id = self
-                .now_playing
+            let song_id = self.playback.now_playing
                 .as_ref()
                 .map(|track| track.song_id.clone())
                 .or_else(|| bootstrap.playlist[active_idx].id.clone());
@@ -7988,8 +7709,7 @@ impl App {
                 }
 
                 if seed.cover.is_none() {
-                    let fallback_cover_url = self
-                        .now_playing
+                    let fallback_cover_url = self.playback.now_playing
                         .as_ref()
                         .and_then(|track| track.cover_url.clone());
                     if let Some(cover_url) = fallback_cover_url.as_deref() {
@@ -8016,11 +7736,10 @@ impl App {
             }
 
             if playlist_cover.is_none() {
-                let first_track = self
-                    .playback_queue
+                let first_track = self.playback.playback_queue
                     .first()
                     .cloned()
-                    .or_else(|| self.now_playing.clone());
+                    .or_else(|| self.playback.now_playing.clone());
 
                 if let Some(first_track) = first_track {
                     playlist_cover = first_track.cover.clone();
@@ -8060,7 +7779,7 @@ impl App {
 
     pub fn set_runtime_status(&mut self, text: impl Into<String>) {
         let text = text.into();
-        self.home.status_line = text.clone();
+        self.browse.home.status_line = text.clone();
         self.search.status_line = text;
     }
 
@@ -8073,12 +7792,11 @@ impl App {
     }
 
     fn persist_playback_memory(&self) {
-        if !self.config.playback_memory || self.playback_queue.is_empty() {
+        if !self.config.playback_memory || self.playback.playback_queue.is_empty() {
             return;
         }
 
-        let queue = self
-            .playback_queue
+        let queue = self.playback.playback_queue
             .iter()
             .map(|track| playback_session::PlaybackSessionTrack {
                 song_id: track.song_id.clone(),
@@ -8092,9 +7810,9 @@ impl App {
 
         let record = playback_session::PlaybackSessionRecord {
             queue,
-            current_index: self.playback_index,
-            repeat_mode: Some(playback_repeat_mode_key(self.playback_repeat_mode).to_string()),
-            source_playlist_id: self.playback_queue_source_id.clone(),
+            current_index: self.playback.playback_index,
+            repeat_mode: Some(playback_repeat_mode_key(self.playback.playback_repeat_mode).to_string()),
+            source_playlist_id: self.playback.playback_queue_source_id.clone(),
             updated_at: 0,
         };
 
@@ -8140,17 +7858,17 @@ impl App {
             .as_deref()
             .and_then(playback_repeat_mode_from_key)
         {
-            self.playback_repeat_mode = mode;
+            self.playback.playback_repeat_mode = mode;
         }
 
-        self.playback_queue = queue;
-        self.playback_queue_cover_url = None;
+        self.playback.playback_queue = queue;
+        self.playback.playback_queue_cover_url = None;
         // 还原队列来源，使漫游的尾部追加/续播/封面跟随在重启后依然生效。
-        self.playback_queue_source_id = record.source_playlist_id.clone();
+        self.playback.playback_queue_source_id = record.source_playlist_id.clone();
         let target = record
             .current_index
             .unwrap_or(0)
-            .min(self.playback_queue.len().saturating_sub(1));
+            .min(self.playback.playback_queue.len().saturating_sub(1));
         self.play_queue_index(target, false).await;
         self.set_runtime_status(self.lang_text("已恢复播放记忆", "Playback memory restored"));
     }
@@ -8178,7 +7896,7 @@ impl App {
     }
 
     pub fn current_page_lyric_lines(&self) -> (String, String) {
-        let Some(track) = self.now_playing.as_ref() else {
+        let Some(track) = self.playback.now_playing.as_ref() else {
             return (String::new(), String::new());
         };
         let Some(lines) = track.lyrics.as_ref() else {
@@ -8213,64 +7931,52 @@ impl App {
         self.close_overlay();
         self.page = Page::Login;
         self.search_return_page = Page::Home;
-        self.search_box_input.clear();
-        self.settings_selected = 0;
-        self.settings_playback_selected = 0;
-        self.settings_keybind_selected = 0;
-        self.settings_keybind_rebinding = None;
-        self.settings_keybind_scroll = 0;
+        self.input.search_box_input.clear();
+        self.settings.reset_navigation();
         self.session_cookie = None;
         self.api.clear_cookie();
         let _ = session::clear_cookie();
         self.clear_playback_memory();
         let _ = private_roam::clear();
-        self.private_roam = PrivateRoamState::default();
+        self.browse.reset_pages();
         self.vip_audio_unlocked = false;
         self.config.audio_quality = self.config.audio_quality.clamp_for_vip(false);
 
         self.login = LoginState::default();
-        self.search = SearchState::default();
+        self.search = SearchController::default();
         // 登出同样要作废在途拉取：它们带着上一账号的 cookie 落地，会把已清空的
         // 状态写回旧账号的数据（同 `apply_playlist_fetch` 的规则）。
         self.playlist_fetch = None;
         self.author_fetch = None;
-        self.playlist = PlaylistState::default();
-        self.author = AuthorState::default();
-        self.home = HomeState::default();
-        self.home_sidebar = HomeSidebarState::default();
         self.playlist_section_return_snapshot = None;
-        self.startup_loading_progress = 0.0;
-        self.startup_loading_started_at = None;
-        self.startup_loading_complete_started_at = None;
-        self.startup_loading_complete_requested = false;
+        self.startup.progress = 0.0;
+        self.startup.started_at = None;
+        self.startup.complete_started_at = None;
+        self.startup.complete_requested = false;
         self.last_global_hotkey_at = None;
         self.last_content_click = None;
         self.clear_content_hits();
         self.audio_player.stop();
-        self.now_playing = None;
-        self.now_playing_liked = false;
-        self.like_machine.clear();
-        self.playback_queue.clear();
-        self.playback_index = None;
-        self.playback_state = PlaybackRuntimeState::Stopped;
-        self.playback_repeat_mode = PlaybackRepeatMode::Sequence;
+        self.playback.now_playing = None;
+        self.playback.clear_like_state();
+        self.playback.clear_queue();
 
         self.refresh_qr_login().await;
     }
 
     async fn enter_home_tile(&mut self) {
-        if self.home.tiles.is_empty() {
+        if self.browse.home.tiles.is_empty() {
             return;
         }
 
-        let focused = self.home.focused_idx.min(self.home.tiles.len() - 1);
-        let title = self.home.tiles[focused].title.clone();
-        let Some(playlist_id) = self.home.tiles[focused].id.clone() else {
-            self.home.status_line = "当前块暂无可用歌单".to_string();
+        let focused = self.browse.home.focused_idx.min(self.browse.home.tiles.len() - 1);
+        let title = self.browse.home.tiles[focused].title.clone();
+        let Some(playlist_id) = self.browse.home.tiles[focused].id.clone() else {
+            self.browse.home.status_line = "当前块暂无可用歌单".to_string();
             return;
         };
 
-        self.home.status_line = format!("正在加载 {}", title);
+        self.browse.home.status_line = format!("正在加载 {}", title);
         let result = if playlist_id == HOME_DAILY_RECOMMEND_TILE_ID {
             self.load_daily_recommend_playlist().await
         } else if playlist_id == HOME_PRIVATE_ROAM_TILE_ID {
@@ -8284,10 +7990,10 @@ impl App {
                 self.playlist_return_page = Page::Home;
                 self.playlist_section_return_snapshot = None;
                 self.page = Page::Playlist;
-                self.home.status_line = format!("已打开 {}", title);
+                self.browse.home.status_line = format!("已打开 {}", title);
             }
             Err(err) => {
-                self.home.status_line = format!("打开歌单失败: {}", err);
+                self.browse.home.status_line = format!("打开歌单失败: {}", err);
             }
         }
     }
@@ -8453,10 +8159,10 @@ impl App {
 
     /// 应用首页推荐 tile（首页刷新与启动初始化共用）。
     fn apply_home_tiles(&mut self, tiles: Vec<HomeTile>) {
-        self.home.set_tiles(tiles);
+        self.browse.home.set_tiles(tiles);
         // 私人漫游 tile 封面：未播放过时为首歌封面，播放后为最后播放歌曲的封面
         self.sync_home_roam_tile_cover();
-        self.home.status_line = self
+        self.browse.home.status_line = self
             .lang_text(
                 "方向键/Tab 切换，Enter 打开歌单",
                 "Use arrows/Tab to focus, Enter to open playlist",
@@ -8465,21 +8171,21 @@ impl App {
     }
 
     async fn resolve_current_user_id(&mut self) -> Result<String> {
-        if let Some(uid) = self.home_sidebar.user_id.as_ref() {
+        if let Some(uid) = self.browse.home_sidebar.user_id.as_ref() {
             return Ok(uid.clone());
         }
 
         let profile = fetch_account_profile(&mut self.api, self.config.language).await?;
         self.apply_account_profile(profile);
-        Ok(self.home_sidebar.user_id.clone().unwrap_or_default())
+        Ok(self.browse.home_sidebar.user_id.clone().unwrap_or_default())
     }
 
     /// 应用账号档案（侧边栏用户名 / uid / 我喜欢歌单 id）。
     fn apply_account_profile(&mut self, profile: AccountProfile) {
-        self.home_sidebar.user_id = Some(profile.uid);
-        self.home_sidebar.liked_playlist_id = profile.liked_playlist_id;
+        self.browse.home_sidebar.user_id = Some(profile.uid);
+        self.browse.home_sidebar.liked_playlist_id = profile.liked_playlist_id;
         if let Some(name) = profile.name {
-            self.home_sidebar.user_name = name;
+            self.browse.home_sidebar.user_name = name;
         }
     }
 
@@ -8492,13 +8198,13 @@ impl App {
 
     /// 应用「我喜欢的音乐」全量 id 集合。
     fn apply_liked_song_ids(&mut self, ids: HashSet<String>) {
-        self.like_machine.replace_confirmed(ids);
+        self.playback.like_machine.replace_confirmed(ids);
         self.refresh_now_playing_like_state();
     }
 
     fn is_liked_playlist(&self, playlist_id: &str, title: Option<&str>) -> bool {
         is_liked_playlist(
-            self.home_sidebar.liked_playlist_id.as_deref(),
+            self.browse.home_sidebar.liked_playlist_id.as_deref(),
             playlist_id,
             title,
         )
@@ -8510,8 +8216,8 @@ impl App {
             self.config.language,
             playlist_id.to_string(),
             None,
-            self.home_sidebar.liked_playlist_id.clone(),
-            self.home_sidebar.user_id.clone(),
+            self.browse.home_sidebar.liked_playlist_id.clone(),
+            self.browse.home_sidebar.user_id.clone(),
         )
         .await
         .map_err(anyhow::Error::msg)?;
@@ -8525,13 +8231,13 @@ impl App {
     /// 会把刚打开的页面覆盖成被放弃的那一份（`tick_playlist_fetch` 只看句柄）。
     fn apply_playlist_fetch(&mut self, fetch: PlaylistFetch) {
         self.playlist_fetch = None;
-        self.playlist.id = Some(fetch.id);
-        self.playlist.title = fetch.title;
-        self.playlist.artist = fetch.artist;
-        self.playlist.description = fetch.description;
-        self.playlist.set_tracks(fetch.tracks);
+        self.browse.playlist.id = Some(fetch.id);
+        self.browse.playlist.title = fetch.title;
+        self.browse.playlist.artist = fetch.artist;
+        self.browse.playlist.description = fetch.description;
+        self.browse.playlist.set_tracks(fetch.tracks);
         if let Some(url) = fetch.cover_url {
-            self.playlist.cover.load(self.api.clone(), url);
+            self.browse.playlist.cover.load(self.api.clone(), url);
         }
 
         if let Some(liked) = fetch.liked {
@@ -8568,37 +8274,36 @@ impl App {
 
         // 这一页换成每日推荐：在途的占位拉取作废（同 `apply_playlist_fetch`）。
         self.playlist_fetch = None;
-        self.playlist.id = Some(HOME_DAILY_RECOMMEND_TILE_ID.to_string());
-        self.playlist.title = self
+        self.browse.playlist.id = Some(HOME_DAILY_RECOMMEND_TILE_ID.to_string());
+        self.browse.playlist.title = self
             .lang_text("每日推荐", "Daily Recommendations")
             .to_string();
-        self.playlist.artist = self
+        self.browse.playlist.artist = self
             .lang_text("网易云音乐", "Netease Cloud Music")
             .to_string();
-        self.playlist.description = self
+        self.browse.playlist.description = self
             .lang_text(
                 "来自网易云每日推荐歌曲，按 Enter 播放",
                 "Daily songs from Netease. Press Enter to play",
             )
             .to_string();
-        self.playlist.set_tracks(tracks);
-        cover_url.map(|x| self.playlist.cover.load(self.api.clone(), x));
+        self.browse.playlist.set_tracks(tracks);
+        cover_url.map(|x| self.browse.playlist.cover.load(self.api.clone(), x));
         Ok(())
     }
 
     async fn load_private_roam_playlist(&mut self) -> Result<()> {
         // 兜底：内存列表为空（首次使用且启动刷新失败过）时现场拉取
-        if self.private_roam.tracks.is_empty() {
+        if self.browse.private_roam.tracks.is_empty() {
             let fetched = fetch_private_roam_songs(&mut self.api).await;
             if fetched.is_empty() {
                 return Err(anyhow!(
                     self.lang_text("私人漫游为空", "Private roam is empty")
                 ));
             }
-            self.private_roam.tracks = fetched;
-            if self.private_roam.cover_url.is_none() {
-                self.private_roam.cover_url = self
-                    .private_roam
+            self.browse.private_roam.tracks = fetched;
+            if self.browse.private_roam.cover_url.is_none() {
+                self.browse.private_roam.cover_url = self.browse.private_roam
                     .tracks
                     .first()
                     .and_then(|track| track.cover_url.clone());
@@ -8606,38 +8311,38 @@ impl App {
             self.persist_private_roam();
         }
 
-        let tracks = self.private_roam.tracks.clone();
-        let cover_url = self.private_roam.cover_url.clone();
-        let focus_index = self.private_roam.last_played_index;
+        let tracks = self.browse.private_roam.tracks.clone();
+        let cover_url = self.browse.private_roam.cover_url.clone();
+        let focus_index = self.browse.private_roam.last_played_index;
 
         // 这一页换成私人漫游：在途的占位拉取作废（同 `apply_playlist_fetch`）。
         self.playlist_fetch = None;
-        self.playlist.id = Some(HOME_PRIVATE_ROAM_TILE_ID.to_string());
-        self.playlist.title = self.lang_text("私人漫游", "Private Roam").to_string();
-        self.playlist.artist = self
+        self.browse.playlist.id = Some(HOME_PRIVATE_ROAM_TILE_ID.to_string());
+        self.browse.playlist.title = self.lang_text("私人漫游", "Private Roam").to_string();
+        self.browse.playlist.artist = self
             .lang_text("网易云音乐", "Netease Cloud Music")
             .to_string();
-        self.playlist.description = self
+        self.browse.playlist.description = self
             .lang_text(
                 "来自网易云私人漫游，按 Enter 播放",
                 "Private roam songs from Netease. Press Enter to play",
             )
             .to_string();
-        self.playlist.set_tracks(tracks);
+        self.browse.playlist.set_tracks(tracks);
         // 进入漫游后默认聚焦到最后播放的歌曲
         if let Some(index) = focus_index {
-            if index < self.playlist.tracks.len() {
-                self.playlist.focused_idx = index;
-                self.playlist.scroll_offset = index;
+            if index < self.browse.playlist.tracks.len() {
+                self.browse.playlist.focused_idx = index;
+                self.browse.playlist.scroll_offset = index;
             }
         }
-        cover_url.map(|x| self.playlist.cover.load(self.api.clone(), x));
+        cover_url.map(|x| self.browse.playlist.cover.load(self.api.clone(), x));
         Ok(())
     }
 
     /// 今天是否已刷新过私人漫游（刷新判据只有这一处）。
     fn private_roam_refreshed_today(&self) -> bool {
-        self.private_roam.last_refresh_day == Some(today_day_number())
+        self.browse.private_roam.last_refresh_day == Some(today_day_number())
     }
 
     /// 应用一批新拉取的漫游歌曲（启动初始化与每日刷新共用）。
@@ -8649,21 +8354,20 @@ impl App {
         }
 
         let (new_tracks, new_index) = merge_private_roam_refresh(
-            &self.private_roam.tracks,
-            self.private_roam.last_played_index,
+            &self.browse.private_roam.tracks,
+            self.browse.private_roam.last_played_index,
             fetched,
         );
 
-        self.private_roam.tracks = new_tracks;
-        self.private_roam.last_played_index = new_index;
-        if self.private_roam.cover_url.is_none() {
-            self.private_roam.cover_url = self
-                .private_roam
+        self.browse.private_roam.tracks = new_tracks;
+        self.browse.private_roam.last_played_index = new_index;
+        if self.browse.private_roam.cover_url.is_none() {
+            self.browse.private_roam.cover_url = self.browse.private_roam
                 .tracks
                 .first()
                 .and_then(|track| track.cover_url.clone());
         }
-        self.private_roam.last_refresh_day = Some(today);
+        self.browse.private_roam.last_refresh_day = Some(today);
         self.persist_private_roam();
     }
 
@@ -8677,11 +8381,11 @@ impl App {
         let mut added = false;
         let mut new_queue_items = Vec::new();
         for track in fetched {
-            if !self.private_roam.tracks.iter().any(|t| t.id == track.id) {
+            if !self.browse.private_roam.tracks.iter().any(|t| t.id == track.id) {
                 if let Some(item) = PlaybackTrack::from_playlist_track(&track) {
                     new_queue_items.push(item);
                 }
-                self.private_roam.tracks.push(track);
+                self.browse.private_roam.tracks.push(track);
                 added = true;
             }
         }
@@ -8694,19 +8398,18 @@ impl App {
         // 扩展播放队列是播放行为，只看队列来源，不看当前在哪个页面：
         // 否则重启后（页面停在主页）新歌只进列表不进队列，追加等于白做。
         if self.playback_queue_is_roam() {
-            self.playback_queue.extend(new_queue_items);
+            self.playback.playback_queue.extend(new_queue_items);
         }
 
         // 列表页 UI 同步则确实只在该页打开时才需要。
-        if self.playlist.id.as_deref() == Some(HOME_PRIVATE_ROAM_TILE_ID) {
-            self.playlist.tracks = self.private_roam.tracks.clone();
+        if self.browse.playlist.id.as_deref() == Some(HOME_PRIVATE_ROAM_TILE_ID) {
+            self.browse.playlist.tracks = self.browse.private_roam.tracks.clone();
         }
     }
 
     /// 播放队列切到某首歌时，记录漫游播放位置与封面；播放到最后一首时追加新歌
     async fn track_private_roam_playback(&mut self, track: &PlaybackTrack) {
-        let Some(pos) = self
-            .private_roam
+        let Some(pos) = self.browse.private_roam
             .tracks
             .iter()
             .position(|t| t.id.as_deref() == Some(track.song_id.as_str()))
@@ -8714,19 +8417,19 @@ impl App {
             return;
         };
 
-        let is_last = pos + 1 == self.private_roam.tracks.len();
-        self.private_roam.last_played_index = Some(pos);
-        if let Some(cover) = self.private_roam.tracks[pos].cover_url.clone() {
-            self.private_roam.cover_url = Some(cover.clone());
-            self.private_roam.last_played_cover_url = Some(cover.clone());
+        let is_last = pos + 1 == self.browse.private_roam.tracks.len();
+        self.browse.private_roam.last_played_index = Some(pos);
+        if let Some(cover) = self.browse.private_roam.tracks[pos].cover_url.clone() {
+            self.browse.private_roam.cover_url = Some(cover.clone());
+            self.browse.private_roam.last_played_cover_url = Some(cover.clone());
             // 列表页封面同步为播放到的歌曲封面
-            if self.playlist.id.as_deref() == Some(HOME_PRIVATE_ROAM_TILE_ID) {
-                self.playlist.cover.load(self.api.clone(), cover.clone());
+            if self.browse.playlist.id.as_deref() == Some(HOME_PRIVATE_ROAM_TILE_ID) {
+                self.browse.playlist.cover.load(self.api.clone(), cover.clone());
             }
             // 漫游没有固定的列表封面，其语义是「跟随当前播放歌曲」。
             // 队列来源封面（全屏侧边栏用）同步更新，否则会停在换队列那一刻的旧封面。
             if self.playback_queue_is_roam() {
-                self.playback_queue_cover_url = Some(cover);
+                self.playback.playback_queue_cover_url = Some(cover);
             }
         }
         self.sync_home_roam_tile_cover();
@@ -8742,13 +8445,12 @@ impl App {
     /// 判据是随播放记忆持久化的来源 id，而非 `self.playlist.id`——后者是
     /// 当前浏览页面，重启后为 None，会让漫游退化成普通歌单。
     fn playback_queue_is_roam(&self) -> bool {
-        self.playback_queue_source_id.as_deref() == Some(HOME_PRIVATE_ROAM_TILE_ID)
+        self.playback.playback_queue_source_id.as_deref() == Some(HOME_PRIVATE_ROAM_TILE_ID)
     }
 
     fn persist_private_roam(&self) {
         let record = private_roam::PrivateRoamRecord {
-            tracks: self
-                .private_roam
+            tracks: self.browse.private_roam
                 .tracks
                 .iter()
                 .map(|track| private_roam::PrivateRoamTrack {
@@ -8760,9 +8462,9 @@ impl App {
                     cover_url: track.cover_url.clone(),
                 })
                 .collect(),
-            last_played_index: self.private_roam.last_played_index,
-            last_played_cover_url: self.private_roam.last_played_cover_url.clone(),
-            last_refresh_day: self.private_roam.last_refresh_day,
+            last_played_index: self.browse.private_roam.last_played_index,
+            last_played_cover_url: self.browse.private_roam.last_played_cover_url.clone(),
+            last_refresh_day: self.browse.private_roam.last_refresh_day,
             updated_at: 0,
         };
         let _ = private_roam::save(&record);
@@ -8773,7 +8475,7 @@ impl App {
             return;
         };
 
-        self.private_roam.tracks = record
+        self.browse.private_roam.tracks = record
             .tracks
             .into_iter()
             .filter_map(|track| {
@@ -8792,11 +8494,11 @@ impl App {
                 })
             })
             .collect();
-        self.private_roam.last_played_index = record.last_played_index;
-        self.private_roam.last_played_cover_url = record.last_played_cover_url.clone();
-        self.private_roam.last_refresh_day = record.last_refresh_day;
-        self.private_roam.cover_url = record.last_played_cover_url.or_else(|| {
-            self.private_roam
+        self.browse.private_roam.last_played_index = record.last_played_index;
+        self.browse.private_roam.last_played_cover_url = record.last_played_cover_url.clone();
+        self.browse.private_roam.last_refresh_day = record.last_refresh_day;
+        self.browse.private_roam.cover_url = record.last_played_cover_url.or_else(|| {
+            self.browse.private_roam
                 .tracks
                 .first()
                 .and_then(|track| track.cover_url.clone())
@@ -8804,11 +8506,10 @@ impl App {
     }
 
     fn sync_home_roam_tile_cover(&mut self) {
-        let Some(url) = self.private_roam.cover_url.clone() else {
+        let Some(url) = self.browse.private_roam.cover_url.clone() else {
             return;
         };
-        if let Some(tile) = self
-            .home
+        if let Some(tile) = self.browse.home
             .tiles
             .iter_mut()
             .find(|tile| tile.title == "私人漫游")
@@ -8835,19 +8536,19 @@ impl App {
     /// 同 `apply_playlist_fetch`：新数据落地即在途拉取作废，免得迟到的旧结果覆盖它。
     fn apply_author_fetch(&mut self, fetch: AuthorFetch) {
         self.author_fetch = None;
-        self.author.id = Some(fetch.id);
-        self.author.title = fetch.title;
-        self.author.artist = fetch.artist;
-        self.author.description = fetch.description;
+        self.browse.author.id = Some(fetch.id);
+        self.browse.author.title = fetch.title;
+        self.browse.author.artist = fetch.artist;
+        self.browse.author.description = fetch.description;
         if let Some(url) = fetch.cover_url {
-            self.author.cover.load(self.api.clone(), url);
+            self.browse.author.cover.load(self.api.clone(), url);
         }
-        self.author.set_tiles(fetch.tiles);
-        self.author.hot_songs = fetch.hot_songs;
-        self.author.albums = fetch.albums;
-        self.author.eps = fetch.eps;
-        self.author.singles = fetch.singles;
-        self.author.focused_idx = 0;
+        self.browse.author.set_tiles(fetch.tiles);
+        self.browse.author.hot_songs = fetch.hot_songs;
+        self.browse.author.albums = fetch.albums;
+        self.browse.author.eps = fetch.eps;
+        self.browse.author.singles = fetch.singles;
+        self.browse.author.focused_idx = 0;
     }
 
     /// 解析 `artist/*` 的回包（网络部分见 `fetch_artist_responses`）。
@@ -9231,22 +8932,24 @@ impl App {
             self.load_search_item_covers(&mut page.items);
             let fetched_count = page.fetched_count;
             let added = page.items.len();
-            self.search.results.append(&mut page.items);
-            self.search.next_offset = self.search.next_offset.saturating_add(fetched_count);
-            self.search.has_more = followed_author_has_more(&page, self.search.next_offset);
+            let next_offset = self.search.next_offset.saturating_add(fetched_count);
+            let has_more = followed_author_has_more(&page, next_offset);
+            self.search.append_results(page.items);
+            self.search.next_offset = next_offset;
+            self.search.has_more = has_more;
 
             if added == 0 {
                 if self.search.has_more {
                     self.search.status_line = format!(
                         "{} 已加载 {} 条",
                         scope.display_name(),
-                        self.search.results.len()
+                        self.search.len()
                     );
                 } else {
                     self.search.status_line = format!(
                         "{} 搜索结果已全部加载，共 {} 条",
                         scope.display_name(),
-                        self.search.results.len()
+                        self.search.len()
                     );
                 }
                 return Ok(0);
@@ -9255,7 +8958,7 @@ impl App {
             self.search.status_line = format!(
                 "{} 已加载 {} 条",
                 scope.display_name(),
-                self.search.results.len()
+                self.search.len()
             );
             return Ok(added);
         }
@@ -9276,7 +8979,7 @@ impl App {
             self.search.status_line = format!(
                 "{} 搜索结果已全部加载，共 {} 条",
                 scope.display_name(),
-                self.search.results.len()
+                self.search.len()
             );
             return Ok(0);
         }
@@ -9284,7 +8987,7 @@ impl App {
         self.search.status_line = format!(
             "{} 已加载 {} 条",
             scope.display_name(),
-            self.search.results.len()
+            self.search.len()
         );
         Ok(added)
     }
@@ -9296,14 +8999,14 @@ impl App {
         }
         self.refresh_vip_audio_access().await;
         let _ = self.refresh_liked_song_cache().await;
-        self.home_sidebar = HomeSidebarState::default();
+        self.browse.home_sidebar = HomeSidebarState::default();
         self.playlist_section_return_snapshot = None;
-        self.home.status_line = text.to_string();
+        self.browse.home.status_line = text.to_string();
         // 登录后这次刷新仍走同步链路：进度条只按时间缓动，不接后台步数。
-        self.startup.reset_steps(0, 1);
+        self.startup.init.reset_steps(0, 1);
         self.begin_startup_loading(Page::Home);
         if let Err(err) = self.load_home_recommendations().await {
-            self.home.status_line = format!("{}，推荐歌单加载失败: {}", text, err);
+            self.browse.home.status_line = format!("{}，推荐歌单加载失败: {}", text, err);
         }
         self.finish_startup_loading();
         self.try_restore_playback_memory().await;
@@ -11050,16 +10753,18 @@ mod tests {
     /// 视口按行滚动：底部推进多少行，顶部就退多少行（作者卡片被裁切而不是整块移出）。
     #[test]
     fn search_scroll_moves_by_rows() {
-        let mut state = SearchState {
-            results: vec![
+        let mut state = SearchController::default();
+        state.set_results(
+            vec![
                 search_item(SearchItemKind::Artist, "artist-1"), // 行 0..4（卡片）
                 search_item(SearchItemKind::Artist, "artist-2"), // 行 4..8
                 search_item(SearchItemKind::Song, "song-1"),     // 行 8..10（分区线 1 + 单曲 1）
                 search_item(SearchItemKind::Song, "song-2"),     // 行 10..11
                 search_item(SearchItemKind::Song, "song-3"),     // 行 11..12
             ],
-            ..SearchState::default()
-        };
+            0,
+            false,
+        );
         state.set_viewport(6, true);
 
         // 进入第二张卡片：底边对齐 8，顶部退 2 行（底边前进 2 行）。
@@ -11086,14 +10791,16 @@ mod tests {
     /// 列表全是卡片时，一次推进就是一个卡片高度，顶部也退一个卡片高度。
     #[test]
     fn search_scroll_moves_by_card_height_on_author_list() {
-        let mut state = SearchState {
-            results: vec![
+        let mut state = SearchController::default();
+        state.set_results(
+            vec![
                 search_item(SearchItemKind::Artist, "artist-1"),
                 search_item(SearchItemKind::Artist, "artist-2"),
                 search_item(SearchItemKind::Artist, "artist-3"),
             ],
-            ..SearchState::default()
-        };
+            0,
+            false,
+        );
         state.set_viewport(6, true);
 
         state.set_focus(1);
@@ -11105,12 +10812,14 @@ mod tests {
     /// 视口行数变化后聚焦条目仍然完整可见（窗口缩放 / 小窗模式）。
     #[test]
     fn search_viewport_resize_keeps_focus_visible() {
-        let mut state = SearchState {
-            results: (0..20)
+        let mut state = SearchController::default();
+        state.set_results(
+            (0..20)
                 .map(|i| search_item(SearchItemKind::Song, &format!("song-{i}")))
                 .collect(),
-            ..SearchState::default()
-        };
+            0,
+            false,
+        );
         state.set_viewport(5, true);
         state.set_focus(9);
         assert_eq!(state.effective_scroll_rows(), 5);

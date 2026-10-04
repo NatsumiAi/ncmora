@@ -1,34 +1,27 @@
-use crate::tmplayer::app::state::{
-    AppState, CoverSnapshot, LocalFolderKind, Overlay, PlayMode, PlaybackState, RepeatMode,
-};
+use crate::tmplayer::app::state::{AppState, CoverSnapshot, Overlay, PlaybackState, RepeatMode};
 use crate::tmplayer::audio::cava::{CavaChannels, CavaConfig, CavaRunner};
-use crate::tmplayer::data::config::{AudioQuality, BarChannels, BarNumber, VisualizeMode};
-use crate::tmplayer::data::theme_loader::ThemeLoader;
+use crate::data::config::{AudioQuality, BarChannels, BarNumber, Config, VisualizeMode};
+use crate::data::theme_loader::ThemeLoader;
 use crate::tmplayer::ui::tui::{Tui, UiLayout};
 use crate::tmplayer::utils::input::{Action, map_key, map_mouse};
 use crate::tmplayer::{
-    HostConfigSync, HostPlaybackBridge, HostPlaybackRuntimeSnapshot, HostPlaybackSnapshot,
-    HostPlaybackState, HostRepeatMode,
+    HostPlaybackBridge, HostPlaybackRuntimeSnapshot, HostPlaybackSnapshot, HostPlaybackState,
+    HostRepeatMode,
 };
 use anyhow::Result;
 use crossterm::event::{self, Event};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use std::collections::hash_map::DefaultHasher;
-use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
 
 /// 子页的上一级：挂在设置弹窗下面的这些弹窗，Esc 应该回到设置弹窗，
-/// 而不是直接关掉整个弹窗（更不是退出全屏页）。`None` 表示没有上一级。
+/// 而不是直接关掉整个弹窗。`None` 表示没有上一级。
 fn settings_parent(overlay: Overlay) -> Option<Overlay> {
     matches!(
         overlay,
-        Overlay::AcoustIdModal
-            | Overlay::BarSettingsModal
-            | Overlay::LocalAudioSettingsModal
+        Overlay::BarSettingsModal
             | Overlay::LyricsSettingsModal
             | Overlay::DownloadSettingsModal
             | Overlay::DownloadPathEditModal
@@ -36,14 +29,6 @@ fn settings_parent(overlay: Overlay) -> Option<Overlay> {
             | Overlay::AboutModal
     )
     .then_some(Overlay::SettingsModal)
-}
-
-fn sync_playlists_when_viewing_playback(app: &mut AppState) {
-    if app.local_view_album_folder.is_some() && app.local_folder.is_some() {
-        if app.local_view_album_folder.as_ref() == app.local_folder.as_ref() {
-            app.playlist = app.playlist_view.clone();
-        }
-    }
 }
 
 fn clear_spectrum(app: &mut AppState) {
@@ -75,165 +60,38 @@ fn map_host_repeat(mode: HostRepeatMode) -> RepeatMode {
     }
 }
 
-fn host_config_sync_from_app(app: &AppState) -> HostConfigSync {
-    HostConfigSync {
-        theme: app.config.theme.clone(),
-        transparent_background: app.config.transparent_background,
-        album_border: app.config.album_border,
-        language: app.language,
-        graphics_protocol: app.config.graphics_protocol,
-        page_lyrics: app.config.page_lyrics,
-        page_lyrics_drag: app.config.page_lyrics_drag,
-        page_lyrics_snap: app.config.page_lyrics_snap,
-        page_lyrics_pos_x: app.config.page_lyrics_pos_x,
-        page_lyrics_pos_y: app.config.page_lyrics_pos_y,
-        audio_quality: match app.config.audio_quality {
-            AudioQuality::Standard => crate::data::config::AudioQuality::Standard,
-            AudioQuality::Higher => crate::data::config::AudioQuality::Higher,
-            AudioQuality::Exhigh => crate::data::config::AudioQuality::Exhigh,
-            AudioQuality::Lossless => crate::data::config::AudioQuality::Lossless,
-            AudioQuality::Hires => crate::data::config::AudioQuality::Hires,
-            AudioQuality::Jyeffect => crate::data::config::AudioQuality::Jyeffect,
-            AudioQuality::Sky => crate::data::config::AudioQuality::Sky,
-            AudioQuality::Dolby => crate::data::config::AudioQuality::Dolby,
-            AudioQuality::Jymaster => crate::data::config::AudioQuality::Jymaster,
-        },
-        eq_bands_db: app.config.eq_bands_db,
-        download_audio_quality: match app.config.download_audio_quality {
-            AudioQuality::Standard => crate::data::config::AudioQuality::Standard,
-            AudioQuality::Higher => crate::data::config::AudioQuality::Higher,
-            AudioQuality::Exhigh => crate::data::config::AudioQuality::Exhigh,
-            AudioQuality::Lossless => crate::data::config::AudioQuality::Lossless,
-            AudioQuality::Hires => crate::data::config::AudioQuality::Hires,
-            AudioQuality::Jyeffect => crate::data::config::AudioQuality::Jyeffect,
-            AudioQuality::Sky => crate::data::config::AudioQuality::Sky,
-            AudioQuality::Dolby => crate::data::config::AudioQuality::Dolby,
-            AudioQuality::Jymaster => crate::data::config::AudioQuality::Jymaster,
-        },
-        download_path: app.config.download_path.clone(),
-        playback_memory: app.config.playback_memory,
-        vip_audio_unlocked: app.vip_audio_unlocked,
-        show_hints: app.config.show_hints,
-        small_window_display: app.config.small_window_display,
-        home_more_recommend: app.config.home_more_recommend,
-        visualize: app.config.visualize,
-        super_smooth_bar: app.config.super_smooth_bar,
-        bars_gap: app.config.bars_gap,
-        bar_number: match app.config.bar_number {
-            BarNumber::Auto => crate::data::config::BarNumber::Auto,
-            BarNumber::N16 => crate::data::config::BarNumber::N16,
-            BarNumber::N32 => crate::data::config::BarNumber::N32,
-            BarNumber::N48 => crate::data::config::BarNumber::N48,
-            BarNumber::N64 => crate::data::config::BarNumber::N64,
-            BarNumber::N80 => crate::data::config::BarNumber::N80,
-            BarNumber::N96 => crate::data::config::BarNumber::N96,
-        },
-        bar_channels: match app.config.bar_channels {
-            BarChannels::Stereo => crate::data::config::BarChannels::Stereo,
-            BarChannels::Mono => crate::data::config::BarChannels::Mono,
-        },
-        bar_channel_reverse: app.config.bar_channel_reverse,
+fn apply_host_config_sync(app: &mut AppState, config: Config, vip_audio_unlocked: bool) {
+    let theme_changed = app.config.theme != config.theme;
+    app.config = config;
+    app.language = app.config.language;
+    app.vip_audio_unlocked = vip_audio_unlocked;
+    app.config.audio_quality = app.config.audio_quality.clamp_for_vip(vip_audio_unlocked);
+    app.config.download_audio_quality = app
+        .config
+        .download_audio_quality
+        .clamp_for_vip(vip_audio_unlocked);
+    app.eq.bands_db = app.config.eq_bands_db;
+    if theme_changed {
+        app.theme = ThemeLoader::load_or_default(&app.config.theme);
     }
-}
-
-fn apply_host_config_sync(app: &mut AppState, config: HostConfigSync) {
-    if app.config.theme != config.theme {
-        // 同步来的主题格式有问题时回退默认主题，而不是卡在旧主题上。
-        app.theme = ThemeLoader::load_or_default(&config.theme);
-        app.config.theme = config.theme;
-    }
-
-    app.config.transparent_background = config.transparent_background;
-    app.config.album_border = config.album_border;
-    app.language = config.language;
-    app.config.page_lyrics = config.page_lyrics;
-    app.config.page_lyrics_drag = config.page_lyrics_drag;
-    app.config.page_lyrics_snap = config.page_lyrics_snap;
-    app.config.page_lyrics_pos_x = config.page_lyrics_pos_x.clamp(0.0, 1.0);
-    app.config.page_lyrics_pos_y = config.page_lyrics_pos_y.clamp(0.0, 1.0);
-    app.vip_audio_unlocked = config.vip_audio_unlocked;
-    app.config.audio_quality = match config.audio_quality {
-        crate::data::config::AudioQuality::Standard => AudioQuality::Standard,
-        crate::data::config::AudioQuality::Higher => AudioQuality::Higher,
-        crate::data::config::AudioQuality::Exhigh => AudioQuality::Exhigh,
-        crate::data::config::AudioQuality::Lossless => AudioQuality::Lossless,
-        crate::data::config::AudioQuality::Hires => AudioQuality::Hires,
-        crate::data::config::AudioQuality::Jyeffect => AudioQuality::Jyeffect,
-        crate::data::config::AudioQuality::Sky => AudioQuality::Sky,
-        crate::data::config::AudioQuality::Dolby => AudioQuality::Dolby,
-        crate::data::config::AudioQuality::Jymaster => AudioQuality::Jymaster,
-    }
-    .clamp_for_vip(app.vip_audio_unlocked);
-    app.config.download_audio_quality = match config.download_audio_quality {
-        crate::data::config::AudioQuality::Standard => AudioQuality::Standard,
-        crate::data::config::AudioQuality::Higher => AudioQuality::Higher,
-        crate::data::config::AudioQuality::Exhigh => AudioQuality::Exhigh,
-        crate::data::config::AudioQuality::Lossless => AudioQuality::Lossless,
-        crate::data::config::AudioQuality::Hires => AudioQuality::Hires,
-        crate::data::config::AudioQuality::Jyeffect => AudioQuality::Jyeffect,
-        crate::data::config::AudioQuality::Sky => AudioQuality::Sky,
-        crate::data::config::AudioQuality::Dolby => AudioQuality::Dolby,
-        crate::data::config::AudioQuality::Jymaster => AudioQuality::Jymaster,
-    }
-    .clamp_for_vip(app.vip_audio_unlocked);
-    // 路径非法时保留本地的修改前值（宿主侧也会再校验一遍）。
-    if config.download_path != app.config.download_path
-        && config
-            .download_path
-            .as_deref()
-            .is_none_or(|raw| crate::app::download::parse_download_path(raw).is_ok())
-    {
-        app.config.download_path = config.download_path.clone();
-    }
-    app.config.eq_bands_db = config.eq_bands_db;
-    app.eq.bands_db = config.eq_bands_db;
-    app.config.playback_memory = config.playback_memory;
-    app.config.show_hints = config.show_hints;
-    app.config.small_window_display = config.small_window_display;
-    app.config.home_more_recommend = config.home_more_recommend;
-    app.config.visualize = config.visualize;
-    app.config.super_smooth_bar = config.super_smooth_bar;
-    app.config.bars_gap = config.bars_gap;
-    app.config.bar_number = match config.bar_number {
-        crate::data::config::BarNumber::Auto => BarNumber::Auto,
-        crate::data::config::BarNumber::N16 => BarNumber::N16,
-        crate::data::config::BarNumber::N32 => BarNumber::N32,
-        crate::data::config::BarNumber::N48 => BarNumber::N48,
-        crate::data::config::BarNumber::N64 => BarNumber::N64,
-        crate::data::config::BarNumber::N80 => BarNumber::N80,
-        crate::data::config::BarNumber::N96 => BarNumber::N96,
-    };
-    app.config.bar_channels = match config.bar_channels {
-        crate::data::config::BarChannels::Stereo => BarChannels::Stereo,
-        crate::data::config::BarChannels::Mono => BarChannels::Mono,
-    };
-    app.config.bar_channel_reverse = config.bar_channel_reverse;
-
-    // 下载路径可能刚被宿主改过：重算本地根目录（Gray 状态与 `Null` 显示都看它）。
     app.refresh_download_root();
 }
 
 async fn save_and_sync_host_config(
     app: &mut AppState,
-    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+    host_bridge: &mut impl HostPlaybackBridge,
 ) {
-    let _ = app.config.save();
-    if let Some(bridge) = host_bridge.as_mut() {
-        (*bridge)
-            .apply_config_sync(host_config_sync_from_app(app))
-            .await;
-    }
+    host_bridge.apply_config_sync(app.config.clone()).await;
+    let accepted = host_bridge.config_snapshot();
+    apply_host_config_sync(app, accepted, host_bridge.vip_audio_unlocked());
 }
 
-async fn sync_eq_config(
-    app: &mut AppState,
-    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
-) {
+async fn sync_eq_config(app: &mut AppState, host_bridge: &mut impl HostPlaybackBridge) {
     app.eq = app.eq.clamp();
     app.config.eq_bands_db = app.eq.bands_db;
-
     save_and_sync_host_config(app, host_bridge).await;
 }
+
 
 fn empty_track_metadata() -> crate::tmplayer::app::state::TrackMetadata {
     crate::tmplayer::app::state::TrackMetadata {
@@ -243,94 +101,15 @@ fn empty_track_metadata() -> crate::tmplayer::app::state::TrackMetadata {
         duration: Duration::from_secs(0),
         cover: None,
         cover_hash: None,
-        cover_folder: None,
         lyrics: None,
     }
 }
-
 fn hash_cover_bytes(bytes: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
     hasher.finish()
 }
 
-fn ncm_song_id_for_index(app: &AppState, index: usize) -> Option<String> {
-    let item = app.playlist.items.get(index)?;
-    let raw = item.path.to_string_lossy();
-    let id = raw.strip_prefix("ncm://")?.trim();
-    if id.is_empty() {
-        return None;
-    }
-    Some(id.to_string())
-}
-
-fn ncm_cover_cache_path(dir: &std::path::Path, song_id: &str) -> Option<PathBuf> {
-    let id = song_id.trim();
-    if id.is_empty() {
-        return None;
-    }
-    Some(dir.join(format!("{id}.img")))
-}
-
-fn persist_ncm_cover_to_disk(dir: &std::path::Path, song_id: &str, bytes: &[u8]) {
-    if bytes.is_empty() {
-        return;
-    }
-    let Some(path) = ncm_cover_cache_path(dir, song_id) else {
-        return;
-    };
-    let _ = fs::create_dir_all(dir);
-    let _ = fs::write(path, bytes);
-}
-
-fn load_ncm_cover_from_disk(dir: &std::path::Path, song_id: &str) -> Option<(Vec<u8>, u64)> {
-    let path = ncm_cover_cache_path(dir, song_id)?;
-    let bytes = fs::read(path).ok()?;
-    if bytes.is_empty() {
-        return None;
-    }
-    let hash = hash_cover_bytes(&bytes);
-    Some((bytes, hash))
-}
-
-fn enforce_ncm_cover_memory_policy(app: &mut AppState, current_index: usize) {
-    let Some(cache_dir) = app.ncm_cover_cache_dir.clone() else {
-        return;
-    };
-    if app.api_tracks.is_empty() {
-        return;
-    }
-
-    let song_ids: Vec<Option<String>> = (0..app.api_tracks.len())
-        .map(|idx| ncm_song_id_for_index(app, idx))
-        .collect();
-
-    for (idx, track) in app.api_tracks.iter_mut().enumerate() {
-        let song_id = song_ids.get(idx).and_then(|v| v.as_deref());
-
-        if idx == current_index {
-            if track.cover.is_none() {
-                if let Some(song_id) = song_id {
-                    if let Some((bytes, hash)) = load_ncm_cover_from_disk(&cache_dir, song_id) {
-                        track.cover = Some(bytes);
-                        track.cover_hash = Some(hash);
-                    }
-                }
-            }
-            continue;
-        }
-
-        if let (Some(bytes), Some(song_id)) = (track.cover.as_deref(), song_id) {
-            persist_ncm_cover_to_disk(&cache_dir, song_id, bytes);
-        }
-        track.cover = None;
-        track.cover_folder = None;
-    }
-
-    if let Some(cur) = app.api_tracks.get(current_index).cloned() {
-        app.player.track = cur;
-    }
-}
 
 fn sync_from_host_snapshot(app: &mut AppState, snapshot: HostPlaybackSnapshot) {
     let queue_len = snapshot.playlist.len();
@@ -339,14 +118,11 @@ fn sync_from_host_snapshot(app: &mut AppState, snapshot: HostPlaybackSnapshot) {
         app.api_tracks.clear();
         app.playlist = crate::tmplayer::data::playlist::Playlist::default();
         app.playlist_view = crate::tmplayer::data::playlist::Playlist::default();
-        app.player.mode = PlayMode::Idle;
         app.player.playback = map_host_state(snapshot.state);
         app.player.repeat_mode = map_host_repeat(snapshot.repeat_mode);
         app.player.liked = false;
         app.player.position = snapshot.position;
         app.player.track = empty_track_metadata();
-        app.local_view_album_cover = None;
-        app.local_view_album_cover_hash = None;
         return;
     }
 
@@ -375,7 +151,6 @@ fn sync_from_host_snapshot(app: &mut AppState, snapshot: HostPlaybackSnapshot) {
             duration: item.duration,
             cover: None,
             cover_hash: None,
-            cover_folder: None,
             lyrics: None,
         });
     }
@@ -398,7 +173,6 @@ fn sync_from_host_snapshot(app: &mut AppState, snapshot: HostPlaybackSnapshot) {
             duration: track.duration,
             cover: track.cover.clone(),
             cover_hash,
-            cover_folder: None,
             lyrics: track.lyrics.clone(),
         };
         tracks[idx] = mapped.clone();
@@ -429,14 +203,12 @@ fn sync_from_host_snapshot(app: &mut AppState, snapshot: HostPlaybackSnapshot) {
     app.playlist = playlist;
     app.playlist_view = view;
 
-    app.player.mode = PlayMode::Idle;
     app.player.playback = map_host_state(snapshot.state);
     app.player.repeat_mode = map_host_repeat(snapshot.repeat_mode);
     app.player.liked = snapshot.current_liked;
     app.player.position = snapshot.position;
     app.player.track = current_track;
 
-    enforce_ncm_cover_memory_policy(app, current);
 }
 
 fn apply_host_runtime_snapshot(app: &mut AppState, runtime: HostPlaybackRuntimeSnapshot) -> bool {
@@ -497,29 +269,27 @@ fn apply_host_runtime_snapshot(app: &mut AppState, runtime: HostPlaybackRuntimeS
 
 async fn sync_from_host_bridge(
     app: &mut AppState,
-    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+    host_bridge: &mut impl HostPlaybackBridge,
     last_metadata_signature: &mut Option<u64>,
-    sync_config: bool,
+    last_config_signature: &mut Option<u64>,
 ) -> bool {
-    let Some(bridge) = host_bridge.as_mut() else {
-        return false;
-    };
-
     let mut changed = false;
-    (*bridge).tick().await;
+    host_bridge.tick().await;
 
-    if sync_config {
-        let config = (*bridge).config_snapshot();
-        apply_host_config_sync(app, config);
+    let config_signature = host_bridge.config_signature();
+    if last_config_signature.is_none_or(|sig| sig != config_signature) {
+        let config = host_bridge.config_snapshot();
+        apply_host_config_sync(app, config, host_bridge.vip_audio_unlocked());
+        *last_config_signature = Some(config_signature);
         changed = true;
     }
 
-    let runtime = (*bridge).runtime_snapshot();
+    let runtime = host_bridge.runtime_snapshot();
     changed |= apply_host_runtime_snapshot(app, runtime);
 
-    let metadata_signature = (*bridge).metadata_signature();
+    let metadata_signature = host_bridge.metadata_signature();
     if last_metadata_signature.is_none_or(|sig| sig != metadata_signature) {
-        let snapshot = (*bridge).snapshot();
+        let snapshot = host_bridge.snapshot();
         sync_from_host_snapshot(app, snapshot);
         *last_metadata_signature = Some(metadata_signature);
         changed = true;
@@ -530,7 +300,7 @@ async fn sync_from_host_bridge(
 
 pub async fn run(
     app: &mut AppState,
-    mut host_bridge: Option<&mut impl HostPlaybackBridge>,
+    host_bridge: &mut impl HostPlaybackBridge,
 ) -> Result<crate::tmplayer::FullscreenExit> {
     enable_raw_mode()?;
     let mut tui = Tui::new(app)?;
@@ -542,10 +312,7 @@ pub async fn run(
     let mut cava_cfg: Option<CavaConfig> = None;
 
     let mut last_spectrum = Instant::now();
-    let mut last_host_config_sync = Instant::now()
-        .checked_sub(Duration::from_millis(400))
-        .unwrap_or_else(Instant::now);
-    let mut last_host_metadata_signature: Option<u64> = None;
+    let mut last_host_config_signature: Option<u64> = None;
     let mut needs_redraw = true;
     let mut last_draw_at = Instant::now()
         .checked_sub(Duration::from_millis(250))
@@ -553,8 +320,8 @@ pub async fn run(
 
     let mut last_layout = UiLayout::default();
 
-    // 示波器读宿主播放链路上的 PCM 抽头环。独立运行（无宿主）时为空，只画中线。
-    app.pcm_ring = host_bridge.as_ref().map(|bridge| bridge.pcm_ring());
+    // 示波器始终读取宿主播放链路上的 PCM 抽头环。
+    app.pcm_ring = Some(host_bridge.pcm_ring());
 
     // Initialize cava with the current desired config (best-effort).
     ensure_cava(
@@ -565,26 +332,22 @@ pub async fn run(
 
     let _ = sync_from_host_bridge(
         app,
-        &mut host_bridge,
+        host_bridge,
         &mut last_host_metadata_signature,
-        true,
-    );
+        &mut last_host_config_signature,
+    )
+    .await;
 
     loop {
         let frame_start = Instant::now();
         let mut state_changed = false;
 
-        let sync_config =
-            frame_start.duration_since(last_host_config_sync) >= Duration::from_millis(250);
-        if sync_config {
-            last_host_config_sync = frame_start;
-        }
 
         state_changed |= sync_from_host_bridge(
             app,
-            &mut host_bridge,
+            host_bridge,
             &mut last_host_metadata_signature,
-            sync_config,
+            &mut last_host_config_signature,
         )
         .await;
 
@@ -592,12 +355,12 @@ pub async fn run(
             match event::read()? {
                 Event::Key(k) => {
                     let action = map_key(k, app.overlay, &app.config);
-                    handle_action(app, &mut host_bridge, action, &last_layout).await?;
+                    handle_action(app, host_bridge, action, &last_layout).await?;
                     state_changed = true;
                 }
                 Event::Mouse(m) => {
                     let action = map_mouse(m);
-                    handle_action(app, &mut host_bridge, action, &last_layout).await?;
+                    handle_action(app, host_bridge, action, &last_layout).await?;
                     state_changed = true;
                 }
                 Event::Resize(_, _) => {
@@ -644,21 +407,6 @@ pub async fn run(
             state_changed = true;
         }
 
-        if app.player.mode == PlayMode::Idle
-            && app.player.playback == PlaybackState::Playing
-            && !app.player.seeking
-        {
-            let dt = frame_start.saturating_duration_since(app.last_frame);
-            if dt > Duration::from_millis(0) {
-                let next = app.player.position.saturating_add(dt);
-                app.player.position = if app.player.track.duration > Duration::from_millis(0) {
-                    next.min(app.player.track.duration)
-                } else {
-                    next
-                };
-                state_changed = true;
-            }
-        }
 
         app.tick(frame_start);
 
@@ -713,59 +461,11 @@ pub async fn run(
         None => crate::tmplayer::FullscreenExit::BackToHost,
     };
     Ok(exit)
-}
 
-fn fps_to_dt(fps: u32) -> Duration {
-    let fps = fps.clamp(4, 60);
-    Duration::from_millis((1000 / fps) as u64)
-}
-
-fn switch_idle_track(app: &mut AppState, dir: i8) {
-    if app.api_tracks.is_empty() {
-        return;
-    }
-
-    let from = CoverSnapshot::from(&app.player.track);
-    let next = if dir < 0 {
-        match app.player.repeat_mode {
-            RepeatMode::Sequence => app.playlist.next_index_no_wrap(),
-            RepeatMode::LoopAll => app.playlist.next_index_sequence(),
-            RepeatMode::LoopOne => app.playlist.current,
-            RepeatMode::Shuffle => pick_shuffle_index(&app.playlist),
-        }
-    } else {
-        match app.player.repeat_mode {
-            RepeatMode::Sequence => app.playlist.prev_index_no_wrap(),
-            RepeatMode::LoopAll => app.playlist.prev_index_sequence(),
-            RepeatMode::LoopOne => app.playlist.current,
-            RepeatMode::Shuffle => pick_shuffle_index(&app.playlist),
-        }
-    };
-
-    let Some(i) = next else {
-        return;
-    };
-
-    if let Some(track) = app.api_tracks.get(i).cloned() {
-        app.playlist.current = Some(i);
-        app.playlist.selected = i;
-        app.playlist_view.current = Some(i);
-        app.playlist_view.selected = i;
-
-        app.player.track = track;
-        app.player.position = Duration::from_secs(0);
-        app.player.playback = PlaybackState::Playing;
-
-        enforce_ncm_cover_memory_policy(app, i);
-
-        let to = CoverSnapshot::from(&app.player.track);
-        app.start_cover_anim(from, to, dir, Instant::now());
-    }
-}
 
 async fn handle_action(
     app: &mut AppState,
-    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+    host_bridge: &mut impl HostPlaybackBridge,
     action: Action,
     layout: &UiLayout,
 ) -> Result<()> {
@@ -807,16 +507,12 @@ async fn handle_action(
             }
         }
         Action::FolderChar(c) => {
-            if app.overlay == Overlay::AcoustIdModal {
-                app.acoustid_input.push(c);
-            } else if app.overlay == Overlay::DownloadPathEditModal {
+            if app.overlay == Overlay::DownloadPathEditModal {
                 download_path_edit_insert(app, c);
             }
         }
         Action::FolderBackspace => {
-            if app.overlay == Overlay::AcoustIdModal {
-                app.acoustid_input.pop();
-            } else if app.overlay == Overlay::DownloadPathEditModal {
+            if app.overlay == Overlay::DownloadPathEditModal {
                 download_path_edit_backspace(app);
             }
         }
@@ -848,23 +544,6 @@ async fn handle_action(
                     app.playlist_view.clamp_selected();
                 }
 
-                // Always reset view state to the currently playing folder when opening.
-                app.local_view_album_folder = app.local_folder.clone();
-                if let Some(folder) = app.local_folder.as_deref() {
-                    let cover = crate::tmplayer::playback::metadata::read_cover_from_folder(folder);
-                    app.local_view_album_cover = cover.as_ref().map(|(b, _)| b.clone());
-                    app.local_view_album_cover_hash = cover.map(|(_, h)| Some(h)).unwrap_or(None);
-                }
-                app.playlist_album_anim = None;
-
-                // Keep view album index in sync for MultiAlbum.
-                if app.local_folder_kind == LocalFolderKind::MultiAlbum {
-                    if let Some(vf) = app.local_view_album_folder.as_ref() {
-                        if let Some(i) = app.local_album_folders.iter().position(|p| p == vf) {
-                            app.local_view_album_index = i;
-                        }
-                    }
-                }
                 app.overlay = Overlay::Playlist;
                 app.playlist_slide_x = -(layout.left_width as i16);
                 app.start_playlist_slide(0);
@@ -872,16 +551,14 @@ async fn handle_action(
         }
         Action::Confirm => match app.overlay {
             Overlay::Playlist => {
-                if let Some(bridge) = host_bridge.as_mut() {
-                    let idx = app
-                        .playlist_view
-                        .selected
-                        .min(app.playlist_view.len().saturating_sub(1));
-                    (*bridge).play_queue_index(idx).await;
-                    let snapshot = (*bridge).snapshot();
-                    sync_from_host_snapshot(app, snapshot);
-                    return Ok(());
-                }
+                let idx = app
+                    .playlist_view
+                    .selected
+                    .min(app.playlist_view.len().saturating_sub(1));
+                host_bridge.play_queue_index(idx).await;
+                let snapshot = host_bridge.snapshot();
+                sync_from_host_snapshot(app, snapshot);
+                return Ok(());
             }
             Overlay::SettingsModal => match app.settings_selected {
                 0 | 1 | 2 | 3 => {
@@ -983,43 +660,6 @@ async fn handle_action(
                 }
                 _ => {}
             },
-            Overlay::LocalAudioSettingsModal => match app.local_audio_settings_selected {
-                0 => {
-                    app.config.lyrics_cover_fetch = !app.config.lyrics_cover_fetch;
-                    let _ = app.config.save();
-                    if app.config.lyrics_cover_fetch {
-                        app.reset_remote_fetch_state();
-                    }
-                }
-                1 => {
-                    app.config.lyrics_cover_download = !app.config.lyrics_cover_download;
-                    let _ = app.config.save();
-                }
-                2 => {
-                    if !app.config.acoustid_api_key.trim().is_empty() {
-                        app.config.audio_fingerprint = !app.config.audio_fingerprint;
-                        let _ = app.config.save();
-                    }
-                }
-                3 => {
-                    app.acoustid_input = app.config.acoustid_api_key.clone();
-                    app.overlay = Overlay::AcoustIdModal;
-                }
-                4 => {
-                    app.config.resume_last_position = !app.config.resume_last_position;
-                    let _ = app.config.save();
-                }
-                _ => {}
-            },
-            Overlay::AcoustIdModal => {
-                let key = app.acoustid_input.trim().to_string();
-                app.config.acoustid_api_key = key.clone();
-                if key.is_empty() {
-                    app.config.audio_fingerprint = false;
-                }
-                let _ = app.config.save();
-                app.overlay = Overlay::SettingsModal;
-            }
             Overlay::HelpModal => {
                 app.close_overlay();
             }
@@ -1031,12 +671,10 @@ async fn handle_action(
         Action::PlaylistUp => {
             app.playlist_view.move_up();
             app.playlist_view.clamp_selected();
-            sync_playlists_when_viewing_playback(app);
         }
         Action::PlaylistDown => {
             app.playlist_view.move_down();
             app.playlist_view.clamp_selected();
-            sync_playlists_when_viewing_playback(app);
         }
         Action::PlaylistMoveItemUp => (),
         Action::PlaylistMoveItemDown => (),
@@ -1064,13 +702,6 @@ async fn handle_action(
                     app.lyrics_settings_selected = count - 1;
                 } else {
                     app.lyrics_settings_selected -= 1;
-                }
-            } else if app.overlay == Overlay::LocalAudioSettingsModal {
-                let count = 5;
-                if app.local_audio_settings_selected == 0 {
-                    app.local_audio_settings_selected = count - 1;
-                } else {
-                    app.local_audio_settings_selected -= 1;
                 }
             } else if app.overlay == Overlay::EqModal {
                 let step = 1.0;
@@ -1103,9 +734,6 @@ async fn handle_action(
             } else if app.overlay == Overlay::LyricsSettingsModal {
                 let count = 3;
                 app.lyrics_settings_selected = (app.lyrics_settings_selected + 1) % count;
-            } else if app.overlay == Overlay::LocalAudioSettingsModal {
-                let count = 5;
-                app.local_audio_settings_selected = (app.local_audio_settings_selected + 1) % count;
             } else if app.overlay == Overlay::EqModal {
                 let step = 1.0;
                 if app.eq_selected < crate::tmplayer::app::state::EQ_BANDS {
@@ -1166,8 +794,6 @@ async fn handle_action(
                 }
             } else if app.overlay == Overlay::LyricsSettingsModal {
                 apply_lyrics_settings_delta(app, host_bridge, -1).await;
-            } else if app.overlay == Overlay::LocalAudioSettingsModal {
-                apply_local_audio_settings_delta(app, -1);
             } else if app.overlay == Overlay::EqModal {
                 let count = crate::tmplayer::app::state::EQ_BANDS;
                 if app.eq_selected == 0 {
@@ -1223,8 +849,6 @@ async fn handle_action(
                 }
             } else if app.overlay == Overlay::LyricsSettingsModal {
                 apply_lyrics_settings_delta(app, host_bridge, 1).await;
-            } else if app.overlay == Overlay::LocalAudioSettingsModal {
-                apply_local_audio_settings_delta(app, 1);
             } else if app.overlay == Overlay::EqModal {
                 let count = crate::tmplayer::app::state::EQ_BANDS;
                 app.eq_selected = (app.eq_selected + 1) % count;
@@ -1234,171 +858,66 @@ async fn handle_action(
             if idx < app.playlist_view.len() {
                 app.playlist_view.selected = idx;
                 app.playlist_view.clamp_selected();
-                sync_playlists_when_viewing_playback(app);
-
-                // 单击只聚焦；400ms 内再点同一行才切歌（按条目序号判定，
-                // 与滚动窗口无关，聚焦本身可能引起列表滚动）。
                 let now = Instant::now();
                 let is_double = app.last_playlist_click.is_some_and(|(at, last)| {
                     now.duration_since(at) <= Duration::from_millis(400) && last == idx
                 });
                 app.last_playlist_click = Some((now, idx));
-
-                if !is_double {
-                    return Ok(());
-                }
-
-                if let Some(bridge) = host_bridge.as_mut() {
-                    (*bridge).play_queue_index(idx).await;
-                    let snapshot = (*bridge).snapshot();
-                    sync_from_host_snapshot(app, snapshot);
-                } else {
-                    // 本地模式：双击等价 Enter。
-                    Box::pin(handle_action(app, host_bridge, Action::Confirm, layout)).await?;
+                if is_double {
+                    host_bridge.play_queue_index(idx).await;
+                    sync_from_host_snapshot(app, host_bridge.snapshot());
                 }
             }
         }
         Action::TogglePlayPause => {
-            if let Some(bridge) = host_bridge.as_mut() {
-                (*bridge).toggle_play_pause().await;
-                let snapshot = (*bridge).snapshot();
-                sync_from_host_snapshot(app, snapshot);
-                return Ok(());
-            }
-
-            match app.player.mode {
-                PlayMode::Idle => {
-                    app.player.playback = match app.player.playback {
-                        PlaybackState::Playing => PlaybackState::Paused,
-                        PlaybackState::Paused | PlaybackState::Stopped => PlaybackState::Playing,
-                    };
-                }
-            }
+            host_bridge.toggle_play_pause().await;
+            sync_from_host_snapshot(app, host_bridge.snapshot());
         }
-        Action::Prev => match app.player.mode {
-            _ if host_bridge.is_some() => {
-                if let Some(bridge) = host_bridge.as_mut() {
-                    (*bridge).play_previous().await;
-                    let snapshot = (*bridge).snapshot();
-                    sync_from_host_snapshot(app, snapshot);
-                }
-            }
-            PlayMode::Idle => {
-                switch_idle_track(app, 1);
-            }
-        },
-        Action::Next => match app.player.mode {
-            _ if host_bridge.is_some() => {
-                if let Some(bridge) = host_bridge.as_mut() {
-                    (*bridge).play_next().await;
-                    let snapshot = (*bridge).snapshot();
-                    sync_from_host_snapshot(app, snapshot);
-                }
-            }
-            PlayMode::Idle => {
-                switch_idle_track(app, -1);
-            }
-        },
-        Action::VolumeUp => match app.player.mode {
-            PlayMode::Idle => {
-                let next = (app.player.volume + 0.05).min(1.0);
-                if let Some(bridge) = host_bridge.as_mut() {
-                    (*bridge).set_volume(next);
-                }
-                app.player.volume = next;
-            }
-        },
-        Action::VolumeDown => match app.player.mode {
-            PlayMode::Idle => {
-                let next = (app.player.volume - 0.05).max(0.0);
-                if let Some(bridge) = host_bridge.as_mut() {
-                    (*bridge).set_volume(next);
-                }
-                app.player.volume = next;
-            }
-        },
-        Action::SetVolume(v) => match app.player.mode {
-            PlayMode::Idle => {
-                // 音量条：按下即开始拖动，MouseDrag 持续跟随。
-                app.volume_drag = true;
-                let next = v.clamp(0.0, 1.0);
-                if let Some(bridge) = host_bridge.as_mut() {
-                    (*bridge).set_volume(next);
-                }
-                app.player.volume = next;
-            }
-        },
+        Action::Prev => {
+            host_bridge.play_previous().await;
+            sync_from_host_snapshot(app, host_bridge.snapshot());
+        }
+        Action::Next => {
+            host_bridge.play_next().await;
+            sync_from_host_snapshot(app, host_bridge.snapshot());
+        }
+        Action::VolumeUp => {
+            let next = (app.player.volume + 0.05).min(1.0);
+            host_bridge.set_volume(next);
+            app.player.volume = next;
+        }
+        Action::VolumeDown => {
+            let next = (app.player.volume - 0.05).max(0.0);
+            host_bridge.set_volume(next);
+            app.player.volume = next;
+        }
+        Action::SetVolume(v) => {
+            app.volume_drag = true;
+            let next = v.clamp(0.0, 1.0);
+            host_bridge.set_volume(next);
+            app.player.volume = next;
+        }
         Action::ToggleRepeatMode => {
-            if let Some(bridge) = host_bridge.as_mut() {
-                (*bridge).toggle_repeat_mode();
-                let snapshot = (*bridge).snapshot();
-                sync_from_host_snapshot(app, snapshot);
-                return Ok(());
-            }
-            if app.player.mode == PlayMode::Idle {
-                app.player.repeat_mode = app.player.repeat_mode.next();
-            }
+            host_bridge.toggle_repeat_mode();
+            sync_from_host_snapshot(app, host_bridge.snapshot());
         }
         Action::ToggleFavorite => {
-            if let Some(bridge) = host_bridge.as_mut() {
-                (*bridge).toggle_like_current().await;
-                let snapshot = (*bridge).snapshot();
-                sync_from_host_snapshot(app, snapshot);
-                return Ok(());
-            }
-
-            app.set_toast("Like is unavailable in local mode");
+            host_bridge.toggle_like_current().await;
+            sync_from_host_snapshot(app, host_bridge.snapshot());
         }
         Action::ToggleDownload => {
-            if let Some(bridge) = host_bridge.as_mut() {
-                (*bridge).download_current();
-                // 立刻回显一次运行态：图标马上切到"下载中"，不用等下一帧。
-                let snapshot = (*bridge).runtime_snapshot();
-                apply_host_runtime_snapshot(app, snapshot);
-                return Ok(());
-            }
-
-            app.set_toast(crate::tmplayer::ui::tui::lang_text(
-                app,
-                "独立模式不支持下载",
-                "Download is unavailable in standalone mode",
-            ));
+            host_bridge.download_current();
+            apply_host_runtime_snapshot(app, host_bridge.runtime_snapshot());
         }
         Action::OpenAuthorPage(index) => {
-            // 作者页归宿主（全屏页只有显示名，没有作者 ID）：记下请求退出与段序号，
-            // 宿主在关闭全屏页后按当前播放歌曲解析并打开。
-            if host_bridge.is_some() {
-                app.exit_request =
-                    Some(crate::tmplayer::FullscreenExit::BackToHostOpenAuthor(index));
-            } else {
-                app.set_toast("Author page is unavailable in standalone mode");
-            }
+            app.exit_request = Some(crate::tmplayer::FullscreenExit::BackToHostOpenAuthor(index));
         }
         Action::OpenAlbumPage => {
-            if host_bridge.is_some() {
-                app.exit_request = Some(crate::tmplayer::FullscreenExit::BackToHostOpenAlbum);
-            } else {
-                app.set_toast("Album page is unavailable in standalone mode");
-            }
+            app.exit_request = Some(crate::tmplayer::FullscreenExit::BackToHostOpenAlbum);
         }
         Action::SeekToFraction(r) => {
-            if let Some(bridge) = host_bridge.as_mut() {
-                (*bridge).seek_to_ratio(r);
-                let snapshot = (*bridge).snapshot();
-                sync_from_host_snapshot(app, snapshot);
-                return Ok(());
-            }
-
-            let dur = app.player.track.duration;
-            if dur.as_millis() == 0 {
-                return Ok(());
-            }
-            let target = Duration::from_secs_f32(dur.as_secs_f32() * r.clamp(0.0, 1.0));
-            match app.player.mode {
-                PlayMode::Idle => {
-                    app.player.position = target;
-                }
-            }
+            host_bridge.seek_to_ratio(r);
+            sync_from_host_snapshot(app, host_bridge.snapshot());
         }
         Action::MouseClick { col, row } => {
             // map click to controls/progress/volume/playlist
@@ -1430,15 +949,11 @@ async fn handle_action(
             }
         }
         Action::MouseDrag { col, .. } => {
-            // 按住音量条拖动：只要起点落在条内，之后拖着走（哪怕拖出条外）
-            // 都继续改音量，不在拖动中途要求光标还在条上。
             if app.volume_drag
                 && let Some(volume) = crate::tmplayer::ui::tui::volume_for_drag(layout, col)
             {
                 app.player.volume = volume;
-                if let Some(bridge) = host_bridge.as_mut() {
-                    (*bridge).set_volume(volume);
-                }
+                host_bridge.set_volume(volume);
             }
         }
         Action::MouseUp => {
@@ -1452,7 +967,6 @@ async fn handle_action(
             match app.overlay {
                 Overlay::SettingsModal => app.settings_selected = idx,
                 Overlay::BarSettingsModal => app.bar_settings_selected = idx,
-                Overlay::LocalAudioSettingsModal => app.local_audio_settings_selected = idx,
                 Overlay::LyricsSettingsModal => {
                     // 开关行：左键直接改值（与宿主一致），不走双击。
                     app.lyrics_settings_selected = idx.min(2);
@@ -1489,7 +1003,7 @@ async fn handle_action(
 
 async fn apply_settings_delta(
     app: &mut AppState,
-    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+    host_bridge: &mut impl HostPlaybackBridge,
     delta: i32,
 ) {
     match app.settings_selected {
@@ -1587,7 +1101,7 @@ fn move_download_selection(app: &mut AppState, delta: i32) {
 /// 下载设置页的「执行」：Enter / 左右键 / 双击共用。
 async fn activate_download_settings_item(
     app: &mut AppState,
-    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+    host_bridge: &mut impl HostPlaybackBridge,
 ) {
     match app.download_settings_selected {
         0 => apply_download_settings_delta(app, host_bridge, 1).await,
@@ -1600,7 +1114,7 @@ async fn activate_download_settings_item(
 /// 音质行：与播放设置同一套可选值（按会员放开）。
 async fn apply_download_settings_delta(
     app: &mut AppState,
-    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+    host_bridge: &mut impl HostPlaybackBridge,
     delta: i32,
 ) {
     if delta == 0 || app.download_settings_selected != 0 || !app.download_enabled() {
@@ -1621,7 +1135,7 @@ async fn apply_download_settings_delta(
 /// 下载不可用（显式 `Null` / 宿主没有可写位置）时也允许：它就是那个出口。
 async fn activate_download_reset(
     app: &mut AppState,
-    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+    host_bridge: &mut impl HostPlaybackBridge,
 ) {
     if !app.download_reset_armed {
         // 待确认态由行内文字（「确认恢复」+ 警戒色）表达，不再弹提示。
@@ -1631,7 +1145,7 @@ async fn activate_download_reset(
 
     app.download_reset_armed = false;
     app.config.download_audio_quality =
-        crate::tmplayer::data::config::default_download_audio_quality();
+        crate::data::config::default_download_audio_quality();
     app.config.download_path = None;
     save_and_sync_host_config(app, host_bridge).await;
     app.refresh_download_root();
@@ -1694,7 +1208,7 @@ fn download_path_edit_move(app: &mut AppState, delta: i32) {
 /// 回车确认：非法（空 / 非绝对 / 不可写）就保留修改前的值，只弹一次 toast。
 async fn commit_download_path_edit(
     app: &mut AppState,
-    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+    host_bridge: &mut impl HostPlaybackBridge,
 ) {
     let Some(edit) = app.download_path_edit.take() else {
         return;
@@ -1721,7 +1235,7 @@ async fn commit_download_path_edit(
 /// “歌词浮窗”子页三行开关；吸附行只在拖动开启时可改。
 async fn apply_lyrics_settings_delta(
     app: &mut AppState,
-    host_bridge: &mut Option<&mut impl HostPlaybackBridge>,
+    host_bridge: &mut impl HostPlaybackBridge,
     delta: i32,
 ) {
     if delta == 0 {
@@ -1747,37 +1261,6 @@ async fn apply_lyrics_settings_delta(
     }
 }
 
-fn apply_local_audio_settings_delta(app: &mut AppState, delta: i32) {
-    if delta == 0 {
-        return;
-    }
-
-    match app.local_audio_settings_selected {
-        0 => {
-            app.config.lyrics_cover_fetch = !app.config.lyrics_cover_fetch;
-            let _ = app.config.save();
-            if app.config.lyrics_cover_fetch {
-                app.reset_remote_fetch_state();
-            }
-        }
-        1 => {
-            app.config.lyrics_cover_download = !app.config.lyrics_cover_download;
-            let _ = app.config.save();
-        }
-        2 => {
-            if !app.config.acoustid_api_key.trim().is_empty() {
-                app.config.audio_fingerprint = !app.config.audio_fingerprint;
-                let _ = app.config.save();
-            }
-        }
-        3 => {}
-        4 => {
-            app.config.resume_last_position = !app.config.resume_last_position;
-            let _ = app.config.save();
-        }
-        _ => {}
-    }
-}
 
 fn cycle_bar_number(cur: BarNumber, delta: i32) -> BarNumber {
     let options = [
@@ -1909,24 +1392,6 @@ fn max_display_bars(width_cells: u16, gap: bool) -> usize {
     }
 }
 
-fn pick_shuffle_index(pl: &crate::tmplayer::data::playlist::Playlist) -> Option<usize> {
-    if pl.items.is_empty() {
-        return None;
-    }
-    let len = pl.items.len();
-    if len == 1 {
-        return Some(0);
-    }
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let mut idx = (nanos as usize) % len;
-    if Some(idx) == pl.current {
-        idx = (idx + 1) % len;
-    }
-    Some(idx)
-}
 
 // fallback bars removed (leave spectrum empty when unavailable)
 

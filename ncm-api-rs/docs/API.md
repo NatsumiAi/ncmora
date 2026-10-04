@@ -2,7 +2,11 @@
 
 > 本文档对应 [NeteaseCloudMusicApi Enhanced](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced) 的 Rust SDK 版本，涵盖所有已实现的接口。
 >
-> 所有接口方法均挂载在 `ApiClient` 上，通过 `Query` 对象传参。使用前请先阅读 [README](../README.md) 了解基本用法。
+> 所有接口方法均挂载在 `ApiClient` 上，通过 `Query` 对象传参。使用前请先阅读 [CNMPlayer README](../../README.md) 了解仓库集成方式。
+
+请求路径必须使用 `/api/<endpoint>` 形式；空 endpoint、非 `/api/` 路径以及非对象 `data` 参数会在发起网络请求前返回 `InvalidParam`。网络代理不在 `Query` 或请求选项中配置，请在外部构造并注入已配置代理的 `cyper::Client`。
+
+响应 JSON 格式错误会返回 `ResponseDecode`（仅包含格式、响应长度与底层 serde 错误，不回显响应正文）；加密响应解码失败会返回 `Crypto`。传输超时属于 `Http` 错误。
 
 ---
 
@@ -935,38 +939,7 @@ let result = client.song_url_v1_302(&query).await?;
 
 ---
 
-#### 歌曲播放链接 (ncmget)
 
-说明 : ncmget 占位接口，始终返回空数据
-
-**方法名 :** `song_url_ncmget`
-
-**调用例子 :**
-```rust
-let query = Query::new();
-let result = client.song_url_ncmget(&query).await?;
-```
-
----
-
-#### 直接获取灰色歌曲链接
-
-说明 : 网易云歌曲解灰功能。注意：此功能依赖外部 unblockmusic-utils，Rust SDK 暂不支持，调用会返回不支持的错误。
-
-**必选参数 :** `id` : 音乐 id
-
-**可选参数 :** `source` : 选择要解灰的音源，不支持多音源
-
-**方法名 :** `song_url_match`
-
-**调用例子 :**
-```rust
-let query = Query::new().param("id", "1969519579");
-let result = client.song_url_match(&query).await?;
-// 注意: Rust SDK 暂不支持此功能，会返回 500 状态码
-```
-
----
 
 #### 获取客户端歌曲下载 url
 
@@ -6455,4 +6428,4 @@ let result = client.verify_qrcodestatus(&query).await.unwrap();
 
 ### License
 
-本项目基于 [MIT License](LICENSE) 开源。
+本项目基于 [WTFPL v2](../LICENSE) 开源。

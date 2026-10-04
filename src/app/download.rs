@@ -4,6 +4,7 @@
 
 use crate::app::api::ApiState;
 use crate::data::config::AudioQuality;
+use crate::data::icons::UiIcons;
 use crate::launch;
 use anyhow::{Context, Result};
 use compio::io::{AsyncWrite, AsyncWriteExt};
@@ -36,16 +37,6 @@ const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// [`CANCEL_POLL_INTERVAL`] 切片（慢速但活着的下载不该被误杀）。
 const NET_PHASE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// 未下载（Nerd Font `ec74`）。
-pub const ICON_DOWNLOAD: char = '\u{ec74}';
-/// 已下载（Nerd Font `f00c`）。
-pub const ICON_DONE: char = '\u{f00c}';
-/// 下载中的旋转帧：Braille 转轮（`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`）。
-const SPINNER_FRAMES: [char; 10] = [
-    '\u{280b}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}', '\u{2826}', '\u{2827}',
-    '\u{2807}', '\u{280f}',
-];
-const SPINNER_FRAME_MS: u128 = 100;
 
 /// 下载按钮/图标三态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,14 +47,11 @@ pub enum DownloadState {
 }
 
 /// 三态对应的字形；`Downloading` 按相位取旋转帧（time-based，空闲节流下也自洽）。
-pub fn state_glyph(state: DownloadState, phase: Duration) -> char {
+pub fn state_glyph(state: DownloadState, phase: Duration, icons: UiIcons) -> char {
     match state {
-        DownloadState::NotDownloaded => ICON_DOWNLOAD,
-        DownloadState::Done => ICON_DONE,
-        DownloadState::Downloading => {
-            let frame = (phase.as_millis() / SPINNER_FRAME_MS) as usize;
-            SPINNER_FRAMES[frame % SPINNER_FRAMES.len()]
-        }
+        DownloadState::NotDownloaded => icons.download(),
+        DownloadState::Done => icons.downloaded(),
+        DownloadState::Downloading => icons.downloading(phase),
     }
 }
 
@@ -109,10 +97,9 @@ pub fn is_null_download_path(raw: &str) -> bool {
     raw.trim().eq_ignore_ascii_case(DOWNLOAD_PATH_NULL)
 }
 
-/// 解析并校验用户填写的下载目录。
-///
-/// 留空或填 `Null`（忽略大小写与首尾空白）都表示**显式禁用下载**；
-/// 其余必须是非空的绝对路径、能建出来且可写。
+/// Pure syntax parsing for configuration/UI: never creates directories or probes disk.
+/// Empty/`Null` disables downloads; other paths must be absolute.
+/// Settings commits must additionally await [`validate_download_path`].
 pub fn parse_download_path(raw: &str) -> Result<DownloadPathChoice, DownloadPathError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || is_null_download_path(trimmed) {
@@ -124,27 +111,30 @@ pub fn parse_download_path(raw: &str) -> Result<DownloadPathChoice, DownloadPath
         return Err(DownloadPathError::NotAbsolute);
     }
 
-    if !is_writable_dir(&path) {
-        return Err(DownloadPathError::NotWritable);
-    }
-
     Ok(DownloadPathChoice::Dir(path))
 }
 
-/// 目录可写性用一次真实的建/删探针判定：`create_dir_all` 在"目录已存在但只读"时也会成功。
-fn is_writable_dir(dir: &Path) -> bool {
-    if std::fs::create_dir_all(dir).is_err() {
-        return false;
+/// Validate a settings edit without blocking the UI/reactor.
+pub async fn validate_download_path(raw: &str) -> Result<DownloadPathChoice, DownloadPathError> {
+    let choice = parse_download_path(raw)?;
+    if let DownloadPathChoice::Dir(dir) = &choice {
+        compio::fs::create_dir_all(dir)
+            .await
+            .map_err(|_| DownloadPathError::NotWritable)?;
+        static PROBE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = PROBE_ID.fetch_add(1, Ordering::Relaxed);
+        let probe = dir.join(format!(".cnmplayer-write-test-{}-{id}", std::process::id()));
+        let file = compio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&probe)
+            .await
+            .map_err(|_| DownloadPathError::NotWritable)?;
+        let close = file.close().await;
+        let remove = compio::fs::remove_file(&probe).await;
+        close.and(remove).map_err(|_| DownloadPathError::NotWritable)?;
     }
-
-    let probe = dir.join(format!(".cnmplayer-write-test-{}", std::process::id()));
-    match std::fs::write(&probe, b"") {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&probe);
-            true
-        }
-        Err(_) => false,
-    }
+    Ok(choice)
 }
 
 /// 文件名片段清理：路径分隔符换成 `-`（`AC/DC` → `AC-DC`）、其余非法字符丢掉、
@@ -237,12 +227,13 @@ impl DownloadTarget {
         self.dir.join(format!("{}.{ext}.part", self.base))
     }
 
-    /// 已经落盘的音频（两个扩展名都认），用于"已下载"图标。
-    pub fn existing_file(&self) -> Option<PathBuf> {
+    /// Blocking-only lookup; called by the bounded status worker, never rendering.
+    fn existing_file(&self) -> Option<PathBuf> {
         AUDIO_EXTENSIONS
             .iter()
             .map(|ext| self.file_path(ext))
-            .find(|path| path.is_file())
+            .find(|path| std::fs::metadata(path)
+                .is_ok_and(|meta| meta.is_file() && meta.len() > 0))
     }
 }
 
@@ -420,6 +411,10 @@ pub struct DownloadManager {
     jobs: HashMap<String, JobHandle>,
     /// `目标前缀 -> 是否已落盘`：避免每帧对每一行都 stat 磁盘。
     disk_cache: HashMap<String, bool>,
+    /// At most one 256-row blocking batch and one pending batch, never UI stat calls.
+    disk_pending: HashMap<String, DownloadTarget>,
+    disk_lookup: Option<std::sync::mpsc::Receiver<(u64, Vec<(String, bool)>)>>,
+    disk_epoch: u64,
     /// 任务表 / 磁盘缓存的变化计数：行内 memo 据此决定是否重算状态。
     version: u64,
 }
@@ -431,6 +426,9 @@ impl DownloadManager {
             api,
             jobs: HashMap::new(),
             disk_cache: HashMap::new(),
+            disk_pending: HashMap::new(),
+            disk_lookup: None,
+            disk_epoch: 0,
             version: 0,
         }
     }
@@ -544,6 +542,7 @@ impl DownloadManager {
     /// 每帧搬运完成的任务。
     pub fn poll(&mut self) -> Vec<DownloadEvent> {
         let mut events = Vec::new();
+        self.poll_disk_status();
 
         // 队列里轮到自己开始写盘的任务：报一次"开始下载"（先来后到）。
         for job in self.jobs.values_mut() {
@@ -633,22 +632,53 @@ impl DownloadManager {
             };
         }
 
-        let done = target.existing_file().is_some();
-        // 缓存别无限涨：超过阈值就整体清空（下次按需重查）。
-        if self.disk_cache.len() > 4096 {
-            self.disk_cache.clear();
+        if self.disk_pending.len() < 256 && !self.disk_pending.contains_key(key) {
+            self.disk_pending.insert(key.to_string(), target.clone());
         }
-        self.disk_cache.insert(key.to_string(), done);
-        if done {
-            DownloadState::Done
-        } else {
-            DownloadState::NotDownloaded
+        DownloadState::NotDownloaded
+    }
+
+    fn poll_disk_status(&mut self) {
+        let result = self.disk_lookup.as_ref().map(|rx| rx.try_recv());
+        match result {
+            Some(Ok((epoch, rows))) => {
+                self.disk_lookup = None;
+                if epoch == self.disk_epoch {
+                    if self.disk_cache.len() + rows.len() > 4096 {
+                        self.disk_cache.clear();
+                    }
+                    for (key, done) in rows {
+                        self.disk_pending.remove(&key);
+                        self.disk_cache.entry(key).or_insert(done);
+                    }
+                    self.bump_version();
+                }
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                self.disk_lookup = None;
+                self.bump_version();
+            }
+            _ => {}
+        }
+        if self.disk_lookup.is_none() && !self.disk_pending.is_empty() {
+            let pending = std::mem::take(&mut self.disk_pending);
+            let epoch = self.disk_epoch;
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            self.disk_lookup = Some(rx);
+            compio::runtime::spawn_blocking(move || {
+                let rows = pending.into_iter()
+                    .map(|(key, target)| (key, target.existing_file().is_some()))
+                    .collect();
+                let _ = tx.send((epoch, rows));
+            }).detach();
         }
     }
 
     /// 下载根目录变化（设置里改了路径）后作废磁盘缓存。
     pub fn clear_disk_cache(&mut self) {
         self.disk_cache.clear();
+        self.disk_pending.clear();
+        self.disk_epoch = self.disk_epoch.wrapping_add(1);
         self.bump_version();
     }
 }
@@ -706,7 +736,7 @@ async fn download_task(
         return Err(TaskError::Cancelled);
     }
 
-    if let Err(err) = std::fs::create_dir_all(&request.target.dir) {
+    if let Err(err) = compio::fs::create_dir_all(&request.target.dir).await {
         return Err(TaskError::Failed(format!("创建下载目录失败: {err}")));
     }
 
@@ -717,47 +747,39 @@ async fn download_task(
     match stream_to_file(api, &source.url, &part_path, shared).await {
         Ok(()) => {}
         Err(TaskError::Cancelled) => {
-            let _ = std::fs::remove_file(&part_path);
+            let _ = compio::fs::remove_file(&part_path).await;
             return Err(TaskError::Cancelled);
         }
         Err(err) => {
-            let _ = std::fs::remove_file(&part_path);
+            let _ = compio::fs::remove_file(&part_path).await;
             return Err(err);
         }
     }
 
     if cancelled() {
-        let _ = std::fs::remove_file(&part_path);
+        let _ = compio::fs::remove_file(&part_path).await;
         return Err(TaskError::Cancelled);
     }
 
-    // 覆盖同名文件；顺带清掉同名但扩展名不同的旧文件，避免一份歌两份体积。
+    // Keep the previous final file intact until both audio and tag work have finished.
+    // Blocking tag writes cannot be cancelled by dropping their JoinHandle: await them
+    // before cleanup/rename so an old writer never races a replacement download.
+    let tag_error = write_metadata(api, &request, &part_path, ext, shared)
+        .await
+        .err()
+        .map(|err| err.to_string());
+    if cancelled() {
+        let _ = compio::fs::remove_file(&part_path).await;
+        return Err(TaskError::Cancelled);
+    }
     if let Err(err) = compio::fs::rename(&part_path, &final_path).await {
-        let _ = std::fs::remove_file(&part_path);
+        let _ = compio::fs::remove_file(&part_path).await;
         return Err(TaskError::Failed(format!("重命名失败: {err}")));
     }
     for other in AUDIO_EXTENSIONS {
-        if other == ext {
-            continue;
+        if other != ext {
+            let _ = compio::fs::remove_file(request.target.file_path(other)).await;
         }
-        let stale = request.target.file_path(other);
-        if stale.is_file() {
-            let _ = std::fs::remove_file(&stale);
-        }
-    }
-
-    let tag_error = match compio::time::timeout(
-        NET_PHASE_TIMEOUT,
-        write_metadata(api, &request, &final_path, cancelled()),
-    )
-    .await
-    {
-        Ok(result) => result.err().map(|err| err.to_string()),
-        Err(_) => Some("元数据获取超时（音频文件已保留）".to_string()),
-    };
-
-    if cancelled() {
-        return Err(TaskError::Cancelled);
     }
 
     Ok(DownloadOutcome {
@@ -799,6 +821,8 @@ async fn stream_to_file(
         Ok(response) => response,
         Err(err) => return Err(TaskError::Failed(err.to_string())),
     };
+    let expected = response.content_length();
+    let mut downloaded = 0u64;
 
     let file = match compio::fs::OpenOptions::new()
         .create(true)
@@ -831,6 +855,14 @@ async fn stream_to_file(
             Ok(None) => break,
             Err(_) => continue,
         };
+        let Some(next) = downloaded.checked_add(chunk.len() as u64) else {
+            let _ = file.close().await;
+            return Err(TaskError::Failed("下载长度溢出".to_string()));
+        };
+        if expected.is_some_and(|total| next > total) {
+            let _ = file.close().await;
+            return Err(TaskError::Failed("下载超过 Content-Length".to_string()));
+        }
 
         if let Err(err) = cursor.write_all(chunk).await.0 {
             let _ = file.close().await;
@@ -840,10 +872,14 @@ async fn stream_to_file(
             let _ = file.close().await;
             return Err(TaskError::Failed(err.to_string()));
         }
+        downloaded = next;
     }
 
     if let Err(err) = file.close().await {
         return Err(TaskError::Failed(err.to_string()));
+    }
+    if downloaded == 0 || expected.is_some_and(|total| downloaded != total) {
+        return Err(TaskError::Failed("下载内容为空或 Content-Length 不符".to_string()));
     }
     Ok(())
 }
@@ -853,26 +889,32 @@ async fn write_metadata(
     api: &ApiState,
     request: &DownloadRequest,
     path: &Path,
-    cancelled: bool,
+    extension: &'static str,
+    shared: &JobShared,
 ) -> Result<()> {
-    if cancelled {
+    if shared.cancelled.load(Ordering::SeqCst) {
         return Ok(());
     }
-
-    let metadata = fetch_song_metadata(api, request).await;
-    let lyrics = fetch_lyrics(api, &request.song_id).await;
-    let cover = match metadata.album_cover_url.as_deref() {
-        Some(url) => api.fetch_cover_bytes(url).await.ok(),
-        None => None,
-    };
-
-    let path = path.to_path_buf();
-    let result = compio::runtime::spawn_blocking(move || {
-        write_tags_blocking(&path, &metadata, cover.as_deref(), lyrics.as_deref())
+    let (metadata, lyrics, cover) = compio::time::timeout(NET_PHASE_TIMEOUT, async {
+        let metadata = fetch_song_metadata(api, request).await;
+        let lyrics = fetch_lyrics(api, &request.song_id).await;
+        let cover = match metadata.album_cover_url.as_deref() {
+            Some(url) => api.fetch_cover_bytes(url).await.ok(),
+            None => None,
+        };
+        (metadata, lyrics, cover)
     })
     .await
-    .unwrap();
-    result
+    .map_err(|_| anyhow::anyhow!("元数据获取超时（音频文件已保留）"))?;
+    if shared.cancelled.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let path = path.to_path_buf();
+    compio::runtime::spawn_blocking(move || {
+        write_tags_blocking(&path, extension, &metadata, cover.as_deref(), lyrics.as_deref())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("tag writer task panicked"))?
 }
 
 /// 歌曲详情里的元数据（拿不到就回落到请求里带的展示字段）。
@@ -971,6 +1013,7 @@ fn normalize_extension(file_type: &str) -> &'static str {
 /// 写标签：标题/作者/专辑/曲目号/日期/歌词/内嵌封面（ID3v2 与 Vorbis Comment 都走这一套）。
 fn write_tags_blocking(
     path: &Path,
+    extension: &str,
     metadata: &SongMetadata,
     cover: Option<&[u8]>,
     lyrics: Option<&str>,
@@ -979,14 +1022,8 @@ fn write_tags_blocking(
     use lofty::picture::{MimeType, Picture, PictureType};
     use lofty::tag::{Accessor, ItemKey, Tag, TagExt, TagType};
 
-    // 扩展名即容器类型（文件是本次刚下下来的）：mp3 → ID3v2，flac → Vorbis Comment。
-    let tag_type = match path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    // The temporary filename ends in `.part`; use the downloaded container explicitly.
+    let tag_type = match extension {
         "flac" => TagType::VorbisComments,
         _ => TagType::Id3v2,
     };
@@ -1051,6 +1088,38 @@ fn civil_date_from_unix_ms(ms: i64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[compio::test]
+    async fn row_status_is_loaded_by_poll_and_invalidated_after_root_change() {
+        let directory = std::env::temp_dir().join(format!(
+            "cnmplayer-download-status-{}", std::process::id()));
+        compio::fs::create_dir_all(&directory).await.unwrap();
+        let target = DownloadTarget { dir: directory.clone(), base: "song".to_string() };
+        compio::fs::write(target.file_path("mp3"), b"audio".to_vec()).await.0.unwrap();
+        let api = ApiState::new(None, cyper::Client::builder().build().unwrap()).unwrap();
+        let mut manager = DownloadManager::new(api);
+        let row = DownloadRow::new("42".to_string(), target.clone());
+        assert_eq!(manager.state_of_row(&row), DownloadState::NotDownloaded,
+            "render-time lookup must not stat an uncached row");
+        compio::time::timeout(Duration::from_secs(5), async {
+            while manager.state_of_row(&row) != DownloadState::Done {
+                manager.poll();
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }).await.unwrap();
+        compio::fs::remove_file(target.file_path("mp3")).await.unwrap();
+        manager.clear_disk_cache();
+        let version = manager.version();
+        assert_eq!(manager.state_of_row(&row), DownloadState::NotDownloaded);
+        compio::time::timeout(Duration::from_secs(5), async {
+            while manager.version() == version {
+                manager.poll();
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }).await.unwrap();
+        assert_eq!(manager.state_of_row(&row), DownloadState::NotDownloaded);
+        compio::fs::remove_dir_all(directory).await.unwrap();
+    }
 
     #[test]
     fn stem_skips_missing_parts() {
@@ -1140,37 +1209,17 @@ mod tests {
     }
 
     #[test]
-    fn state_glyph_uses_expected_frames() {
-        let phase = Duration::from_millis(0);
-        assert_eq!(
-            state_glyph(DownloadState::NotDownloaded, phase),
-            ICON_DOWNLOAD
-        );
-        assert_eq!(state_glyph(DownloadState::Done, phase), ICON_DONE);
-        assert_eq!(
-            state_glyph(DownloadState::Downloading, phase),
-            SPINNER_FRAMES[0]
-        );
-        assert_eq!(
-            state_glyph(
-                DownloadState::Downloading,
-                Duration::from_millis(SPINNER_FRAME_MS as u64)
-            ),
-            SPINNER_FRAMES[1]
-        );
-    }
-
-    /// 加载态是 Braille 转轮：每帧都是 Braille 块，且十帧互不相同。
-    #[test]
-    fn spinner_frames_are_braille_and_distinct() {
-        for frame in SPINNER_FRAMES {
-            assert!(
-                ('\u{2800}'..='\u{28ff}').contains(&frame),
-                "{frame:?} 不是 Braille 字符"
-            );
-        }
-        let unique: std::collections::HashSet<char> = SPINNER_FRAMES.iter().copied().collect();
-        assert_eq!(unique.len(), SPINNER_FRAMES.len());
+    fn state_glyph_respects_runtime_icon_mode() {
+        use crate::data::icons::IconMode;
+        let nerd = UiIcons::for_mode(IconMode::Nerd);
+        let ascii = UiIcons::for_mode(IconMode::Ascii);
+        let phase = Duration::ZERO;
+        assert_eq!(state_glyph(DownloadState::NotDownloaded, phase, nerd), '\u{ec74}');
+        assert_eq!(state_glyph(DownloadState::Done, phase, nerd), '\u{f00c}');
+        assert_eq!(state_glyph(DownloadState::Downloading, phase, nerd), '\u{280b}');
+        assert_eq!(state_glyph(DownloadState::NotDownloaded, phase, ascii), 'v');
+        assert_eq!(state_glyph(DownloadState::Done, phase, ascii), '+');
+        assert!(state_glyph(DownloadState::Downloading, phase, ascii).is_ascii());
     }
 
     /// 预计算行的 key 必须与 `state_of` 内部构造的一致（否则磁盘缓存查不到）。

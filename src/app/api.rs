@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use cyper::{Client, Response};
 use futures::StreamExt;
+use image::load_from_memory;
 use ncm_api::{ApiClient, ApiResponse, Query};
 
 const MAX_COVER_IMAGE_BYTES: usize = 5 * 1024 * 1024;
@@ -393,8 +394,8 @@ impl ApiState {
 
         let response = self.http.get(url)?.send().await?;
         let response = error_for_status(response)?;
-
-        if let Some(content_len) = response.content_length() {
+        let expected_len = response.content_length();
+        if let Some(content_len) = expected_len {
             if content_len > MAX_COVER_IMAGE_BYTES as u64 {
                 return Err(anyhow!(
                     "cover image exceeds {} byte limit",
@@ -403,27 +404,35 @@ impl ApiState {
             }
         }
 
-        let mut bytes = Vec::with_capacity(64 * 1024);
+        let mut bytes = Vec::with_capacity(expected_len.unwrap_or(64 * 1024) as usize);
         let mut stream = response.bytes_stream();
-        while let Some(Ok(chunk)) = stream.next().await {
-            if chunk.is_empty() {
-                continue;
-            }
-
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.with_context(|| format!("download cover image failed: {url}"))?;
             if bytes.len().saturating_add(chunk.len()) > MAX_COVER_IMAGE_BYTES {
                 return Err(anyhow!(
                     "cover image exceeds {} byte limit",
                     MAX_COVER_IMAGE_BYTES
                 ));
             }
-
             bytes.extend_from_slice(&chunk);
         }
 
-        let bytes = Ok::<Vec<u8>, anyhow::Error>(bytes)
-            .with_context(|| format!("download cover image failed: {}", url))?;
-
-        Ok(bytes)
+        if let Some(expected_len) = expected_len {
+            if bytes.len() != expected_len as usize {
+                return Err(anyhow!(
+                    "cover image length mismatch: expected {expected_len}, got {}",
+                    bytes.len()
+                ));
+            }
+        }
+        if bytes.is_empty() {
+            return Err(anyhow!("cover image response was empty"));
+        }
+        let validated = compio::runtime::spawn_blocking(move || load_from_memory(&bytes).map(|_| bytes))
+            .await
+            .map_err(|_| anyhow!("cover image validation task panicked"))?
+            .with_context(|| format!("invalid cover image: {url}"))?;
+        Ok(validated)
     }
 
     fn query_with_cookie(&self) -> Query {
