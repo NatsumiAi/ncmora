@@ -1170,17 +1170,21 @@ mod tests {
             immediate.observe(window_level(&immediate.snapshot), 40, 20);
             immediate.rasterize();
             let initialized = circle_state(amplitude);
-            assert_eq!(lit_dots(&immediate), lit_dots(&initialized),
-                "first frame must use the same calibrated scale as normal playback");
+            assert_eq!(
+                lit_dots(&immediate),
+                lit_dots(&initialized),
+                "first frame must use the same calibrated scale as normal playback"
+            );
             immediate.observe(None, 40, 20);
             immediate.snapshot = synth(882, circle(0.3, 110.0, std::f32::consts::FRAC_PI_2));
             immediate.observe(window_level(&immediate.snapshot), 40, 20);
             immediate.rasterize();
-            assert!((immediate.scale_peak - 0.3).abs() < 1.0e-3,
-                "new PCM samples after reset recalibrate before drawing");
+            assert!(
+                (immediate.scale_peak - 0.3).abs() < 1.0e-3,
+                "new PCM samples after reset recalibrate before drawing"
+            );
         }
     }
-
 
     /// 缩放基准 = 本曲开播以来的最大峰值：只增不减；更响的段落把基准
     /// 上调、更安静的段落不拉低；环重置→样本重现（切歌）后从零重新累积。

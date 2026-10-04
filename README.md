@@ -73,7 +73,7 @@ Artists and playlists are capped at the 5 most relevant hits and never paginate;
 
 ### Playback
 
-- Streaming: the song is downloaded while playing into `<cache>/audio/<song_id>__<quality>.part` and renamed to `.audio` once complete; a completed cache file is played straight from disk, and the buffered part of the progress bar is the download
+- Streaming: the song downloads into `<cache>/audio/<song_id>__<quality>.<pid>-<job_id>.part` and is renamed to `<song_id>__<quality>.audio` only after the complete response is written successfully. Independent temporary files prevent cancellation of an old task from affecting its replacement. Completed cache files play directly from disk; the buffered part of the progress bar shows download progress.
 - Seeking from the progress bar or inside the fullscreen page, with a pulse animation while the position catches up
 - Queue memory (`playback_memory`): queue, current index, repeat mode and the queue's origin list are saved on every track change and restored after login — the restored track starts from the beginning
 - VIP-aware audio quality (`audio_quality`): 9 levels from `standard` to `jymaster`; a non-VIP account is clamped to `exhigh`
@@ -98,6 +98,7 @@ Artists and playlists are capped at the 5 most relevant hits and never paginate;
 - `lyrics` (shown as "Lyrics") — the right-hand side only shows the lyrics; no visualizer is drawn. The old `off` value still selects this mode.
 - `bars` — cava spectrum bars. Requires the external `cava` binary.
 - `vector` — a Lissajous-style vectorscope: the left channel drives the horizontal axis and the right channel the vertical one (up = positive, always), drawn dot by dot with the same braille raster as the oscilloscope and scaled so the track's loudest moment so far fills the panel (only track changes restart it). On pause or a sudden cut to silence the figure bursts apart into drifting dots that settle and softly twinkle until playback resumes. Needs no cava
+- The vectorscope calibrates from the first valid PCM window before drawing that frame; its peak reference then only increases, and the first valid window after a PCM reset recalibrates it. Pausing the oscilloscope commits its exact settled frame without requiring another input event.
 - If cava is missing, the default becomes `oscilloscope` and cycling the setting skips `bars` instead of failing.
 - The collapsed player bar draws a 10-cell braille mini spectrum from cava; that spot stays blank in `lyrics` and `hidden` because cava is not started there. The narrow small window draws a stereo VU meter driven by a 400 ms momentary LUFS meter (display range −60…0 LUFS).
 
