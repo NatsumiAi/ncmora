@@ -74,11 +74,7 @@ pub struct Config {
     pub graphics_protocol: GraphicsProtocol,
 
     #[serde(default)]
-    pub icon_mode: crate::data::icons::IconMode,
-
-    #[serde(default)]
     pub super_smooth_bar: bool,
-
     #[serde(default)]
     pub bars_gap: bool,
 
@@ -592,7 +588,6 @@ impl Default for Config {
             transparent_background: true,
             album_border: default_album_border(),
             graphics_protocol: GraphicsProtocol::default(),
-            icon_mode: crate::data::icons::IconMode::default(),
             super_smooth_bar: false,
             bars_gap: false,
             bar_number: default_bar_number(),
@@ -697,7 +692,6 @@ impl Config {
             || !raw.contains("bar_number")
             || !raw.contains("bar_channels")
             || !raw.contains("bar_channel_reverse")
-            || !raw.contains("icon_mode")
             || graphics_protocol_needs_save
             || !raw.contains("keybind_search_box")
             || !raw.contains("keybind_fullscreen")

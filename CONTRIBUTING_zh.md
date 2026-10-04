@@ -38,7 +38,7 @@ sudo pacman -S --needed base-devel cmake pkg-config alsa-lib chafa pipewire open
 - `libclang-dev` 与 `libpipewire-0.3-dev` 是 PipeWire 音频后端在构建期生成绑定所需；
 - `libasound2-dev` / `alsa-lib` **只在构建期需要**：`cpal` 在 Linux 上无条件编译其 ALSA 后端，缺了这个开发包就构建不出来；但播放走 PipeWire，ALSA 路径不属于受支持的运行配置。
 
-运行要求：Linux 上的 PipeWire 音频（ALSA 后端已弃用，不要按它测试或写文档），外加运行时的 chafa 共享库与可选的 `cava` 可执行文件。`icon_mode = "auto"` 会在 `TERM` 识别为 Linux TTY（包括 `KMSCON`）时使用 ASCII 图标，在普通终端模拟器使用 Nerd 字形；Nerd Font 不是必需的。
+运行要求：Linux 上的 PipeWire 音频（ALSA 后端已弃用，不要按它测试或写文档），外加运行时的 chafa 共享库与可选的 `cava` 可执行文件。播放和导航图标要求安装 Nerd Font，程序固定使用 Nerd Font 字形。
 
 常用命令：
 
@@ -99,9 +99,9 @@ cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
 终端界面不能只满足于「在我机器上是好的」。
 
 - **键盘是主要交互方式。** 设计以键盘操作优先：任何功能都必须仅靠键盘就能到达并操作，两者冲突时以键盘路径为准。鼠标交互只是叠加在上层的附加功能，用于非必要功能，绝不能成为到达某个功能的唯一途径。
-- **基本功能必须能在纯 TTY 下可用。** 以 `KMSCON` 为基准环境：没有模拟器专属转义序列，没有 Nerd Font，鼠标上报甚至可能完全不可用；`icon_mode = "auto"` 在这里使用 ASCII 图标。登录、浏览、播放控制与退出都必须在那里保持可用。
+- **基本功能必须能在纯 TTY 下可用。** 以 `KMSCON` 为基准环境：没有模拟器专属转义序列，鼠标上报甚至可能完全不可用；必须安装 Nerd Font 才能正确显示图标。登录、浏览、播放控制与退出都必须在那里保持可用。
 - **渲染类改动要附渲染证据。** 任何改变「画出来的东西」的改动 —— 布局、动画、封面、可视化、配色 —— 都要在 PR 里附截图或简短录屏。
-- **说明你的运行环境**：终端模拟器（名称与版本）、所用字体、终端尺寸与 `TERM` 值。`icon_mode` 不做字体探测：`auto` 按 Linux TTY 判断，`ascii` / `nerd` 是显式覆盖；涉及输入时还要尝试 `KMSCON` 风格的纯 TTY。
+- **说明你的运行环境**：终端模拟器（名称与版本）、字体、终端尺寸与 `TERM` 值。图标集固定使用 Nerd Font，不提供运行时字体能力探测；涉及输入时还要尝试 `KMSCON` 风格的纯 TTY。
 - **覆盖小窗口阈值。** 主程序内容页低于 README「小窗口模式」一节给出的阈值时会切换为扁平布局；请在边界尺寸上验证，包括 `Terminal too small` 的情况。
 - **改动到的控件要实测键盘路径，有鼠标目标的一并实测鼠标路径**：折叠播放栏的上一首 / 播放暂停 / 下一首、收藏与循环模式按钮，以及进度条都可点击；侧边栏支持滚轮、单击与双击（400 ms 判定窗口）。
 - **新增或修改界面文案时，中英两种界面语言都要检查**（`language = "zh"` / `"en"`）。

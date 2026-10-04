@@ -174,7 +174,7 @@ sudo apt install -y build-essential cmake pkg-config \
 
 - Linux 上的 PipeWire 音频（ALSA 后端已弃用），以及运行时的 chafa 共享库
 - 可选的 `cava` 可执行文件，用于 `bars` 频谱
-- Nerd Font 不是必需的：`icon_mode = "auto"` 会在 `KMSCON` 等 Linux TTY 使用 ASCII 图标，在普通终端模拟器默认使用 Nerd 字形。
+- 播放与导航图标要求 Nerd Font；程序固定使用 Nerd Font 字形，不根据 `TERM` 猜测字体能力。
 
 ## cava
 
@@ -218,7 +218,6 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 | `theme` | `frappe` | `themes/*.toml` 里的任意主题 key（内置 20 款，自动识别自定义文件）；选中的主题文件损坏时回退默认主题 |
 | `language` | `zh` | `zh`、`en` |
 | `visualize` | 有 cava 时为 `bars`，否则 `oscilloscope` | `hidden`（设置里显示「关闭」）、`lyrics`（「仅歌词」，旧的 `off` 同义）、`bars`、`oscilloscope`、`vector`；只有 `bars` 依赖 cava |
-| `icon_mode` | `auto` | `auto`、`ascii`、`nerd`；`auto` 在 Linux TTY（包括 `KMSCON`）使用 ASCII，在普通终端模拟器使用 Nerd 字形；`ascii` 与 `nerd` 可强制指定图标集 |
 | `transparent_background` | `true` | 使用终端背景 |
 | `album_border` | `true` | 全屏封面边框 |
 | `show_hints` | `true` | 内容页提示行，以及全屏页面板边框内的提示文字 |
@@ -332,7 +331,7 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 ## 注意事项
 
 - 没有命令行参数。可用的环境变量是 `CNMPLAYER_ASSET_DIR`（资产根目录）、`TMPLAYER_CAVA`（显式指定 cava，名称为兼容旧配置而保留）与 `COLORTERM` / `TERM`（颜色能力探测）。
-- `icon_mode = "auto"` 会在 Linux TTY（包括 `KMSCON`）使用 ASCII 图标，在普通终端模拟器使用 Nerd 字形；也可用 `ascii` 或 `nerd` 强制指定图标集。
+- 播放与导航图标要求 Nerd Font；CNMPlayer 不根据 `TERM` 猜测字形是否可用。
 - 没有独立的专辑页；专辑搜索结果与作者页里的专辑都以歌单页样式展示。
 - 原生音频后端会把告警直接写到 stderr；CNMPlayer 把 fd 2 重定向到 `Player.stderr.log`，避免这些信息糊掉 TUI。
 - 预编译产物与 AUR 包只提供 Linux `amd64` 与 `aarch64`；MPRIS 同样仅 Linux 可用。

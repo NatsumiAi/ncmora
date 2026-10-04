@@ -146,7 +146,7 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         height: 1,
     };
 
-    let icons = UiIcons::for_mode(app.config.icon_mode);
+    let icons = UiIcons::new();
     let prev_label = icons.previous();
     let play_label = icons.play_pause(app.playback.playback_state == PlaybackRuntimeState::Playing);
     let next_label = icons.next();
@@ -517,25 +517,6 @@ mod tests {
     use super::*;
     use crate::app::download::{DownloadState, state_glyph};
 
-    #[test]
-    fn ascii_suffix_geometry_covers_the_visible_heart_without_overlapping_download() {
-        let icons = UiIcons::with_console(crate::data::icons::IconMode::Ascii, true);
-        let area = row(5, 12);
-        let heart_text = icons.heart(true);
-        let (download, heart) = right_suffix_hits(area, heart_text, Some(icons.download()));
-        let heart = heart.unwrap();
-        let download = download.unwrap();
-        assert_eq!((heart.x, heart.width), (14, 3));
-        assert_eq!((download.x, download.width), (12, 1));
-        let line = compose_left_right_line("Title", "v [*]", 12);
-        assert!(line.ends_with("v [*]"));
-        assert_eq!(display_width(&line), 12);
-        assert!(
-            right_suffix_hits(row(0, 2), heart_text, Some(icons.download()))
-                .1
-                .is_none()
-        );
-    }
 
     fn row(x: u16, width: u16) -> Rect {
         Rect {
@@ -601,8 +582,8 @@ mod tests {
     /// 下载图标本身必须是 1 格宽（否则左列排版会漂）。
     #[test]
     fn download_glyphs_are_single_cell() {
-        use crate::data::icons::{IconMode, UiIcons};
-        let icons = UiIcons::for_mode(IconMode::Nerd);
+        use crate::data::icons::UiIcons;
+        let icons = UiIcons::new();
         let phase = Duration::from_millis(0);
         for state in [
             DownloadState::NotDownloaded,
@@ -624,7 +605,7 @@ mod tests {
         for heart in [HEART_LIKED, HEART_UNLIKED] {
             assert_eq!(display_width(heart), 1, "爱心应为 1 格宽：{heart:?}");
         }
-        let icons = UiIcons::for_mode(crate::data::icons::IconMode::Nerd);
+        let icons = UiIcons::new();
         for symbol in [
             icons.sequence(),
             icons.shuffle(),

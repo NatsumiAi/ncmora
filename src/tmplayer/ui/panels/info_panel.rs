@@ -254,7 +254,7 @@ pub fn cover_content_rect(cover: Rect) -> Rect {
 }
 
 pub fn heart_cells(meta: Rect, app: &AppState) -> Option<(u16, u16, u16)> {
-    let heart = UiIcons::for_mode(app.config.icon_mode).heart(app.player.liked);
+    let heart = UiIcons::new().heart(app.player.liked);
     let width = heart.width() as u16;
     (meta.height > 0 && width > 0 && width <= meta.width)
         .then(|| (meta.x + meta.width - width, meta.y, width))
@@ -282,7 +282,7 @@ pub fn download_glyph(app: &AppState) -> Option<char> {
     Some(crate::app::download::state_glyph(
         state,
         app.download_phase(),
-        UiIcons::for_mode(app.config.icon_mode),
+        UiIcons::new(),
     ))
 }
 
@@ -354,7 +354,7 @@ pub fn render(f: &mut Frame, area: Rect, window_width: u16, app: &mut AppState) 
         let title = app.player.track.title.as_str();
         let artist = app.player.track.artist.as_str();
         let album = app.player.track.album.as_str();
-        let heart = UiIcons::for_mode(app.config.icon_mode).heart(app.player.liked);
+        let heart = UiIcons::new().heart(app.player.liked);
 
         let text_style = Style::default().fg(app.theme.color_text());
         let sub_style = Style::default().fg(app.theme.color_subtext());

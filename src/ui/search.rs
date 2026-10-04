@@ -434,12 +434,8 @@ fn render_search_row(
             .x
             .saturating_add((display_width(&clipped_left) + space) as u16);
         spans.push(Span::styled(
-            crate::app::download::state_glyph(
-                state,
-                app.download_spinner_phase(),
-                UiIcons::for_mode(app.config.icon_mode),
-            )
-            .to_string(),
+            crate::app::download::state_glyph(state, app.download_spinner_phase(), UiIcons::new())
+                .to_string(),
             download_style,
         ));
         spans.push(Span::styled(" ", row_style));

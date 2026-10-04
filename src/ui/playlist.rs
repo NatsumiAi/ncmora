@@ -356,12 +356,8 @@ fn draw_playlist_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
                 (display_width(&index_label) + 1 + display_width(&clipped_left) + space) as u16,
             );
             spans.push(Span::styled(
-                crate::app::download::state_glyph(
-                    state,
-                    download_phase,
-                    UiIcons::for_mode(app.config.icon_mode),
-                )
-                .to_string(),
+                crate::app::download::state_glyph(state, download_phase, UiIcons::new())
+                    .to_string(),
                 download_style,
             ));
             spans.push(Span::styled(" ", style));

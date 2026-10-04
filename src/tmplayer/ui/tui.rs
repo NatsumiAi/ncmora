@@ -1917,6 +1917,7 @@ fn lang_on_off(app: &AppState, enabled: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::icons::UiIcons;
     use crate::ui::theme::{ColorCapability, Theme, ThemePalette};
 
     fn rect(x: u16, y: u16, width: u16, height: u16) -> Rect {
@@ -1949,7 +1950,6 @@ mod tests {
             crate::data::config::Language::Zh,
         );
         app.overlay = overlay;
-        app.config.icon_mode = crate::data::icons::IconMode::Nerd;
         app
     }
 
@@ -2050,102 +2050,89 @@ mod tests {
     }
     #[test]
     fn rendered_title_icons_match_mouse_hits_in_nerd_and_ascii_modes() {
-        use crate::data::icons::IconMode;
         use crate::tmplayer::DownloadIconState;
         use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-        for mode in [IconMode::Nerd, IconMode::Ascii] {
-            for liked in [false, true] {
-                for download in [
-                    DownloadIconState::NotDownloaded,
-                    DownloadIconState::Downloading,
-                    DownloadIconState::Done,
-                    DownloadIconState::Hidden,
-                ] {
-                    let mut app = state(Overlay::None);
-                    app.config.icon_mode = mode;
-                    app.player.liked = liked;
-                    app.player.track.title = "Title".to_string();
-                    app.download_state = download;
-                    let (_, buf) = render_to_buffer_sized(120, 40, &mut app, |f, app, _| {
-                        info_panel::render(f, f.area(), 120, app);
-                    });
-                    let meta = info_panel::layout(rect(0, 0, 120, 40), 120).meta;
-                    let layout = UiLayout {
-                        info_meta: meta,
-                        ..UiLayout::default()
+        for liked in [false, true] {
+            for download in [
+                DownloadIconState::NotDownloaded,
+                DownloadIconState::Downloading,
+                DownloadIconState::Done,
+                DownloadIconState::Hidden,
+            ] {
+                let mut app = state(Overlay::None);
+                app.player.liked = liked;
+                app.player.track.title = "Title".to_string();
+                app.download_state = download;
+                let (_, buf) = render_to_buffer_sized(120, 40, &mut app, |f, app, _| {
+                    info_panel::render(f, f.area(), 120, app);
+                });
+                let meta = info_panel::layout(rect(0, 0, 120, 40), 120).meta;
+                let layout = UiLayout {
+                    info_meta: meta,
+                    ..UiLayout::default()
+                };
+                let click = |col, row| {
+                    let event = MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: col,
+                        row,
+                        modifiers: KeyModifiers::empty(),
                     };
-                    let click = |col, row| {
-                        let event = MouseEvent {
-                            kind: MouseEventKind::Down(MouseButton::Left),
-                            column: col,
-                            row,
-                            modifiers: KeyModifiers::empty(),
-                        };
-                        assert_eq!(
-                            crate::tmplayer::utils::input::map_mouse(event),
-                            Action::MouseClick { col, row }
-                        );
-                        hit_test(&layout, &app, col, row)
-                    };
-                    let (heart_x, y, heart_width) = heart_cells(meta, &app).unwrap();
-                    let heart: String = (heart_x..heart_x + heart_width)
-                        .map(|x| buf[(x, y)].symbol())
-                        .collect();
                     assert_eq!(
-                        heart,
-                        crate::data::icons::UiIcons::for_mode(mode).heart(liked)
+                        crate::tmplayer::utils::input::map_mouse(event),
+                        Action::MouseClick { col, row }
                     );
-                    for x in heart_x..heart_x + heart_width {
-                        assert_eq!(click(x, y), Some(Action::ToggleFavorite));
-                        assert_eq!(click(x, y + 1), None);
-                    }
-                    if let Some((download_x, download_y, width)) = download_cells(meta, &app) {
-                        assert_eq!(download_y, y);
-                        assert_eq!(download_x + width + 1, heart_x);
-                        assert_eq!(
-                            buf[(download_x, y)].symbol(),
-                            info_panel::download_glyph(&app).unwrap().to_string()
-                        );
-                        for x in download_x..download_x + width {
-                            assert_eq!(click(x, y), Some(Action::ToggleDownload));
-                        }
-                    } else {
-                        assert_eq!(download, DownloadIconState::Hidden);
-                        assert_eq!(click(heart_x - 2, y), None);
-                    }
-                    assert_eq!(buf[(heart_x - 1, y)].symbol(), " ");
-                    assert_eq!(click(heart_x - 1, y), None);
+                    hit_test(&layout, &app, col, row)
+                };
+                let (heart_x, y, heart_width) = heart_cells(meta, &app).unwrap();
+                let heart: String = (heart_x..heart_x + heart_width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect();
+                assert_eq!(heart, crate::data::icons::UiIcons::new().heart(liked));
+                for x in heart_x..heart_x + heart_width {
+                    assert_eq!(click(x, y), Some(Action::ToggleFavorite));
+                    assert_eq!(click(x, y + 1), None);
                 }
+                if let Some((download_x, download_y, width)) = download_cells(meta, &app) {
+                    assert_eq!(download_y, y);
+                    assert_eq!(download_x + width + 1, heart_x);
+                    assert_eq!(
+                        buf[(download_x, y)].symbol(),
+                        info_panel::download_glyph(&app).unwrap().to_string()
+                    );
+                    for x in download_x..download_x + width {
+                        assert_eq!(click(x, y), Some(Action::ToggleDownload));
+                    }
+                } else {
+                    assert_eq!(download, DownloadIconState::Hidden);
+                    assert_eq!(click(heart_x - 2, y), None);
+                }
+                assert_eq!(buf[(heart_x - 1, y)].symbol(), " ");
+                assert_eq!(click(heart_x - 1, y), None);
             }
         }
     }
 
     #[test]
     fn title_icon_geometry_omits_undrawn_or_clipped_glyphs() {
-        for mode in [
-            crate::data::icons::IconMode::Nerd,
-            crate::data::icons::IconMode::Ascii,
-        ] {
-            let mut app = state(Overlay::None);
-            app.config.icon_mode = mode;
-            app.download_state = crate::tmplayer::DownloadIconState::NotDownloaded;
-            for meta in [Rect::default(), rect(3, 7, 0, 3), rect(3, 7, 12, 0)] {
-                assert_eq!(heart_cells(meta, &app), None);
-                assert_eq!(download_cells(meta, &app), None);
-                let layout = UiLayout {
-                    info_meta: meta,
-                    ..UiLayout::default()
-                };
-                assert_eq!(hit_test(&layout, &app, meta.x, meta.y), None);
-            }
-            let width = unicode_width::UnicodeWidthStr::width(
-                crate::data::icons::UiIcons::for_mode(mode).heart(false),
-            ) as u16;
-            assert_eq!(heart_cells(rect(0, 0, width, 1), &app), Some((0, 0, width)));
-            assert_eq!(heart_cells(rect(0, 0, width - 1, 1), &app), None);
-            assert_eq!(download_cells(rect(0, 0, width + 1, 1), &app), None);
+        let mut app = state(Overlay::None);
+        app.download_state = crate::tmplayer::DownloadIconState::NotDownloaded;
+        for meta in [Rect::default(), rect(3, 7, 0, 3), rect(3, 7, 12, 0)] {
+            assert_eq!(heart_cells(meta, &app), None);
+            assert_eq!(download_cells(meta, &app), None);
+            let layout = UiLayout {
+                info_meta: meta,
+                ..UiLayout::default()
+            };
+            assert_eq!(hit_test(&layout, &app, meta.x, meta.y), None);
         }
+        let width =
+            unicode_width::UnicodeWidthStr::width(crate::data::icons::UiIcons::new().heart(false))
+                as u16;
+        assert_eq!(heart_cells(rect(0, 0, width, 1), &app), Some((0, 0, width)));
+        assert_eq!(heart_cells(rect(0, 0, width - 1, 1), &app), None);
+        assert_eq!(download_cells(rect(0, 0, width + 1, 1), &app), None);
     }
 
     #[test]
@@ -2235,79 +2222,74 @@ mod tests {
 
     #[test]
     fn rendered_controls_match_nerd_and_ascii_glyph_widths() {
-        use crate::data::icons::{IconMode, UiIcons};
         use crate::tmplayer::app::state::{PlaybackState, RepeatMode};
         use unicode_width::UnicodeWidthStr;
 
-        for mode in [IconMode::Nerd, IconMode::Ascii] {
-            for playing in [false, true] {
-                for repeat in [
-                    RepeatMode::Sequence,
-                    RepeatMode::Shuffle,
-                    RepeatMode::LoopAll,
-                    RepeatMode::LoopOne,
-                ] {
-                    let mut app = state(Overlay::None);
-                    app.config.icon_mode = mode;
-                    app.player.playback = if playing {
-                        PlaybackState::Playing
-                    } else {
-                        PlaybackState::Paused
+        for playing in [false, true] {
+            for repeat in [
+                RepeatMode::Sequence,
+                RepeatMode::Shuffle,
+                RepeatMode::LoopAll,
+                RepeatMode::LoopOne,
+            ] {
+                let mut app = state(Overlay::None);
+                app.player.playback = if playing {
+                    PlaybackState::Playing
+                } else {
+                    PlaybackState::Paused
+                };
+                app.player.repeat_mode = repeat;
+                let icons = UiIcons::new();
+                let labels = [
+                    icons.previous(),
+                    icons.play_pause(playing),
+                    icons.next(),
+                    match repeat {
+                        RepeatMode::Sequence => icons.sequence(),
+                        RepeatMode::Shuffle => icons.shuffle(),
+                        RepeatMode::LoopAll => icons.loop_all(),
+                        RepeatMode::LoopOne => icons.loop_one(),
+                    },
+                ];
+                let actions = [
+                    Action::Prev,
+                    Action::TogglePlayPause,
+                    Action::Next,
+                    Action::ToggleRepeatMode,
+                ];
+                let line_width = labels.iter().map(|label| label.width()).sum::<usize>() as u16 + 3;
+                for area_width in [120, 7] {
+                    let controls = rect(0, 0, area_width, 1);
+                    let layout = UiLayout {
+                        info_controls: controls,
+                        ..UiLayout::default()
                     };
-                    app.player.repeat_mode = repeat;
-                    let icons = UiIcons::for_mode(mode);
-                    let labels = [
-                        icons.previous(),
-                        icons.play_pause(playing),
-                        icons.next(),
-                        match repeat {
-                            RepeatMode::Sequence => icons.sequence(),
-                            RepeatMode::Shuffle => icons.shuffle(),
-                            RepeatMode::LoopAll => icons.loop_all(),
-                            RepeatMode::LoopOne => icons.loop_one(),
-                        },
-                    ];
-                    let actions = [
-                        Action::Prev,
-                        Action::TogglePlayPause,
-                        Action::Next,
-                        Action::ToggleRepeatMode,
-                    ];
-                    let line_width =
-                        labels.iter().map(|label| label.width()).sum::<usize>() as u16 + 3;
-                    for area_width in [120, 7] {
-                        let controls = rect(0, 0, area_width, 1);
-                        let layout = UiLayout {
-                            info_controls: controls,
-                            ..UiLayout::default()
-                        };
-                        let (_, buffer) = render_to_buffer_sized(120, 1, &mut app, |f, app, _| {
-                            control_buttons::render(f, controls, app);
-                        });
-                        let mut x = (area_width / 2).saturating_sub(line_width.min(area_width) / 2);
-                        for (label, action) in labels.into_iter().zip(actions) {
-                            for ch in label.chars() {
-                                if x < area_width {
-                                    assert_eq!(buffer[(x, 0)].symbol(), ch.to_string());
-                                    assert_eq!(hit_test(&layout, &app, x, 0), Some(action));
-                                }
-                                x += 1;
-                            }
+                    let (_, buffer) = render_to_buffer_sized(120, 1, &mut app, |f, app, _| {
+                        control_buttons::render(f, controls, app);
+                    });
+                    let mut x = (area_width / 2).saturating_sub(line_width.min(area_width) / 2);
+                    for (label, action) in labels.into_iter().zip(actions) {
+                        for ch in label.chars() {
                             if x < area_width {
-                                assert_eq!(
-                                    hit_test(&layout, &app, x, 0),
-                                    None,
-                                    "control separator is not clickable"
-                                );
+                                assert_eq!(buffer[(x, 0)].symbol(), ch.to_string());
+                                assert_eq!(hit_test(&layout, &app, x, 0), Some(action));
                             }
                             x += 1;
                         }
-                        assert_eq!(
-                            hit_test(&layout, &app, area_width, 0),
-                            None,
-                            "clipped control is not clickable"
-                        );
+                        if x < area_width {
+                            assert_eq!(
+                                hit_test(&layout, &app, x, 0),
+                                None,
+                                "control separator is not clickable"
+                            );
+                        }
+                        x += 1;
                     }
+                    assert_eq!(
+                        hit_test(&layout, &app, area_width, 0),
+                        None,
+                        "clipped control is not clickable"
+                    );
                 }
             }
         }

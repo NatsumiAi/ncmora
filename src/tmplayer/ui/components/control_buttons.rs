@@ -9,7 +9,7 @@ use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 fn glyphs(app: &AppState) -> [&'static str; 4] {
-    let icons = UiIcons::for_mode(app.config.icon_mode);
+    let icons = UiIcons::new();
     let repeat = match app.player.repeat_mode {
         RepeatMode::Sequence => icons.sequence(),
         RepeatMode::Shuffle => icons.shuffle(),

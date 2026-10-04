@@ -1284,23 +1284,18 @@ mod tests {
     }
 
     #[test]
-    fn state_glyph_respects_runtime_icon_mode() {
-        use crate::data::icons::IconMode;
-        let nerd = UiIcons::for_mode(IconMode::Nerd);
-        let ascii = UiIcons::for_mode(IconMode::Ascii);
+    fn state_glyph_uses_the_fixed_nerd_font_set() {
+        let icons = UiIcons::new();
         let phase = Duration::ZERO;
         assert_eq!(
-            state_glyph(DownloadState::NotDownloaded, phase, nerd),
+            state_glyph(DownloadState::NotDownloaded, phase, icons),
             '\u{ec74}'
         );
-        assert_eq!(state_glyph(DownloadState::Done, phase, nerd), '\u{f00c}');
+        assert_eq!(state_glyph(DownloadState::Done, phase, icons), '\u{f00c}');
         assert_eq!(
-            state_glyph(DownloadState::Downloading, phase, nerd),
+            state_glyph(DownloadState::Downloading, phase, icons),
             '\u{280b}'
         );
-        assert_eq!(state_glyph(DownloadState::NotDownloaded, phase, ascii), 'v');
-        assert_eq!(state_glyph(DownloadState::Done, phase, ascii), '+');
-        assert!(state_glyph(DownloadState::Downloading, phase, ascii).is_ascii());
     }
 
     /// 预计算行的 key 必须与 `state_of` 内部构造的一致（否则磁盘缓存查不到）。

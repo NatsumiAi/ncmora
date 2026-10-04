@@ -466,7 +466,11 @@ pub async fn run(
                 state_changed = true;
             }
 
+            let scope_before = app.scope_gain.value();
             app.tick(frame_start);
+            if (scope_before - app.scope_gain.value()).abs() > f32::EPSILON {
+                state_changed = true;
+            }
             state_changed |= tui.poll_cover_frames();
 
             if app.should_continuous_redraw() {

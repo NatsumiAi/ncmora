@@ -52,7 +52,7 @@ sudo pacman -S --needed base-devel cmake pkg-config alsa-lib chafa pipewire open
   must be installed to build, but playback goes through PipeWire and the ALSA
   path is not a supported runtime configuration.
 
-Runtime: PipeWire for audio — the ALSA backend is deprecated, do not test or document it — plus the chafa shared library and an optional `cava` binary for the `bars` visualizer. `icon_mode = "auto"` uses ASCII icons when `TERM` identifies a Linux TTY (including `KMSCON`) and Nerd glyphs in a normal terminal emulator; a Nerd Font is optional.
+Runtime: PipeWire for audio — the ALSA backend is deprecated, do not test or document it — plus the chafa shared library and an optional `cava` binary for the `bars` visualizer. A Nerd Font is required for playback and navigation icons; the application uses Nerd glyphs directly.
 
 Commands:
 
@@ -128,11 +128,11 @@ A patch that "works on my machine" is not enough for a terminal UI.
   keyboard path is the reference behaviour when the two disagree. Mouse
   interaction is an optional layer on top of it — a convenience for
   non-essential features, never the only way to reach something.
-- **Basic functionality must work in a plain TTY.** `KMSCON` is the reference environment: no emulator-only escape sequences, no Nerd Font, and mouse reporting may not be available at all. With `icon_mode = "auto"`, the app uses ASCII icons there. Login, browsing, playback control and quitting must all stay usable.
+- **Basic functionality must work in a plain TTY.** `KMSCON` is the reference environment: no emulator-only escape sequences, and mouse reporting may not be available at all. A Nerd Font must be installed for the icon set. Login, browsing, playback control and quitting must all stay usable.
 - **Rendering changes need rendering evidence.** For anything that changes what
   is drawn — layout, animation, cover art, visualizers, colors — attach a
   screenshot or a short recording to the pull request.
-- **State your environment**: terminal emulator (name and version), font, terminal size, and `TERM` value. `icon_mode` is deterministic and has no font detection: `auto` follows the Linux TTY check, while `ascii` / `nerd` are explicit overrides. When you touch input handling, keys or keybinds, also try a bare `KMSCON`-style TTY.
+- **State your environment**: terminal emulator (name and version), font, terminal size, and `TERM` value. The icon set is fixed to Nerd Font glyphs; there is no runtime font-capability probe. When you touch input handling, keys or keybinds, also try a bare `KMSCON`-style TTY.
 - **Cover the small-window thresholds.** Host content pages switch to the flat
   layout below the thresholds documented in README → *Small window mode*; verify
   at the boundary sizes, including the `Terminal too small` case.

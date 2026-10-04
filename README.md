@@ -174,7 +174,7 @@ sudo apt install -y build-essential cmake pkg-config \
 
 - Linux with PipeWire for audio (the ALSA backend is deprecated), and the chafa shared library at runtime
 - An optional `cava` binary for the `bars` visualizer
-- A Nerd Font is optional: `icon_mode = "auto"` uses ASCII icons in a Linux TTY such as `KMSCON`, while normal terminal emulators use Nerd glyphs by default.
+- A Nerd Font is required for the playback and navigation icons; the application always uses the Nerd Font glyph set.
 
 ## cava
 
@@ -218,7 +218,6 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 | `theme` | `frappe` | Any theme key from `themes/*.toml` (20 built-ins, custom files picked up); a broken file falls back to the default |
 | `language` | `zh` | `zh`, `en` |
 | `visualize` | cava present → `bars`, otherwise `oscilloscope` | `hidden` (shown as "Off" in settings), `lyrics` ("Lyrics"; the old `off` means the same), `bars`, `oscilloscope`, `vector`; only `bars` needs cava |
-| `icon_mode` | `auto` | `auto`, `ascii`, `nerd`; `auto` uses ASCII in a Linux `KMSCON`/plain TTY and Nerd glyphs in a normal terminal emulator; `ascii` and `nerd` force the corresponding icon set |
 | `transparent_background` | `true` | Use the terminal background |
 | `album_border` | `true` | Border around the fullscreen cover |
 | `show_hints` | `true` | Hint line on the content pages and in the fullscreen page's panel border |
@@ -332,7 +331,7 @@ Fullscreen page:
 ## Notes
 
 - There are no command line flags. The environment variables are `CNMPLAYER_ASSET_DIR` (asset root), `TMPLAYER_CAVA` (explicit cava binary, retained for compatibility) and `COLORTERM` / `TERM` (color capability detection).
-- `icon_mode = "auto"` selects ASCII icons when `TERM` identifies a Linux TTY and Nerd glyphs in a normal terminal emulator; use `ascii` or `nerd` to force one set. `KMSCON` is the reference plain-TTY environment.
+- A Nerd Font is required for the playback and navigation icons; CNMPlayer intentionally does not guess glyph availability from `TERM`.
 - There is no dedicated album page; album search results and artist-page albums are shown with the playlist-page layout.
 - Native audio backends write warnings straight to stderr; CNMPlayer redirects fd 2 into `Player.stderr.log` so those messages cannot smear the TUI.
 - Prebuilt artifacts and AUR packages are produced for Linux `amd64` and `aarch64` only. MPRIS is Linux-only as well.

@@ -1,145 +1,85 @@
-use serde::{Deserialize, Serialize};
-use std::io::IsTerminal;
-use std::sync::LazyLock;
 use std::time::Duration;
 
-/// Terminal fonts cannot be queried reliably. Auto chooses plain symbols on
-/// Linux consoles and non-interactive output; explicit modes override it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum IconMode {
-    #[default]
-    Auto,
-    Ascii,
-    Nerd,
-}
-
-static AUTO_ASCII: LazyLock<bool> = LazyLock::new(|| {
-    let term = std::env::var("TERM").unwrap_or_default();
-    !std::io::stdout().is_terminal() || console_term(&term)
-});
-
-fn console_term(term: &str) -> bool {
-    matches!(
-        term,
-        "" | "linux" | "kmscon" | "dumb" | "vt100" | "vt102" | "cons25"
-    )
-}
-#[derive(Debug, Clone, Copy)]
-pub struct UiIcons {
-    ascii: bool,
-}
+/// Fixed Nerd Font icon set used by the application.
+///
+/// Terminal protocols do not expose a reliable glyph-availability query. A
+/// terminal can accept a private-use codepoint yet render a tofu box, so the
+/// application does not guess from `TERM` and does not silently change layout.
+/// Users who need a fallback must provide a Nerd Font or use a terminal/font
+/// configuration that supports these glyphs.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UiIcons;
 
 impl UiIcons {
-    pub fn for_mode(mode: IconMode) -> Self {
-        Self::with_console(mode, *AUTO_ASCII)
-    }
-
-    pub const fn with_console(mode: IconMode, console: bool) -> Self {
-        Self {
-            ascii: match mode {
-                IconMode::Auto => console,
-                IconMode::Ascii => true,
-                IconMode::Nerd => false,
-            },
-        }
+    pub const fn new() -> Self {
+        Self
     }
 
     pub const fn previous(self) -> &'static str {
-        if self.ascii { "[<<]" } else { "[\u{f048}]" }
+        "[\u{f048}]"
     }
 
     pub const fn next(self) -> &'static str {
-        if self.ascii { "[>>]" } else { "[\u{f051}]" }
+        "[\u{f051}]"
     }
 
     pub const fn play_pause(self, playing: bool) -> &'static str {
-        match (self.ascii, playing) {
-            (true, true) => "[||]",
-            (true, false) => "[>]",
-            (false, true) => "[\u{f04c}]",
-            (false, false) => "[\u{f04b}]",
-        }
+        if playing { "[\u{f04c}]" } else { "[\u{f04b}]" }
     }
 
     pub const fn heart(self, liked: bool) -> &'static str {
-        match (self.ascii, liked) {
-            (true, true) => "[*]",
-            (true, false) => "[ ]",
-            (false, true) => "\u{f004}",
-            (false, false) => "\u{f08a}",
-        }
+        if liked { "\u{f004}" } else { "\u{f08a}" }
     }
 
     pub const fn sequence(self) -> &'static str {
-        if self.ascii { "SEQ" } else { "\u{f08f}" }
+        "\u{f08f}"
     }
 
     pub const fn shuffle(self) -> &'static str {
-        if self.ascii { "SHF" } else { "\u{f074}" }
+        "\u{f074}"
     }
 
     pub const fn loop_all(self) -> &'static str {
-        if self.ascii { "ALL" } else { "\u{f0b6}" }
+        "\u{f0b6}"
     }
 
     pub const fn loop_one(self) -> &'static str {
-        if self.ascii { "ONE" } else { "\u{f01e}" }
+        "\u{f01e}"
     }
 
     pub const fn download(self) -> char {
-        if self.ascii { 'v' } else { '\u{ec74}' }
+        '\u{ec74}'
     }
 
     pub const fn downloaded(self) -> char {
-        if self.ascii { '+' } else { '\u{f00c}' }
+        '\u{f00c}'
     }
 
     pub fn downloading(self, phase: Duration) -> char {
+        const FRAMES: [char; 10] = [
+            '\u{280b}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}', '\u{2826}',
+            '\u{2827}', '\u{2807}', '\u{280f}',
+        ];
         let tick = phase.as_millis() / 100;
-        if self.ascii {
-            const FRAMES: [char; 4] = ['|', '/', '-', '\\'];
-            FRAMES[(tick % FRAMES.len() as u128) as usize]
-        } else {
-            const FRAMES: [char; 10] = [
-                '\u{280b}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}', '\u{2826}',
-                '\u{2827}', '\u{2807}', '\u{280f}',
-            ];
-            FRAMES[(tick % FRAMES.len() as u128) as usize]
-        }
+        FRAMES[(tick % FRAMES.len() as u128) as usize]
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{IconMode, UiIcons, console_term};
+    use super::UiIcons;
     use std::time::Duration;
 
     #[test]
-    fn console_auto_uses_readable_ascii_controls() {
-        let icons = UiIcons::with_console(IconMode::Auto, true);
-        assert_eq!(icons.previous(), "[<<]");
-        assert_eq!(icons.play_pause(true), "[||]");
-        assert_eq!(icons.play_pause(false), "[>]");
-        assert_eq!(icons.next(), "[>>]");
-        assert_eq!(icons.heart(true), "[*]");
-        assert_eq!(icons.heart(false), "[ ]");
-        assert_eq!(icons.shuffle(), "SHF");
-        assert_eq!(icons.download(), 'v');
-        assert_eq!(icons.downloaded(), '+');
-        assert_eq!(icons.downloading(Duration::from_millis(100)), '/');
-    }
-
-    #[test]
-    fn explicit_font_choice_overrides_console_detection() {
-        let nerd = UiIcons::with_console(IconMode::Nerd, true);
-        assert_eq!(nerd.heart(true), "\u{f004}");
-        assert_eq!(nerd.download(), '\u{ec74}');
-        let ascii = UiIcons::with_console(IconMode::Ascii, false);
-        assert_eq!(ascii.loop_one(), "ONE");
-        assert_eq!(ascii.downloading(Duration::from_millis(400)), '|');
-        assert!(console_term("linux"));
-        assert!(console_term("dumb"));
-        assert!(!console_term("xterm-256color"));
+    fn icons_are_stable_nerd_font_glyphs() {
+        let icons = UiIcons::new();
+        assert_eq!(icons.previous(), "[\u{f048}]");
+        assert_eq!(icons.play_pause(false), "[\u{f04b}]");
+        assert_eq!(icons.play_pause(true), "[\u{f04c}]");
+        assert_eq!(icons.heart(true), "\u{f004}");
+        assert_eq!(icons.heart(false), "\u{f08a}");
+        assert_eq!(icons.download(), '\u{ec74}');
+        assert_eq!(icons.downloaded(), '\u{f00c}');
+        assert_eq!(icons.downloading(Duration::from_millis(100)), '\u{2819}');
     }
 }
