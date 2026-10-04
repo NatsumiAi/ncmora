@@ -89,6 +89,7 @@ impl tmplayer::HostPlaybackBridge for AppFullscreenBridge<'_> {
 
         if snapshot.now_playing.is_none() {
             return tmplayer::HostPlaybackSnapshot {
+                playlist_cover: snapshot.playlist_cover,
                 playlist: Vec::new(),
                 current_index: None,
                 current_track: None,
@@ -133,7 +134,7 @@ impl tmplayer::HostPlaybackBridge for AppFullscreenBridge<'_> {
 
         tmplayer::HostPlaybackSnapshot {
             playlist,
-            current_index: snapshot.current_index,
+            playlist_cover: snapshot.playlist_cover,
             current_track,
             current_liked: snapshot.now_playing_liked,
             state: match snapshot.state {
@@ -303,7 +304,7 @@ async fn main() -> Result<()> {
     let theme = ThemeLoader::load_async(&config.theme)
         .await
         .unwrap_or_default();
-    let mut app = App::new(config, theme)?;
+    let mut app = App::new(config, theme).await?;
 
     let mut terminal = init_terminal()?;
     let run_result = run_app(&mut terminal, &mut app).await;

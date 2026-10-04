@@ -2,7 +2,7 @@
 name = "ncm-api"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.93"
+rust-version = "1.95"
 description = "Netease Cloud Music API Rust SDK"
 license = "WTFPL"
 repository = "https://github.com/imsyy/ncm-api-rs"

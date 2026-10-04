@@ -80,7 +80,7 @@ CNMPlayer（Customized Netease Music Player）是一个运行在终端中的网�
 - 10 段均衡器，±12 dB（`eq_bands_db`），在全屏 EQ 弹窗里调整，实时作用于播放
 - 收藏 / 取消收藏：全屏页与折叠播放栏都可操作
 - 循环模式：顺序 → 随机 → 列表循环 → 单曲循环
-- Linux 媒体控制（MPRIS，播放器名 `cnmplayer`），包含元数据与封面
+- Linux 媒体控制（MPRIS，播放器名 `cnmplayer`），包含元数据与封面；MPRIS 更新由主程序负责，全屏页没有独立轮询配置
 
 ### 下载
 
@@ -242,7 +242,6 @@ CNMPlayer 会查找外部 `cava` 可执行文件来生成实时频谱可视化�
 | `bars_gap` | `false` | 频谱条之间留出间隔 |
 | `ui_fps` | `30` | 全屏页帧率上限 |
 | `spectrum_hz` | `30`（仓库内模板写的是 `60`） | 频谱刷新率；主程序自己的 cava 会被限制在 1–30 Hz |
-| `mpris_poll_ms` | `100` | 全屏页的 MPRIS 轮询间隔 |
 | `cache.path` | 未设置 | 缓存目录覆盖（默认用系统缓存目录） |
 | `cache.clean_strategy` | `both` | `size`、`age`、`both` |
 | `cache.max_size_mb` | `500` | LRU 阶段的容量上限 |
@@ -361,7 +360,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-CI（`ci.yml`）会在 Rust 1.93 与 stable 上分别执行默认特性和 `--no-default-features` 的 check/test，并对根 crate 与 vendored crate 执行 fmt、clippy 门禁。
+CI（`ci.yml`）会在 Rust 1.95 与 stable 上分别执行默认特性和 `--no-default-features` 的 check/test，并对根 crate 与 vendored crate 执行 fmt、clippy 门禁。
 发版（`release.yml`）会在发布前执行根 crate 与 vendored crate 测试，随 `x86_64` 与 `aarch64` 压缩包发布 `SHA256SUMS`，并保留 tag、dispatch 空跑和 AUR 同步路径。
 
 ## 相关项目

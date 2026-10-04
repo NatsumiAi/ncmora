@@ -115,10 +115,11 @@ fn sync_from_host_snapshot(app: &mut AppState, snapshot: HostPlaybackSnapshot) {
     let queue_len = snapshot.playlist.len();
 
     if queue_len == 0 {
+        app.playlist_cover = None;
+        app.playlist_cover_hash = None;
         clear_spectrum(app);
         app.cover_anim = None;
         app.pending_system_cover_anim = None;
-        app.api_tracks.clear();
         app.playlist = crate::tmplayer::data::playlist::Playlist::default();
         app.playlist_view = crate::tmplayer::data::playlist::Playlist::default();
         app.player.playback = map_host_state(snapshot.state);
@@ -208,6 +209,8 @@ fn sync_from_host_snapshot(app: &mut AppState, snapshot: HostPlaybackSnapshot) {
             .get(current)
             .and_then(|item| item.song_id.as_deref());
 
+    app.playlist_cover = snapshot.playlist_cover.clone();
+    app.playlist_cover_hash = app.playlist_cover.as_deref().map(hash_cover_bytes);
     app.api_tracks = tracks;
     app.playlist = playlist;
     app.playlist_view = view;

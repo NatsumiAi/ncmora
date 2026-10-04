@@ -57,7 +57,6 @@ pub struct Config {
     pub theme: String,
     pub ui_fps: u32,
     pub spectrum_hz: u32,
-    pub mpris_poll_ms: u64,
 
     #[serde(default = "default_visualize")]
     pub visualize: VisualizeMode,
@@ -588,7 +587,6 @@ impl Default for Config {
             theme: "frappe".to_string(),
             ui_fps: 30,
             spectrum_hz: 30,
-            mpris_poll_ms: 100,
             visualize: default_visualize(),
             eq_bands_db: default_eq_bands_db(),
             transparent_background: true,

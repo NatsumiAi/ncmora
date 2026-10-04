@@ -16,9 +16,9 @@ CNMPlayer 是一个运行在终端中的网易云音乐客户端（Rust + TUI）
 
 ## 开发环境
 
-Rust 1.93 或更新版本；仓库在 `rust-toolchain.toml` 中固定 1.93.0。根 crate（`cnmplayer`）使用 edition 2024，vendored 的 `ncm-api` crate 使用 edition 2021。
+Rust 1.95 或更新版本；仓库在 `rust-toolchain.toml` 中固定 1.95.0。根 crate（`cnmplayer`）使用 edition 2024，vendored 的 `ncm-api` crate 使用 edition 2021。
 
-锁定依赖需要 Rust 1.93：`compio-buf 0.8.3` 调用了在 1.93 稳定的 [`MaybeUninit` slice `assume_init_mut()` API](https://doc.rust-lang.org/stable/std/primitive.slice.html#method.assume_init_mut)。1.90 构建在此调用处失败，尽管依赖 manifest 声明只显示 1.90 下限。单看 edition 2024 只需要 1.85；edition 与不完整的 manifest 声明都不能代替真实依赖 MSRV 验证。根 crate 与 vendored crate 共用一个 workspace lockfile。
+锁定依赖需要 Rust 1.95：`compio-driver 0.12.4` 使用了在 1.95 稳定的 [`std::cfg_select!`](https://doc.rust-lang.org/stable/std/macro.cfg_select.html)。依赖 manifest 声明曾提示 1.90，但真实 1.90 构建在 `compio-buf 0.8.3` 的 `MaybeUninit` slice API 处失败，1.93 构建又在 `cfg_select!` 处失败。单看 edition 2024 只需要 1.85；edition 与不完整的 manifest 声明都不能代替真实依赖 MSRV 验证。根 crate 与 vendored crate 共用一个 workspace lockfile。
 
 系统构建依赖 —— 与 CI 在 `ubuntu-24.04` 上安装的列表一致：
 
@@ -81,7 +81,7 @@ Cargo feature：`default = ["easter-egg"]` —— About 弹窗里的形象彩蛋
 
 Clippy：`cargo clippy --all-targets`；`ncm-api-rs/clippy.toml` 把 `too-many-arguments-threshold` 放宽到 8、`type-complexity-threshold` 放宽到 300。
 
-CI（`.github/workflows/ci.yml`）在面向 `main` / `develop` 的 PR 以及推送到 `develop` 时触发：在 `ubuntu-24.04` 上安装上面列出的系统依赖，在 Rust 1.93 与 stable 上分别检查默认特性和 `--no-default-features`，并对根 crate 与 vendored crate 执行 fmt/clippy 门禁。
+CI（`.github/workflows/ci.yml`）在面向 `main` / `develop` 的 PR 以及推送到 `develop` 时触发：在 `ubuntu-24.04` 上安装上面列出的系统依赖，在 Rust 1.95 与 stable 上分别检查默认特性和 `--no-default-features`，并对根 crate 与 vendored crate 执行 fmt/clippy 门禁。
 
 本地等价命令：
 

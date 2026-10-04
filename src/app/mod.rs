@@ -2563,6 +2563,7 @@ pub struct PlayerBarHitTargets {
 #[derive(Debug, Clone)]
 pub struct FullscreenPlaybackSnapshot {
     pub queue: Vec<PlaybackTrack>,
+    pub playlist_cover: Option<Vec<u8>>,
     pub current_index: Option<usize>,
     pub now_playing: Option<PlaybackTrack>,
     pub now_playing_liked: bool,
@@ -2823,10 +2824,12 @@ impl App {
 
     /// 构造 App 并启动后台初始化：本地设置同步完成，网络初始化交给
     /// [`StartupInit`]，加载页随即可以显示真实进度。
-    pub fn new(config: Config, theme: Theme) -> Result<Self> {
+    pub async fn new(config: Config, theme: Theme) -> Result<Self> {
         let audio_player = AudioPlayer::new(&config)?;
         let persistence = PersistenceWorker::spawn("cnmplayer-persistence")?;
-        let saved_cookie = session::load_cookie().ok().flatten();
+        let saved_cookie = compio::runtime::spawn_blocking(session::load_cookie)
+            .await
+            .map_err(|_| anyhow!("session read task panicked"))??;
 
         let mut headers = header::HeaderMap::new();
         headers.insert(
@@ -2955,7 +2958,7 @@ impl App {
             graphics_picker: Picker::halfblocks(),
         };
 
-        app.load_private_roam_memory();
+        app.load_private_roam_memory().await;
 
         if let Some(protocol) = app.config.graphics_protocol.to_ratatui_protocol() {
             app.graphics_picker.set_protocol_type(protocol);
@@ -3973,6 +3976,7 @@ impl App {
             current_index: self.playback.playback_index,
             now_playing: self.playback.now_playing.clone(),
             now_playing_liked: self.playback.now_playing_liked,
+            playlist_cover: self.playback.playback_queue_cover.clone(),
             state: self.playback.playback_state,
             repeat_mode: self.playback.playback_repeat_mode,
             position: self.playback.audio_player.display_position(),
@@ -4019,7 +4023,7 @@ impl App {
     pub fn fullscreen_metadata_signature(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
         self.playback.playback_queue.len().hash(&mut hasher);
-        self.playback.playback_index.hash(&mut hasher);
+        self.playback.playback_queue_cover.as_ref().map(Vec::len).unwrap_or(0).hash(&mut hasher);
 
         for track in &self.playback.playback_queue {
             track.song_id.hash(&mut hasher);
@@ -5356,33 +5360,28 @@ impl App {
             return;
         }
         self.cover_fetch_inflight_url = None;
-
-        let Some(now) = self.playback.now_playing.as_ref() else {
-            return;
-        };
-        if now.song_id != result.song_id
-            || now.cover_url.as_deref().map(str::trim) != Some(result.url.as_str())
-        {
-            return;
-        }
-
-        if now.cover.is_some() {
-            return;
-        }
-
         let Some(bytes) = result.bytes else {
             return;
         };
+        if result.song_id.is_empty() {
+            if self.playback.playback_queue_cover_url.as_deref() == Some(result.url.as_str()) {
+                self.playback.playback_queue_cover = Some(bytes);
+                self.playback.playback_queue_cover_loaded_url = Some(result.url);
+            }
+            return;
+        }
 
+        let Some(now) = self.playback.now_playing.as_ref() else { return; };
+        if now.song_id != result.song_id
+            || now.cover_url.as_deref().map(str::trim) != Some(result.url.as_str())
+            || now.cover.is_some()
+        { return; }
         if let Some(now_mut) = self.playback.now_playing.as_mut() {
             now_mut.cover = Some(bytes.clone());
         }
-
         if let Some(index) = self.playback.playback_index
             && let Some(slot) = self.playback.playback_queue.get_mut(index)
-        {
-            slot.cover = Some(bytes);
-        }
+        { slot.cover = Some(bytes); }
     }
 
     fn maybe_schedule_now_playing_cover_fetch(&mut self) {
@@ -5426,27 +5425,48 @@ impl App {
             self.cover_fetch_last_attempt_at = Some(now_at);
         }
     }
-
-    fn tick_cover_fetch(&mut self) {
-        let needs_schedule = self
-            .playback
-            .now_playing
-            .as_ref()
-            .map(|now| now.cover.is_none() && now.cover_url.is_some())
-            .unwrap_or(false);
-        if self.cover_fetch_inflight_url.is_none() && !needs_schedule {
+    fn maybe_schedule_queue_cover_fetch(&mut self) {
+        let Some(url) = self.playback.playback_queue_cover_url.clone() else {
+            self.playback.playback_queue_cover = None;
+            self.playback.playback_queue_cover_loaded_url = None;
+            return;
+        };
+        let url = url.trim().to_string();
+        if url.is_empty()
+            || self.playback.playback_queue_cover_loaded_url.as_deref() == Some(url.as_str())
+            || self.cover_fetch_inflight_url.is_some()
+        {
             return;
         }
+        let generation = self.cover_fetch_generation.wrapping_add(1);
+        if self.cover_fetch_tx.start_send(CoverFetchRequest {
+            song_id: String::new(),
+            url: url.clone(),
+            generation,
+        }).is_ok() {
+            self.cover_fetch_generation = generation;
+            self.cover_fetch_inflight_url = Some(url);
+            self.cover_fetch_last_attempt_at = Some(Instant::now());
+        }
+    }
 
+
+    fn tick_cover_fetch(&mut self) {
+        let needs_now = self.playback.now_playing.as_ref()
+            .map(|now| now.cover.is_none() && now.cover_url.is_some())
+            .unwrap_or(false);
+        let needs_queue = self.playback.playback_queue_cover_url.is_some()
+            && self.playback.playback_queue_cover_loaded_url
+                != self.playback.playback_queue_cover_url;
+        if self.cover_fetch_inflight_url.is_none() && !needs_now && !needs_queue { return; }
         loop {
             match self.cover_fetch_rx.try_recv() {
                 Ok(result) => self.apply_cover_fetch_result(result),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
-
-        self.maybe_schedule_now_playing_cover_fetch();
+        if needs_now { self.maybe_schedule_now_playing_cover_fetch(); }
+        if self.cover_fetch_inflight_url.is_none() { self.maybe_schedule_queue_cover_fetch(); }
     }
 
     fn apply_lyric_fetch_result(&mut self, result: LyricFetchResult) {
@@ -7581,11 +7601,11 @@ impl App {
             .unwrap_or(0)
             .min(bootstrap.playlist.len().saturating_sub(1));
         bootstrap.current_index = Some(active_idx);
-        bootstrap.playlist_cover = self
-            .playback
-            .playback_queue
-            .first()
-            .and_then(|track| track.cover.clone());
+        bootstrap.playlist_cover = self.playback.playback_queue_cover.clone();
+        if bootstrap.playlist_cover.is_none() {
+            bootstrap.playlist_cover = self.playback.playback_queue.first()
+                .and_then(|track| track.cover.clone());
+        }
         if bootstrap.playlist_cover.is_none() {
             bootstrap.playlist_cover = now.cover.clone();
         }
@@ -7655,8 +7675,15 @@ impl App {
             return;
         }
 
-        let Ok(Some(record)) = playback_session::load() else {
-            return;
+        let result = compio::runtime::spawn_blocking(playback_session::load).await;
+        let record = match result {
+            Ok(Ok(Some(record))) => record,
+            Ok(Ok(None)) => return,
+            other => {
+                log::error!("playback memory could not be read: {other:?}");
+                self.set_runtime_status(self.lang_text("播放记忆读取失败，保留原文件", "Playback memory could not be read; original preserved"));
+                return;
+            }
         };
 
         let queue = record
@@ -8318,9 +8345,15 @@ impl App {
             .enqueue(move || private_roam::save(&record));
     }
 
-    fn load_private_roam_memory(&mut self) {
-        let Ok(Some(record)) = private_roam::load() else {
-            return;
+    async fn load_private_roam_memory(&mut self) {
+        let result = compio::runtime::spawn_blocking(private_roam::load).await;
+        let record = match result {
+            Ok(Ok(Some(record))) => record,
+            Ok(Ok(None)) => return,
+            other => {
+                log::error!("private roam memory could not be read: {other:?}");
+                return;
+            }
         };
 
         self.browse.private_roam.tracks = record

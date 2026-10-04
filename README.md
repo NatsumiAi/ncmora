@@ -80,7 +80,7 @@ Artists and playlists are capped at the 5 most relevant hits and never paginate;
 - 10-band EQ, ±12 dB (`eq_bands_db`), edited from the fullscreen EQ modal and applied to the live stream
 - Like / unlike from the fullscreen page and from the collapsed player bar
 - Repeat modes: sequence → shuffle → loop all → loop one
-- Linux media control (MPRIS, player name `cnmplayer`) with metadata and cover art
+- Linux media control (MPRIS, player name `cnmplayer`) with metadata and cover art; the host owns MPRIS updates and the fullscreen page has no independent polling setting
 
 ### Downloads
 
@@ -242,7 +242,6 @@ The cache root defaults to the OS cache directory (`~/.cache/cnmplayer` on Linux
 | `bars_gap` | `false` | Leave a gap between bars |
 | `ui_fps` | `30` | Fullscreen page frame-rate cap |
 | `spectrum_hz` | `30` (shipped file says `60`) | Spectrum refresh rate; the host clamps its own cava to 1–30 Hz |
-| `mpris_poll_ms` | `100` | Fullscreen-side MPRIS poll interval |
 | `cache.path` | unset | Cache directory override (defaults to the OS cache directory) |
 | `cache.clean_strategy` | `both` | `size`, `age`, `both` |
 | `cache.max_size_mb` | `500` | Size ceiling for the LRU pass |
@@ -361,7 +360,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-CI (`ci.yml`) runs check and test for default and `--no-default-features` on Rust 1.93 and stable, then runs fmt and clippy gates for both the root and vendored crates.
+CI (`ci.yml`) runs check and test for default and `--no-default-features` on Rust 1.95 and stable, then runs fmt and clippy gates for both the root and vendored crates.
 Release (`release.yml`) runs the root and vendored test gates before publishing, publishes `SHA256SUMS` alongside the `x86_64` and `aarch64` tarballs, and preserves the tag, dispatch dry-run and AUR sync paths.
 
 ## Related Projects
