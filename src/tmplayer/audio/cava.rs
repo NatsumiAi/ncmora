@@ -91,7 +91,14 @@ impl MiniCavaState {
     pub fn bars(&self) -> [f32; MINI_BARS] { *self.event.borrow() }
     pub fn retry(&self) { self.service.retry(); }
     pub fn snapshot(&self) -> CavaSnapshot { self.service.latest() }
+    pub async fn shutdown(self) {
+        let MiniCavaState { event, service } = self;
+        drop(event);
+        service.shutdown();
+        let _ = compio::runtime::spawn_blocking(move || service.shutdown_blocking()).await;
+    }
 }
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CavaConfig {
@@ -175,10 +182,8 @@ impl CavaService {
 
     pub fn shutdown_blocking(self) {
         self.shutdown();
-        if Arc::strong_count(&self.inner) == 1 {
-            if let Some(thread) = self.inner.thread.lock().take() {
-                let _ = thread.join();
-            }
+        if let Some(thread) = self.inner.thread.lock().take() {
+            let _ = thread.join();
         }
     }
 
@@ -558,7 +563,9 @@ mod tests {
 
         service.retry();
         assert!(wait_until(Duration::from_secs(2), || fs::read_to_string(&marker).unwrap_or_default().len() == 2 && service.failure().is_some()));
+        let stream_clone = service.clone();
         service.shutdown_blocking();
+        drop(stream_clone);
         let config_after: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(Result::ok).map(|entry| entry.path()).filter(|path| path.file_name().is_some_and(|name| name.to_string_lossy().starts_with(&config_prefix))).collect();
         assert_eq!(config_after, config_before);
     }

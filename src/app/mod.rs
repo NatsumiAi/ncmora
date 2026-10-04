@@ -49,7 +49,6 @@ use ratatui_image::protocol::StatefulProtocol;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
-use std::fs;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -74,6 +73,7 @@ use browse_controller::BrowseController;
 use input_controller::InputController;
 use download_controller::DownloadController;
 use startup_controller::StartupController;
+use crate::data::atomic_file::write_atomic;
 use crate::data::persistence::PersistenceWorker;
 use streaming::StreamingReader;
 
@@ -2604,6 +2604,36 @@ struct CoverFetchResult {
     bytes: Option<Vec<u8>>,
 }
 
+fn cover_cache_path_for_dir(cache_dir: &Path, url: &str) -> Option<PathBuf> {
+    let key = url.trim();
+    if key.is_empty() {
+        return None;
+    }
+
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    Some(cache_dir.join(format!("{:016x}.img", hasher.finish())))
+}
+
+fn validate_cached_cover(bytes: Vec<u8>) -> Option<Vec<u8>> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let format = image::guess_format(&bytes).ok()?;
+    match format {
+        image::ImageFormat::Png
+            if !bytes.ends_with(&[0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130]) =>
+        {
+            return None;
+        }
+        image::ImageFormat::Jpeg if !bytes.ends_with(&[0xff, 0xd9]) => return None,
+        image::ImageFormat::Png | image::ImageFormat::Jpeg => {}
+        _ => return None,
+    }
+    image::load_from_memory(&bytes).ok()?;
+    Some(bytes)
+}
+
 #[derive(Debug, Clone)]
 struct LyricFetchRequest {
     song_id: String,
@@ -2620,6 +2650,7 @@ async fn loop_cover_fetch(
     mut rx: UnboundedReceiver<CoverFetchRequest>,
     tx: Sender<CoverFetchResult>,
     client: Client,
+    cache_dir: PathBuf,
 ) {
     let Ok(api) = ApiState::new(None, client) else {
         return;
@@ -2628,6 +2659,17 @@ async fn loop_cover_fetch(
         if req.url.is_empty() {
             return None;
         }
+        if let Some(path) = cover_cache_path_for_dir(&cache_dir, &req.url) {
+            let cached = compio::runtime::spawn_blocking(move || {
+                std::fs::read(path).ok().and_then(validate_cached_cover)
+            })
+            .await
+            .ok()
+            .flatten();
+            if cached.is_some() {
+                return cached;
+            }
+        }
         api.fetch_cover_bytes(&req.url).await.ok()
     };
     while let Ok(req) = rx.recv().await {
@@ -2635,7 +2677,7 @@ async fn loop_cover_fetch(
         let _ = tx.send(CoverFetchResult {
             song_id: req.song_id,
             url: req.url,
-            bytes: bytes,
+            bytes,
         });
     }
 }
@@ -2726,6 +2768,7 @@ pub struct App {
     pub launch_fullscreen_requested: bool,
     pub vip_audio_unlocked: bool,
     config_revision: u64,
+    search_return_page: Page,
     playlist_return_page: Page,
     /// 作者页的上一级：从搜索页进是搜索页，从全屏页点作者名进是首页。
     author_return_page: Page,
@@ -2813,7 +2856,7 @@ impl App {
             stderr_trim_checked_at: None,
             home_sidebar_anim_span_cells: 24,
             search: SearchController::default(),
-            playback: PlaybackController::default(),
+            playback: PlaybackController::new(audio_player),
             startup: StartupController::detached(),
             player_bar_hits: PlayerBarHitTargets::default(),
             term_width: 0,
@@ -2870,7 +2913,6 @@ impl App {
             mpris_last_playback: PlaybackRuntimeState::Stopped,
             api,
             persistence,
-            audio_player,
             downloads: DownloadController {
                 manager: download_manager,
                 playlist_cache: DownloadRowCache::default(),
@@ -2880,6 +2922,7 @@ impl App {
                 now_playing_state: DownloadState::NotDownloaded,
                 root: download_root,
                 page_kind: PlaylistPageKind::Playlist,
+                pending_intent: None,
             },
             graphics_picker: Picker::halfblocks(),
         };
@@ -3384,12 +3427,12 @@ impl App {
     }
 
     pub fn playback_position(&self) -> Duration {
-        self.audio_player.display_position()
+        self.playback.audio_player.display_position()
     }
 
     /// 是否正在后台加载跳转目标（进度条据此显示脉冲加载动画）。
     pub fn is_seeking(&self) -> bool {
-        self.audio_player.is_seeking()
+        self.playback.audio_player.is_seeking()
     }
 
     /// 是否有进行中的动画需要高频重绘（进度条脉冲、搜索框滑出、侧边栏
@@ -3450,7 +3493,7 @@ impl App {
     }
 
     pub fn playback_duration(&self) -> Duration {
-        if let Some(duration) = self.audio_player.duration() {
+        if let Some(duration) = self.playback.audio_player.duration() {
             return duration;
         }
 
@@ -3464,7 +3507,7 @@ impl App {
     /// Returns (downloaded_bytes, total_bytes) for streaming buffer progress.
     /// Returns None if not streaming or if total is unknown.
     pub fn buffer_progress(&mut self) -> Option<(u64, u64)> {
-        self.audio_player.recv_progress()
+        self.playback.audio_player.recv_progress()
     }
 
     pub fn now_playing_artist_text(&self) -> String {
@@ -3480,7 +3523,7 @@ impl App {
 
     /// 播放链路上的 PCM 抽头环句柄，经 `HostPlaybackBridge` 交给全屏页示波器。
     pub fn pcm_ring(&self) -> Arc<PcmRing> {
-        self.audio_player.pcm_ring()
+        self.playback.audio_player.pcm_ring()
     }
 
     /// 是否处于“小窗口相关”上下文：设置开启、已登录内容页、且终端低于统一阈值。
@@ -3677,7 +3720,7 @@ impl App {
             return;
         }
 
-        let reading = self.audio_player.lufs_meter().latest();
+        let reading = self.playback.audio_player.lufs_meter().latest();
         let dt = self
             .vu_last_tick_at
             .map(|at| now.saturating_duration_since(at).as_secs_f32().min(0.25))
@@ -3748,8 +3791,10 @@ impl App {
         }
     }
 
-    pub fn suspend_main_cava_for_fullscreen(&mut self) {
-        self.cava = None;
+    pub async fn suspend_main_cava_for_fullscreen(&mut self) {
+        if let Some(cava) = self.cava.take() {
+            cava.shutdown().await;
+        }
     }
 
     pub fn resume_main_cava_after_fullscreen(&mut self) {
@@ -3764,8 +3809,8 @@ impl App {
         let fallback_total = self.playback.now_playing
             .as_ref()
             .map(|track| Duration::from_millis(track.duration_ms.max(0) as u64));
-        let _ = self.audio_player.seek_to_ratio(ratio, fallback_total);
-        self.playback.playback_state = map_audio_state(self.audio_player.state());
+        let _ = self.playback.audio_player.seek_to_ratio(ratio, fallback_total);
+        self.playback.playback_state = map_audio_state(self.playback.audio_player.state());
     }
 
     pub async fn fullscreen_tick_playback(&mut self) {
@@ -3787,7 +3832,7 @@ impl App {
                 MprisControlEvent::Pause => self.mpris_pause(),
                 MprisControlEvent::PlayPause => self.toggle_play_pause_hotkey().await,
                 MprisControlEvent::Stop => {
-                    self.audio_player.stop();
+                    self.playback.audio_player.stop();
                     self.playback.playback_state = PlaybackRuntimeState::Stopped;
                 }
                 MprisControlEvent::Next => self.play_next_hotkey().await,
@@ -3809,15 +3854,15 @@ impl App {
             return;
         }
         if self.playback.playback_state == PlaybackRuntimeState::Paused {
-            self.audio_player.toggle_play_pause();
-            self.playback.playback_state = map_audio_state(self.audio_player.state());
+            self.playback.audio_player.toggle_play_pause();
+            self.playback.playback_state = map_audio_state(self.playback.audio_player.state());
         }
     }
 
     fn mpris_pause(&mut self) {
         if self.playback.playback_state == PlaybackRuntimeState::Playing {
-            self.audio_player.toggle_play_pause();
-            self.playback.playback_state = map_audio_state(self.audio_player.state());
+            self.playback.audio_player.toggle_play_pause();
+            self.playback.playback_state = map_audio_state(self.playback.audio_player.state());
         }
     }
 
@@ -3828,7 +3873,7 @@ impl App {
             return;
         }
 
-        let current_micros = self.audio_player.position().as_micros() as i128;
+        let current_micros = self.playback.audio_player.position().as_micros() as i128;
         let target = (current_micros + delta_micros as i128).clamp(0, total_micros as i128);
         let ratio = (target as f64 / total_micros as f64) as f32;
         self.seek_to_ratio(ratio);
@@ -3864,7 +3909,7 @@ impl App {
 
         let payload = MprisSyncPayload {
             playback: self.playback.playback_state,
-            position: self.audio_player.display_position(),
+            position: self.playback.audio_player.display_position(),
             track: if metadata_changed {
                 self.playback.now_playing.clone()
             } else {
@@ -3888,7 +3933,7 @@ impl App {
             now_playing_liked: self.playback.now_playing_liked,
             state: self.playback.playback_state,
             repeat_mode: self.playback.playback_repeat_mode,
-            position: self.audio_player.display_position(),
+            position: self.playback.audio_player.display_position(),
         }
     }
 
@@ -3898,9 +3943,9 @@ impl App {
             now_playing_liked: self.playback.now_playing_liked,
             state: self.playback.playback_state,
             repeat_mode: self.playback.playback_repeat_mode,
-            position: self.audio_player.display_position(),
-            volume: self.audio_player.volume(),
-            seeking: self.audio_player.is_seeking(),
+            position: self.playback.audio_player.display_position(),
+            volume: self.playback.audio_player.volume(),
+            seeking: self.playback.audio_player.is_seeking(),
             download: self.current_download_state(),
         }
     }
@@ -3988,7 +4033,7 @@ impl App {
     }
 
     pub fn fullscreen_set_volume(&mut self, volume: f32) {
-        self.audio_player.set_volume(volume);
+        self.playback.audio_player.set_volume(volume);
     }
 
     pub fn fullscreen_toggle_repeat_mode(&mut self) {
@@ -4519,8 +4564,8 @@ impl App {
             }
         }
 
-        self.audio_player.toggle_play_pause();
-        self.playback.playback_state = map_audio_state(self.audio_player.state());
+        self.playback.audio_player.toggle_play_pause();
+        self.playback.playback_state = map_audio_state(self.playback.audio_player.state());
     }
 
     async fn play_previous_hotkey(&mut self) {
@@ -5011,7 +5056,7 @@ impl App {
     }
 
     async fn tick_audio(&mut self) {
-        let runtime = map_audio_state(self.audio_player.state());
+        let runtime = map_audio_state(self.playback.audio_player.state());
 
         if self.playback.playback_state == PlaybackRuntimeState::Playing
             && runtime == PlaybackRuntimeState::Stopped
@@ -5123,17 +5168,17 @@ impl App {
         };
 
         let id = &track.song_id;
-        let path = self.audio_player.cached_song_path(id, quality);
+        let path = self.playback.audio_player.cached_song_path(id, quality);
 
         if is_nonempty_file(&path).await {
-            return match self.audio_player.play_from_file(&path).await {
+            return match self.playback.audio_player.play_from_file(&path).await {
                 Ok(_) => ok(self),
                 Err(err) => fail(err, self),
             };
         }
 
         // Song not cached - start streaming playback while prefetching in background.
-        self.audio_player.stop();
+        self.playback.audio_player.stop();
         self.set_runtime_status(format!(
             "{}: {} - {}",
             self.lang_text("正在缓冲", "Buffering"),
@@ -5153,7 +5198,7 @@ impl App {
                 )
                 .await
                 {
-                    Ok(reader) => match self.audio_player.play_streaming(reader, progress_rx).await
+                    Ok(reader) => match self.playback.audio_player.play_streaming(reader, progress_rx).await
                     {
                         Ok(()) => ok(self),
                         Err(err) => fail(err, self),
@@ -7814,7 +7859,7 @@ impl App {
         self.last_global_hotkey_at = None;
         self.last_content_click = None;
         self.clear_content_hits();
-        self.audio_player.stop();
+        self.playback.audio_player.stop();
         self.playback.now_playing = None;
         self.playback.clear_like_state();
         self.playback.clear_queue();

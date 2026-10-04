@@ -306,6 +306,7 @@ async fn main() -> Result<()> {
     let mut terminal = init_terminal()?;
     let run_result = run_app(&mut terminal, &mut app).await;
     let restore_result = restore_terminal(&mut terminal);
+    app.suspend_main_cava_for_fullscreen().await;
     let persistence_result = app.flush_persistence();
     run_result?;
     restore_result?;
@@ -434,7 +435,7 @@ async fn launch_tmplayer_fullscreen(
     bootstrap: tmplayer::FullscreenBootstrap,
 ) -> Result<()> {
     play_fullscreen_transition(terminal, app, true).await?;
-    app.suspend_main_cava_for_fullscreen();
+    app.suspend_main_cava_for_fullscreen().await;
     restore_terminal(terminal)?;
 
     let config = app.config.clone();
