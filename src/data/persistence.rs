@@ -138,8 +138,8 @@ fn run(rx: Receiver<Command>, errors: Arc<Mutex<Option<String>>>) {
 mod tests {
     use super::PersistenceWorker;
     use parking_lot::Mutex;
-    use std::sync::mpsc::{self, sync_channel};
     use std::sync::Arc;
+    use std::sync::mpsc::{self, sync_channel};
 
     #[test]
     fn flush_waits_for_ordered_jobs_and_reports_failures() {
@@ -225,5 +225,4 @@ mod tests {
         expected.extend(["clear".to_string(), "lastsave".to_string()]);
         assert_eq!(*events.lock(), expected);
     }
-
 }

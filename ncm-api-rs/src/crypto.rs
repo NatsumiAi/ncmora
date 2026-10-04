@@ -49,7 +49,9 @@ fn aes_ecb_decrypt_hex(ciphertext_hex: &str, key: &[u8; 16]) -> Result<Vec<u8>> 
 fn aes_ecb_decrypt(ciphertext: &[u8], key: &[u8; 16]) -> Result<Vec<u8>> {
     Aes128EcbDec::new(key.into())
         .decrypt_padded_vec::<Pkcs7>(ciphertext)
-        .map_err(|_| NcmError::Crypto("Invalid AES-128-ECB ciphertext or PKCS#7 padding".to_string()))
+        .map_err(|_| {
+            NcmError::Crypto("Invalid AES-128-ECB ciphertext or PKCS#7 padding".to_string())
+        })
 }
 
 /// RSA 加密（NONE / raw / textbook RSA，无 padding）
@@ -155,9 +157,9 @@ pub fn eapi_req_decrypt(encrypted_hex: &str) -> Result<(String, serde_json::Valu
 
     let mut parts = text.splitn(3, "-36cd479b6b5-");
     let url = parts.next().unwrap_or_default();
-    let json = parts.next().ok_or_else(|| {
-        NcmError::Crypto("Missing eapi request envelope delimiter".to_string())
-    })?;
+    let json = parts
+        .next()
+        .ok_or_else(|| NcmError::Crypto("Missing eapi request envelope delimiter".to_string()))?;
     let data = serde_json::from_str(json)
         .map_err(|source| NcmError::response_decode("eapi request", json.len(), source))?;
     Ok((url.to_string(), data))
@@ -176,7 +178,10 @@ mod tests {
 
     #[test]
     fn eapi_response_rejects_invalid_hex_and_padding() {
-        assert!(matches!(eapi_res_decrypt("not hex"), Err(NcmError::Crypto(_))));
+        assert!(matches!(
+            eapi_res_decrypt("not hex"),
+            Err(NcmError::Crypto(_))
+        ));
         assert!(matches!(eapi_res_decrypt("00"), Err(NcmError::Crypto(_))));
         assert!(matches!(eapi_res_decrypt(""), Err(NcmError::Crypto(_))));
     }

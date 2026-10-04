@@ -1441,8 +1441,15 @@ mod tests {
 
     #[test]
     fn paused_oscilloscope_schedules_the_exact_flat_frame_without_input() {
-        let config = Config { visualize: VisualizeMode::Oscilloscope, ..Config::default() };
-        let mut app = AppState::new(config, crate::ui::theme::Theme::default(), crate::data::config::Language::Zh);
+        let config = Config {
+            visualize: VisualizeMode::Oscilloscope,
+            ..Config::default()
+        };
+        let mut app = AppState::new(
+            config,
+            crate::ui::theme::Theme::default(),
+            crate::data::config::Language::Zh,
+        );
         let start = Instant::now();
         app.last_frame = start;
         app.player.playback = PlaybackState::Playing;
@@ -1455,16 +1462,24 @@ mod tests {
             let now = start + Duration::from_secs(1) + Duration::from_millis(frame * 16);
             let dirty = tick_visual_state(&mut app, now);
             if before > 0.0 && app.scope_gain.value() == 0.0 {
-                assert!(dirty, "the final flat frame must be painted even when animation stops");
-                assert!(!app.should_continuous_redraw(), "the final frame does not require permanent animation");
+                assert!(
+                    dirty,
+                    "the final flat frame must be painted even when animation stops"
+                );
+                assert!(
+                    !app.should_continuous_redraw(),
+                    "the final frame does not require permanent animation"
+                );
                 settled = Some(now);
                 break;
             }
         }
         let settled = settled.expect("pause reaches exact zero without an input event");
-        assert!(!tick_visual_state(&mut app, settled + Duration::from_millis(16)));
+        assert!(!tick_visual_state(
+            &mut app,
+            settled + Duration::from_millis(16)
+        ));
     }
-
 
     /// 挂在设置弹窗下面的子页必须全部登记进 `settings_parent`：
     /// 漏一个，那个页面按 Esc 就会直接退出全屏页（按键提示弹窗就这么漏过）。

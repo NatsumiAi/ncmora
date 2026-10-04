@@ -65,7 +65,11 @@ impl NcmError {
         body_len: usize,
         source: serde_json::Error,
     ) -> Self {
-        Self::ResponseDecode { format, body_len, source }
+        Self::ResponseDecode {
+            format,
+            body_len,
+            source,
+        }
     }
 }
 

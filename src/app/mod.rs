@@ -4963,7 +4963,10 @@ impl App {
             album: candidate.album,
             target,
         };
-        let state = self.downloads.manager.known_state_of(&request.song_id, &request.target);
+        let state = self
+            .downloads
+            .manager
+            .known_state_of(&request.song_id, &request.target);
         if !self.downloads.pending_intents.is_empty() || state.is_none() {
             let origin = self.downloads.pending_intents.origin();
             self.downloads.pending_intents.defer(origin, request);

@@ -315,7 +315,6 @@ mod tests {
         assert_eq!(reverse[..4], [0.9, 0.4, 0.2, 0.1]);
     }
 
-
     #[test]
     fn stereo_display_values_preserve_distinct_channels() {
         let mono = [0.0; 3];

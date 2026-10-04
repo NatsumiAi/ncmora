@@ -41,7 +41,9 @@ fn header_value(s: &str) -> HeaderValue {
 fn api_endpoint(uri: &str) -> Result<&str> {
     uri.strip_prefix("/api/")
         .filter(|endpoint| !endpoint.is_empty())
-        .ok_or_else(|| NcmError::InvalidParam("API URI must start with /api/ and name an endpoint".to_string()))
+        .ok_or_else(|| {
+            NcmError::InvalidParam("API URI must start with /api/ and name an endpoint".to_string())
+        })
 }
 
 fn decode_response_body(bytes: &[u8], encrypted: bool) -> Result<Value> {
@@ -70,11 +72,17 @@ fn response_from_body(status_code: i64, body: Value, cookie: Vec<String>) -> Res
         status = 400;
     }
 
-    let answer = ApiResponse { status, body, cookie };
+    let answer = ApiResponse {
+        status,
+        body,
+        cookie,
+    };
     if status == 200 {
         Ok(answer)
     } else {
-        let msg = answer.body.get("msg")
+        let msg = answer
+            .body
+            .get("msg")
             .and_then(|m| m.as_str())
             .unwrap_or("Unknown error")
             .to_string();
@@ -188,7 +196,9 @@ impl ApiClient {
     ) -> Result<ApiResponse> {
         let endpoint = api_endpoint(uri)?;
         if !data.is_object() {
-            return Err(NcmError::InvalidParam("API request data must be a JSON object".to_string()));
+            return Err(NcmError::InvalidParam(
+                "API request data must be a JSON object".to_string(),
+            ));
         }
         let mut headers = HeaderMap::new();
 
@@ -279,8 +289,8 @@ impl ApiClient {
         } else {
             options.crypto.clone()
         };
-        let encrypted_response = crypto_type == CryptoType::Eapi
-            && options.e_r.unwrap_or(ENCRYPT_RESPONSE);
+        let encrypted_response =
+            crypto_type == CryptoType::Eapi && options.e_r.unwrap_or(ENCRYPT_RESPONSE);
 
         let mut data = data;
         let url: String;
@@ -484,7 +494,16 @@ mod tests {
     fn api_uri_requires_nonempty_api_endpoint() {
         assert_eq!(api_endpoint("/api/song/detail").unwrap(), "song/detail");
         assert_eq!(api_endpoint("/api/歌曲").unwrap(), "歌曲");
-        for uri in ["", "/", "/api", "/api/", "😀", "/abc/endpoint", "/eapi/test", "https://music.163.com/api/test"] {
+        for uri in [
+            "",
+            "/",
+            "/api",
+            "/api/",
+            "😀",
+            "/abc/endpoint",
+            "/eapi/test",
+            "https://music.163.com/api/test",
+        ] {
             assert!(matches!(api_endpoint(uri), Err(NcmError::InvalidParam(_))));
         }
     }
@@ -494,26 +513,48 @@ mod tests {
         let mut body = b"not-json SECRET".to_vec();
         body.resize(16 * 1024, b'x');
         let error = decode_response_body(&body, false).unwrap_err();
-        assert!(matches!(&error, NcmError::ResponseDecode { format: "plain", body_len: 16384, .. }));
+        assert!(matches!(
+            &error,
+            NcmError::ResponseDecode {
+                format: "plain",
+                body_len: 16384,
+                ..
+            }
+        ));
         let message = error.to_string();
         assert!(!message.contains("SECRET"));
         assert!(message.len() < 256);
-        assert!(matches!(decode_response_body(b"", false), Err(NcmError::ResponseDecode { .. })));
+        assert!(matches!(
+            decode_response_body(b"", false),
+            Err(NcmError::ResponseDecode { .. })
+        ));
     }
 
     #[test]
     fn encrypted_response_decodes_fixed_vector_or_returns_error() {
         let bytes = hex::decode("51B05E35C69B2F9FF4967735DED68881").unwrap();
-        assert_eq!(decode_response_body(&bytes, true).unwrap(), serde_json::json!({"code": 200}));
-        assert!(matches!(decode_response_body(&[0], true), Err(NcmError::Crypto(_))));
+        assert_eq!(
+            decode_response_body(&bytes, true).unwrap(),
+            serde_json::json!({"code": 200})
+        );
+        assert!(matches!(
+            decode_response_body(&[0], true),
+            Err(NcmError::Crypto(_))
+        ));
         let malformed = hex::decode("67E8E46C291AD4030FDF54CF200490C6").unwrap();
-        assert!(matches!(decode_response_body(&malformed, true), Err(NcmError::ResponseDecode { .. })));
+        assert!(matches!(
+            decode_response_body(&malformed, true),
+            Err(NcmError::ResponseDecode { .. })
+        ));
     }
 
     #[test]
     fn valid_json_body_shapes_are_preserved() {
         for body in ["null", "\"body\"", "[1,2]", "{\"code\":502}"] {
-            assert_eq!(decode_response_body(body.as_bytes(), false).unwrap(), serde_json::from_str::<Value>(body).unwrap());
+            assert_eq!(
+                decode_response_body(body.as_bytes(), false).unwrap(),
+                serde_json::from_str::<Value>(body).unwrap()
+            );
         }
     }
 
@@ -528,7 +569,13 @@ mod tests {
         let response = response_from_body(500, serde_json::json!({"code": "800"}), vec![]).unwrap();
         assert_eq!(response.body["code"], "800");
         assert_eq!(response.status, 200);
-        assert!(matches!(response_from_body(200, serde_json::json!({"code": 301}), vec![]), Err(NcmError::AuthRequired(_))));
-        assert!(matches!(response_from_body(503, serde_json::json!({}), vec![]), Err(NcmError::RateLimited(_))));
+        assert!(matches!(
+            response_from_body(200, serde_json::json!({"code": 301}), vec![]),
+            Err(NcmError::AuthRequired(_))
+        ));
+        assert!(matches!(
+            response_from_body(503, serde_json::json!({}), vec![]),
+            Err(NcmError::RateLimited(_))
+        ));
     }
 }

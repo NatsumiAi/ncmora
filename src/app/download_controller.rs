@@ -73,7 +73,10 @@ impl PendingDownloads {
     }
 
     pub fn cancel(&mut self, song_id: &str) -> bool {
-        let Some(index) = self.queue.iter().position(|pending| pending.request.song_id == song_id)
+        let Some(index) = self
+            .queue
+            .iter()
+            .position(|pending| pending.request.song_id == song_id)
         else {
             return false;
         };
@@ -147,7 +150,11 @@ mod tests {
         pending.defer(pending.origin(), request("first"));
         assert!(pending.take_ready(|_| None).is_none());
         assert!(pending.cancel("first"));
-        assert!(pending.take_ready(|_| panic!("cancelled intent must not look up a file")).is_none());
+        assert!(
+            pending
+                .take_ready(|_| panic!("cancelled intent must not look up a file"))
+                .is_none()
+        );
         assert!(!pending.cancel("first"));
     }
 
@@ -157,10 +164,16 @@ mod tests {
         pending.defer(pending.origin(), request("first"));
         assert!(pending.take_ready(|_| None).is_none());
         assert!(pending.take_ready(|_| None).is_none());
-        let admitted = pending.take_ready(|_| Some(DownloadState::NotDownloaded)).unwrap();
+        let admitted = pending
+            .take_ready(|_| Some(DownloadState::NotDownloaded))
+            .unwrap();
         assert_eq!(admitted.song_id, "first");
         assert_eq!(admitted.target.dir, PathBuf::from("downloads"));
-        assert!(pending.take_ready(|_| panic!("intent must be consumed once")).is_none());
+        assert!(
+            pending
+                .take_ready(|_| panic!("intent must be consumed once"))
+                .is_none()
+        );
     }
 
     #[test]
@@ -171,12 +184,28 @@ mod tests {
         pending.defer(origin, request("cancelled"));
         pending.defer(origin, request("third"));
         assert!(pending.cancel("cancelled"));
-        assert!(pending.take_ready(|request| {
-            assert_eq!(request.song_id, "first");
-            None
-        }).is_none());
-        assert_eq!(pending.take_ready(|_| Some(DownloadState::NotDownloaded)).unwrap().song_id, "first");
-        assert_eq!(pending.take_ready(|_| Some(DownloadState::NotDownloaded)).unwrap().song_id, "third");
+        assert!(
+            pending
+                .take_ready(|request| {
+                    assert_eq!(request.song_id, "first");
+                    None
+                })
+                .is_none()
+        );
+        assert_eq!(
+            pending
+                .take_ready(|_| Some(DownloadState::NotDownloaded))
+                .unwrap()
+                .song_id,
+            "first"
+        );
+        assert_eq!(
+            pending
+                .take_ready(|_| Some(DownloadState::NotDownloaded))
+                .unwrap()
+                .song_id,
+            "third"
+        );
         assert!(pending.is_empty());
     }
 
@@ -187,12 +216,14 @@ mod tests {
         pending.defer(origin, request("existing"));
         pending.defer(origin, request("busy"));
         pending.defer(origin, request("absent"));
-        let admitted = pending.take_ready(|request| match request.song_id.as_str() {
-            "existing" => Some(DownloadState::Done),
-            "busy" => Some(DownloadState::Downloading),
-            "absent" => Some(DownloadState::NotDownloaded),
-            _ => panic!("unexpected request"),
-        }).unwrap();
+        let admitted = pending
+            .take_ready(|request| match request.song_id.as_str() {
+                "existing" => Some(DownloadState::Done),
+                "busy" => Some(DownloadState::Downloading),
+                "absent" => Some(DownloadState::NotDownloaded),
+                _ => panic!("unexpected request"),
+            })
+            .unwrap();
         assert_eq!(admitted.song_id, "absent");
         assert!(pending.is_empty());
     }
@@ -204,9 +235,19 @@ mod tests {
         pending.defer(old_origin, request("waiting"));
         pending.invalidate_root();
         pending.defer(old_origin, request("late_old_root"));
-        assert!(pending.take_ready(|_| panic!("stale roots must not query or admit")).is_none());
+        assert!(
+            pending
+                .take_ready(|_| panic!("stale roots must not query or admit"))
+                .is_none()
+        );
         pending.defer(pending.origin(), request("new_root"));
-        assert_eq!(pending.take_ready(|_| Some(DownloadState::NotDownloaded)).unwrap().song_id, "new_root");
+        assert_eq!(
+            pending
+                .take_ready(|_| Some(DownloadState::NotDownloaded))
+                .unwrap()
+                .song_id,
+            "new_root"
+        );
     }
 
     #[test]
@@ -216,8 +257,18 @@ mod tests {
         pending.defer(old_origin, request("waiting"));
         pending.invalidate_session();
         pending.defer(old_origin, request("late_old_session"));
-        assert!(pending.take_ready(|_| panic!("old sessions must not query or admit")).is_none());
+        assert!(
+            pending
+                .take_ready(|_| panic!("old sessions must not query or admit"))
+                .is_none()
+        );
         pending.defer(pending.origin(), request("new_session"));
-        assert_eq!(pending.take_ready(|_| Some(DownloadState::NotDownloaded)).unwrap().song_id, "new_session");
+        assert_eq!(
+            pending
+                .take_ready(|_| Some(DownloadState::NotDownloaded))
+                .unwrap()
+                .song_id,
+            "new_session"
+        );
     }
 }
