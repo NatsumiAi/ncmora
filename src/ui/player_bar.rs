@@ -219,9 +219,8 @@ pub fn draw_collapsed_player_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let download_state = app.current_download_state();
     let download_glyph = download_state
         .map(|state| crate::app::download::state_glyph(state, app.download_spinner_phase(), icons));
-    // 下载图标与折叠栏里除爱心以外的按钮同色（控制行 prev/play/next/mode 用的 text 色），
-    // 不按下载状态换色；状态由字形表达（转圈 / 对勾）。
-    let download_style = Style::default().fg(app.theme.color_text());
+    // 下载三态与歌曲列表未下载图标同色，状态仅由字形表达。
+    let download_style = Style::default().fg(app.theme.color_subtext());
 
     let mut like_hit = None;
     let mut download_hit = None;

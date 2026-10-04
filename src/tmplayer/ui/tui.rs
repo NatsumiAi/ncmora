@@ -2098,6 +2098,11 @@ mod tests {
                     assert_eq!(download_y, y);
                     assert_eq!(download_x + width + 1, heart_x);
                     assert_eq!(
+                        buf[(download_x, y)].fg,
+                        app.theme.color_subtext(),
+                        "下载三态均使用歌曲列表未下载图标的颜色"
+                    );
+                    assert_eq!(
                         buf[(download_x, y)].symbol(),
                         info_panel::download_glyph(&app).unwrap().to_string()
                     );
