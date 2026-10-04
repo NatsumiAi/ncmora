@@ -41,6 +41,7 @@ pub struct UiLayout {
 pub struct Tui {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     pub should_quit: bool,
+    halfblocks: crate::tmplayer::render::halfblock_cover::HalfblockCovers,
 }
 
 impl Tui {
@@ -51,6 +52,7 @@ impl Tui {
         Ok(Self {
             terminal,
             should_quit: false,
+            halfblocks: crate::tmplayer::render::halfblock_cover::HalfblockCovers::new(),
         })
     }
 
@@ -98,6 +100,7 @@ impl Tui {
             return Ok(layout_out);
         }
 
+        self.halfblocks.poll();
         self.terminal.draw(|f| {
             let size = f.area();
             layout_out.full = size;
@@ -211,6 +214,17 @@ impl Tui {
             if show_right {
                 visual_panel::render(f, lyric_row, spectrum_row, app);
             }
+            if app.config.graphics_protocol == crate::data::config::GraphicsProtocol::Halfblocks
+                && app.cover_anim.is_none()
+                && app.overlay != Overlay::Playlist
+                && app.playlist_slide_x == app.playlist_slide_target_x
+                && let (Some(bytes), Some(hash)) = (
+                    app.player.track.cover.as_deref(), app.player.track.cover_hash,
+                )
+            {
+                let cover = info_l.cover.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+                self.halfblocks.paint(f.buffer_mut(), cover, hash, bytes);
+            }
 
             // playlist overlay slides in/out over left
             if app.overlay == Overlay::Playlist
@@ -275,6 +289,15 @@ impl Tui {
             }
 
 
+            if app.config.graphics_protocol == crate::data::config::GraphicsProtocol::Halfblocks
+                && app.overlay == Overlay::Playlist
+                && app.playlist_slide_x == 0
+                && app.playlist_slide_target_x == 0
+                && let (Some(bytes), Some(hash)) = (app.playlist_cover.as_deref(), app.playlist_cover_hash)
+            {
+                let cover = playlist_panel::compute_layout(layout_out.playlist_rect, app).cover_rect;
+                self.halfblocks.paint(f.buffer_mut(), cover, hash, bytes);
+            }
             // modals (top-most)
             match app.overlay {
                 Overlay::SettingsModal => {
@@ -1647,24 +1670,33 @@ fn render_eq_modal(f: &mut ratatui::Frame, size: Rect, app: &mut AppState) {
     );
 }
 
-/// 下载图标格：爱心左侧隔一格（再左一位，与爱心之间留一个空格）。
-/// 只在标题行画得下三格（图标 + 空格 + 爱心）时存在；更窄时整格不画、不可点。
-pub(crate) fn download_cell(meta: Rect) -> Option<(u16, u16)> {
-    let (heart_x, heart_y) = heart_cell(meta)?;
-    if meta.width < 3 {
-        return None;
-    }
-    Some((heart_x.saturating_sub(2), heart_y))
-}
-
-/// 标题行爱心所在的单元格（`compose_left_right_line` 把爱心右对齐到该行最后一格）。
-///
-/// `meta` 为 3 行块，只有首行画标题与爱心；未绘制（尺寸为 0）时返回 `None`。
-fn heart_cell(meta: Rect) -> Option<(u16, u16)> {
+/// Returns the rendered heart span's occupied cells using the selected icon set.
+fn heart_cells(meta: Rect, app: &AppState) -> Option<(u16, u16, u16)> {
     if meta.width == 0 || meta.height == 0 {
         return None;
     }
-    Some((meta.x + meta.width - 1, meta.y))
+    let heart = crate::data::icons::UiIcons::for_mode(app.config.icon_mode).heart(app.player.liked);
+    let width = unicode_width::UnicodeWidthStr::width(heart).min(u16::MAX as usize) as u16;
+    let width = width.min(meta.width);
+    (width > 0).then_some((meta.x + meta.width - width, meta.y, width))
+}
+
+fn download_cells(meta: Rect, app: &AppState) -> Option<(u16, u16, u16)> {
+    let (_, y, heart_width) = heart_cells(meta, app)?;
+    let glyph = crate::tmplayer::ui::panels::info_panel::download_glyph(app)?;
+    let width = unicode_width::UnicodeWidthChar::width(glyph).unwrap_or(1) as u16;
+    let end = meta.x + meta.width - heart_width;
+    (end > meta.x + width).then_some((end - width - 1, y, width))
+}
+
+/// Legacy single-cell helper retained for layout tests; runtime hit testing uses `heart_cells`.
+pub(crate) fn download_cell(meta: Rect) -> Option<(u16, u16)> {
+    let heart_x = meta.x + meta.width.saturating_sub(1);
+    (meta.width >= 3 && meta.height > 0).then_some((heart_x.saturating_sub(2), meta.y))
+}
+
+fn heart_cell(meta: Rect) -> Option<(u16, u16)> {
+    (meta.width > 0 && meta.height > 0).then_some((meta.x + meta.width - 1, meta.y))
 }
 
 pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option<Action> {
@@ -1775,18 +1807,19 @@ pub fn hit_test(layout: &UiLayout, app: &AppState, col: u16, row: u16) -> Option
         return control_buttons::hit_test(layout.info_controls, app, col, row);
     }
 
-    // 爱心贴标题行右端，只有那一格可点；meta 下面的艺术字/专辑行没有爱心。
-    if let Some((heart_x, heart_y)) = heart_cell(layout.info_meta) {
-        if col == heart_x && row == heart_y {
-            return Some(Action::ToggleFavorite);
-        }
+    // Heart/download icons may occupy multiple cells in ASCII mode.
+    if let Some((heart_x, heart_y, heart_width)) = heart_cells(layout.info_meta, app)
+        && row == heart_y
+        && col >= heart_x
+        && col < heart_x + heart_width
+    {
+        return Some(Action::ToggleFavorite);
     }
-
-    // 下载图标在爱心左侧一格；下载不可用（Hidden）时整格不画、不可点。
     if app.download_state != crate::tmplayer::DownloadIconState::Hidden
-        && let Some((download_x, download_y)) = download_cell(layout.info_meta)
-        && col == download_x
+        && let Some((download_x, download_y, download_width)) = download_cells(layout.info_meta, app)
         && row == download_y
+        && col >= download_x
+        && col < download_x + download_width
     {
         return Some(Action::ToggleDownload);
     }
@@ -2108,14 +2141,13 @@ mod tests {
         let layout = info_panel::layout(left, 120);
         let (download_x, y) = download_cell(layout.meta).expect("下载格");
         let (heart_x, _) = heart_cell(layout.meta).expect("爱心格");
-
         assert_eq!(heart_x, download_x + 2, "下载图标与爱心之间隔一格");
-        assert_eq!(
-            buf[(download_x, y)].symbol(),
-            crate::app::download::ICON_DOWNLOAD.to_string()
-        );
+        let icons = crate::data::icons::UiIcons::for_mode(app.config.icon_mode);
+        let expected_download = crate::tmplayer::ui::panels::info_panel::download_glyph(&app)
+            .expect("下载图标");
+        assert_eq!(buf[(download_x, y)].symbol(), expected_download.to_string());
         assert_eq!(buf[(download_x + 1, y)].symbol(), " ");
-        assert_eq!(buf[(heart_x, y)].symbol(), "\u{f08a}");
+        assert_eq!(buf[(heart_x, y)].symbol(), icons.heart(app.player.liked));
     }
 
     /// 下载图标格在爱心左侧隔一格；画不下三格时留给爱心，不画也不可点。

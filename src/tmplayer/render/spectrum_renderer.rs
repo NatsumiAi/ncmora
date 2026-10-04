@@ -48,7 +48,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
         app.config.bar_channel_reverse,
     );
     let mut x_cursor = x_offset.min(w);
-    for (i, &val) in draw_vals.iter().enumerate() {
+    for (i, &val) in draw_vals[..draw_total.min(192)].iter().enumerate() {
         if x_cursor >= w {
             break;
         }
@@ -201,36 +201,30 @@ fn build_display_vals(
     draw_total: usize,
     mode: BarChannels,
     reverse: bool,
-) -> Vec<f32> {
-    if draw_total == 0 {
-        return Vec::new();
-    }
+) -> [f32; 192] {
+    let mut values = [0.0; 192];
+    let draw_total = draw_total.min(values.len());
+    if draw_total == 0 { return values; }
     match mode {
         BarChannels::Mono => {
             let data_len = mono.len().max(1);
-            (0..draw_total)
-                .map(|i| {
-                    let idx = if reverse { draw_total - 1 - i } else { i };
-                    sample_val(mono, data_len, draw_total, idx)
-                })
-                .collect()
+            for (i, value) in values[..draw_total].iter_mut().enumerate() {
+                let idx = if reverse { draw_total - 1 - i } else { i };
+                *value = sample_val(mono, data_len, draw_total, idx);
+            }
         }
         BarChannels::Stereo => {
             let per_side = (draw_total / 2).max(1);
             let left_len = left.len().max(1);
             let right_len = right.len().max(1);
-            let mut values = Vec::with_capacity(draw_total);
             for i in 0..per_side {
                 let idx = if reverse { per_side - 1 - i } else { i };
-                values.push(sample_val(left, left_len, per_side, per_side - 1 - idx));
+                values[i] = sample_val(left, left_len, per_side, per_side - 1 - idx);
+                values[per_side + i] = sample_val(right, right_len, per_side, idx);
             }
-            for i in 0..per_side {
-                let idx = if reverse { per_side - 1 - i } else { i };
-                values.push(sample_val(right, right_len, per_side, idx));
-            }
-            values
         }
     }
+    values
 }
 
 fn sample_val(data: &[f32], data_len: usize, draw_len: usize, i: usize) -> f32 {
@@ -303,5 +297,20 @@ fn mix(a: Color, b: Color, t: f32) -> Color {
             Color::Rgb(r, g, b)
         }
         _ => a,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stereo_display_values_preserve_distinct_channels() {
+        let mono = [0.0; 3];
+        let left = [1.0, 0.0, 0.0];
+        let right = [0.0, 0.0, 0.0];
+        let values = build_display_vals(&mono, &left, &right, 6, BarChannels::Stereo, false);
+        assert!(values[..3].iter().any(|value| *value > 0.0));
+        assert!(values[3..6].iter().all(|value| *value == 0.0));
     }
 }

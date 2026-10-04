@@ -45,17 +45,13 @@ pub enum Action {
 
     PlaylistUp,
     PlaylistDown,
-    PlaylistMoveItemUp,
-    PlaylistMoveItemDown,
     PlaylistSelect(usize),
 
-    PrevAlbum,
-    NextAlbum,
 
     SeekToFraction(f32),
 
-    FolderChar(char),
-    FolderBackspace,
+    PathChar(char),
+    PathBackspace,
 
     MouseClick {
         col: u16,
@@ -82,20 +78,6 @@ pub enum Action {
 }
 
 pub fn map_key(ev: KeyEvent, overlay: Overlay, config: &Config) -> Action {
-    if overlay == Overlay::AcoustIdModal {
-        match ev.code {
-            KeyCode::Esc => return Action::CloseOverlay,
-            KeyCode::Enter => return Action::Confirm,
-            KeyCode::Backspace => return Action::FolderBackspace,
-            KeyCode::Char(c) => return Action::FolderChar(c),
-            KeyCode::Left => return Action::None,
-            KeyCode::Right => return Action::None,
-            KeyCode::Up => return Action::None,
-            KeyCode::Down => return Action::None,
-            _ => {}
-        }
-        return Action::None;
-    }
 
     // modal-specific handling first
     if overlay == Overlay::SettingsModal {
@@ -123,17 +105,6 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay, config: &Config) -> Action {
         };
     }
 
-    if overlay == Overlay::LocalAudioSettingsModal {
-        return match ev.code {
-            KeyCode::Esc => Action::CloseOverlay,
-            KeyCode::Enter => Action::Confirm,
-            KeyCode::Up => Action::ModalUp,
-            KeyCode::Down => Action::ModalDown,
-            KeyCode::Left => Action::ModalLeft,
-            KeyCode::Right => Action::ModalRight,
-            _ => Action::None,
-        };
-    }
 
     if overlay == Overlay::LyricsSettingsModal {
         return match ev.code {
@@ -160,18 +131,17 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay, config: &Config) -> Action {
     }
 
     if overlay == Overlay::DownloadPathEditModal {
-        // 路径行编辑：字符直接进输入框，左右键移动光标，回车确认，Esc 取消。
         return match ev.code {
             KeyCode::Esc => Action::CloseOverlay,
             KeyCode::Enter => Action::Confirm,
-            KeyCode::Backspace => Action::FolderBackspace,
+            KeyCode::Backspace => Action::PathBackspace,
             KeyCode::Left => Action::ModalLeft,
             KeyCode::Right => Action::ModalRight,
             KeyCode::Char(ch) => {
                 if ev.modifiers.contains(KeyModifiers::CONTROL) || ch.is_control() {
                     Action::None
                 } else {
-                    Action::FolderChar(ch)
+                    Action::PathChar(ch)
                 }
             }
             _ => Action::None,
@@ -219,10 +189,9 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay, config: &Config) -> Action {
         };
     }
 
-    // global shortcuts (except folder input)
-    match ev.code {
-        KeyCode::Char('t') | KeyCode::Char('T') => return Action::OpenSettingsModal,
-        _ => {}
+    // global shortcuts use the host Config bindings.
+    if keybind_matches(&config.keybind_settings, ev) {
+        return Action::OpenSettingsModal;
     }
 
     if keybind_matches(&config.keybind_fullscreen_eq, ev) {
@@ -235,13 +204,13 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay, config: &Config) -> Action {
         return Action::ToggleDownload;
     }
 
-    if ev.modifiers.contains(KeyModifiers::CONTROL) {
-        match ev.code {
-            // In CNMPlayer embedded mode, Ctrl+F folds fullscreen back to the host UI.
-            KeyCode::Char('f') | KeyCode::Char('F') => return Action::Quit,
-            KeyCode::Char('k') | KeyCode::Char('K') => return Action::OpenHelpModal,
-            _ => {}
-        }
+    if keybind_matches(&config.keybind_fullscreen, ev) {
+        return Action::Quit;
+    }
+    if ev.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(ev.code, KeyCode::Char('k') | KeyCode::Char('K'))
+    {
+        return Action::OpenHelpModal;
     }
 
     if overlay == Overlay::Playlist {
@@ -251,34 +220,8 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay, config: &Config) -> Action {
         return match ev.code {
             KeyCode::Esc => Action::CloseOverlay,
             KeyCode::Enter => Action::Confirm,
-            KeyCode::Left => {
-                if ev.modifiers.contains(KeyModifiers::CONTROL) {
-                    Action::PrevAlbum
-                } else {
-                    Action::None
-                }
-            }
-            KeyCode::Right => {
-                if ev.modifiers.contains(KeyModifiers::CONTROL) {
-                    Action::NextAlbum
-                } else {
-                    Action::None
-                }
-            }
-            KeyCode::Up => {
-                if ev.modifiers.contains(KeyModifiers::CONTROL) {
-                    Action::PlaylistMoveItemUp
-                } else {
-                    Action::PlaylistUp
-                }
-            }
-            KeyCode::Down => {
-                if ev.modifiers.contains(KeyModifiers::CONTROL) {
-                    Action::PlaylistMoveItemDown
-                } else {
-                    Action::PlaylistDown
-                }
-            }
+            KeyCode::Up => Action::PlaylistUp,
+            KeyCode::Down => Action::PlaylistDown,
             _ => Action::None,
         };
     }
@@ -602,7 +545,6 @@ mod tests {
         for overlay in [
             Overlay::SettingsModal,
             Overlay::BarSettingsModal,
-            Overlay::LocalAudioSettingsModal,
             Overlay::LyricsSettingsModal,
             Overlay::DownloadSettingsModal,
             Overlay::DownloadPathEditModal,

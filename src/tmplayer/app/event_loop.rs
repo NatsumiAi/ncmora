@@ -367,8 +367,6 @@ pub async fn run(
                     state_changed = true;
                 }
                 Event::Resize(_, _) => {
-                    // Kitty graphics placements may get cleared on terminal resize.
-                    tui.on_resize();
                     state_changed = true;
                 }
                 _ => {}
@@ -513,12 +511,12 @@ async fn handle_action(
                 sync_eq_config(app, host_bridge).await;
             }
         }
-        Action::FolderChar(c) => {
+        Action::PathChar(c) => {
             if app.overlay == Overlay::DownloadPathEditModal {
                 download_path_edit_insert(app, c);
             }
         }
-        Action::FolderBackspace => {
+        Action::PathBackspace => {
             if app.overlay == Overlay::DownloadPathEditModal {
                 download_path_edit_backspace(app);
             }
@@ -683,9 +681,6 @@ async fn handle_action(
             app.playlist_view.move_down();
             app.playlist_view.clamp_selected();
         }
-        Action::PlaylistMoveItemUp => (),
-        Action::PlaylistMoveItemDown => (),
-        Action::PrevAlbum | Action::NextAlbum => (),
         Action::ModalUp => {
             if app.overlay == Overlay::SettingsModal {
                 let count = 13;
@@ -1048,7 +1043,7 @@ async fn apply_settings_delta(
                 save_and_sync_host_config(app, host_bridge).await;
             }
         }
-        // Kitty graphics
+        // Color halfblocks / ASCII cover display
         3 => {
             if delta != 0 {
                 app.config.graphics_protocol = app.config.graphics_protocol.cycle(delta);

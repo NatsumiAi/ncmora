@@ -151,11 +151,19 @@ impl tmplayer::HostPlaybackBridge for AppFullscreenBridge<'_> {
         }
     }
 
-    fn config_snapshot(&self) -> tmplayer::HostConfigSync {
+    fn config_signature(&self) -> u64 {
+        self.app.fullscreen_config_signature()
+    }
+
+    fn vip_audio_unlocked(&self) -> bool {
+        self.app.vip_audio_unlocked
+    }
+
+    fn config_snapshot(&self) -> Config {
         self.app.fullscreen_config_snapshot()
     }
 
-    async fn apply_config_sync(&mut self, config: tmplayer::HostConfigSync) {
+    async fn apply_config_sync(&mut self, config: Config) {
         self.app.fullscreen_apply_config_sync(config).await;
     }
 
@@ -289,14 +297,19 @@ async fn init_logger() -> Result<()> {
 #[compio::main]
 async fn main() -> Result<()> {
     init_logger().await?;
-    let config = Config::load_or_default()?;
-    let theme = ThemeLoader::load_or_default(&config.theme);
+    let config = compio::runtime::spawn_blocking(Config::load_or_default)
+        .await
+        .map_err(|_| anyhow::anyhow!("configuration load task panicked"))??;
+    let theme = ThemeLoader::load_async(&config.theme).await.unwrap_or_default();
     let mut app = App::new(config, theme)?;
 
     let mut terminal = init_terminal()?;
     let run_result = run_app(&mut terminal, &mut app).await;
-    restore_terminal(&mut terminal)?;
-    run_result
+    let restore_result = restore_terminal(&mut terminal);
+    let persistence_result = app.flush_persistence();
+    run_result?;
+    restore_result?;
+    persistence_result
 }
 
 fn init_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -427,7 +440,7 @@ async fn launch_tmplayer_fullscreen(
     let config = app.config.clone();
     let mut bridge = AppFullscreenBridge { app };
     let (exit, status_text) =
-        match tmplayer::run_fullscreen(&config, bootstrap, Some(&mut bridge)).await {
+        match tmplayer::run_fullscreen(&config, bootstrap, &mut bridge).await {
             Ok(exit) => (Some(exit), String::new()),
             Err(err) => (None, format!("TMPlayer 运行失败: {}", err)),
         };

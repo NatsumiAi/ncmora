@@ -116,6 +116,8 @@ struct ServiceInner {
     thread: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
+type ExecutableResolver = Arc<dyn Fn() -> Result<PathBuf> + Send + Sync + 'static>;
+
 pub struct CavaService {
     inner: Arc<ServiceInner>,
 }
@@ -126,6 +128,10 @@ impl Clone for CavaService {
 
 impl CavaService {
     pub fn new() -> Self {
+        Self::new_with_resolver(Arc::new(resolve_cava_executable))
+    }
+
+    fn new_with_resolver(resolver: ExecutableResolver) -> Self {
         let (wake, wake_rx) = mpsc::sync_channel(1);
         let snapshot = Arc::new(Mutex::new(CavaSnapshot::default()));
         let error = Arc::new(Mutex::new(None));
@@ -133,7 +139,7 @@ impl CavaService {
         let worker_snapshot = Arc::clone(&snapshot);
         let worker_error = Arc::clone(&error);
         let worker_control = Arc::clone(&control);
-        let thread = thread::spawn(move || service_worker(worker_control, wake_rx, worker_snapshot, worker_error));
+        let thread = thread::spawn(move || service_worker(worker_control, wake_rx, worker_snapshot, worker_error, resolver));
         Self {
             inner: Arc::new(ServiceInner { control, wake, snapshot, error, thread: Mutex::new(Some(thread)) }),
         }
@@ -211,7 +217,9 @@ fn service_worker(
     wake_rx: StdReceiver<()>,
     snapshot: Arc<Mutex<CavaSnapshot>>,
     error: Arc<Mutex<Option<String>>>,
-) {
+    resolver: ExecutableResolver,
+)
+{
     let mut active: Option<ActiveProcess> = None;
     let mut failed_cfg: Option<CavaConfig> = None;
     let mut seen_retry = 0u64;
@@ -230,7 +238,7 @@ fn service_worker(
         }
         let Some(desired) = ctl.desired else { continue };
         if active.is_none() && failed_cfg != Some(desired) {
-            match spawn_process(desired, Arc::clone(&snapshot)) {
+            match spawn_process(desired, Arc::clone(&snapshot), &resolver) {
                 Ok(process) => {
                     *error.lock() = None;
                     active = Some(process);
@@ -272,7 +280,7 @@ fn stop_process(active: &mut Option<ActiveProcess>) {
     let _ = fs::remove_file(process.cfg_path);
 }
 
-fn spawn_process(cfg: CavaConfig, snapshot: Arc<Mutex<CavaSnapshot>>) -> Result<ActiveProcess> {
+fn spawn_process(cfg: CavaConfig, snapshot: Arc<Mutex<CavaSnapshot>>, resolver: &ExecutableResolver) -> Result<ActiveProcess> {
     let per_channel_bars = cfg.bars.clamp(1, MAX_BARS);
     let output_bars = match cfg.channels {
         CavaChannels::Stereo => per_channel_bars.saturating_mul(2).min(MAX_BARS * 2),
@@ -291,7 +299,7 @@ fn spawn_process(cfg: CavaConfig, snapshot: Arc<Mutex<CavaSnapshot>>) -> Result<
     }
     drop(file);
 
-    let cava_exe = match resolve_cava_executable() {
+    let cava_exe = match resolver() {
         Ok(path) => path,
         Err(err) => { let _ = fs::remove_file(&cfg_path); return Err(err); }
     };
@@ -500,6 +508,22 @@ mod tests {
     fn failed_process_is_single_flight_until_explicit_retry() {
         use std::os::unix::fs::PermissionsExt;
 
+        struct Fixture(Vec<PathBuf>);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                for path in &self.0 { let _ = fs::remove_file(path); }
+            }
+        }
+
+        fn wait_until(timeout: Duration, mut ready: impl FnMut() -> bool) -> bool {
+            let deadline = Instant::now() + timeout;
+            while Instant::now() < deadline {
+                if ready() { return true; }
+                thread::sleep(Duration::from_millis(5));
+            }
+            ready()
+        }
+
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         let dir = std::env::temp_dir();
         let config_prefix = format!("tmplayer-cava-{}-", std::process::id());
@@ -507,42 +531,35 @@ mod tests {
         let script = dir.join(format!("tmplayer-cava-test-{nonce}.sh"));
         let spawn_fail = dir.join(format!("tmplayer-cava-test-{nonce}.noexec"));
         let marker = dir.join(format!("tmplayer-cava-test-{nonce}.count"));
+        let _fixtures = Fixture(vec![script.clone(), spawn_fail.clone(), marker.clone()]);
         let script_text = format!("#!/bin/sh\nprintf x >> '{}'\nexit 17\n", marker.display());
         fs::write(&script, script_text).unwrap();
         fs::write(&spawn_fail, "not executable").unwrap();
         let mut permissions = fs::metadata(&script).unwrap().permissions();
         permissions.set_mode(0o700);
         fs::set_permissions(&script, permissions).unwrap();
-        let previous = std::env::var_os("TMPLAYER_CAVA");
-        unsafe { std::env::set_var("TMPLAYER_CAVA", &spawn_fail); }
 
-        let service = CavaService::new();
+        let resolver_path = Arc::new(Mutex::new(spawn_fail.clone()));
+        let resolver_path_for_worker = Arc::clone(&resolver_path);
+        let resolver: ExecutableResolver = Arc::new(move || Ok(resolver_path_for_worker.lock().clone()));
+        let service = CavaService::new_with_resolver(resolver);
         service.set_desired(Some(CavaConfig { framerate_hz: 30, bars: 3, channels: CavaChannels::Mono, reverse: false }));
-        thread::sleep(Duration::from_millis(140));
-        assert!(service.failure().is_some());
-        unsafe { std::env::set_var("TMPLAYER_CAVA", &script); }
+        assert!(wait_until(Duration::from_secs(2), || service.failure().is_some()));
+
+        *resolver_path.lock() = script;
         service.set_desired(Some(CavaConfig { framerate_hz: 30, bars: 3, channels: CavaChannels::Stereo, reverse: false }));
-        thread::sleep(Duration::from_millis(140));
+        assert!(wait_until(Duration::from_secs(2), || fs::read_to_string(&marker).unwrap_or_default().len() == 1 && service.failure().is_some()));
         assert!(service.failure().is_some());
-        let first_count = fs::read_to_string(&marker).unwrap_or_default().len();
-        assert_eq!(first_count, 1);
-        thread::sleep(Duration::from_millis(100));
-        assert_eq!(fs::read_to_string(&marker).unwrap_or_default().len(), 1);
+        let stable_deadline = Instant::now() + Duration::from_millis(100);
+        while Instant::now() < stable_deadline {
+            assert_eq!(fs::read_to_string(&marker).unwrap_or_default().len(), 1);
+            thread::sleep(Duration::from_millis(5));
+        }
 
         service.retry();
-        thread::sleep(Duration::from_millis(140));
-        assert_eq!(fs::read_to_string(&marker).unwrap_or_default().len(), 2);
+        assert!(wait_until(Duration::from_secs(2), || fs::read_to_string(&marker).unwrap_or_default().len() == 2 && service.failure().is_some()));
         service.shutdown_blocking();
-
-        if let Some(value) = previous {
-            unsafe { std::env::set_var("TMPLAYER_CAVA", value); }
-        } else {
-            unsafe { std::env::remove_var("TMPLAYER_CAVA"); }
-        }
         let config_after: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(Result::ok).map(|entry| entry.path()).filter(|path| path.file_name().is_some_and(|name| name.to_string_lossy().starts_with(&config_prefix))).collect();
         assert_eq!(config_after, config_before);
-        let _ = fs::remove_file(script);
-        let _ = fs::remove_file(spawn_fail);
-        let _ = fs::remove_file(marker);
     }
 }

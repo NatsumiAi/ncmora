@@ -74,6 +74,7 @@ use browse_controller::BrowseController;
 use input_controller::InputController;
 use download_controller::DownloadController;
 use startup_controller::StartupController;
+use crate::data::persistence::PersistenceWorker;
 use streaming::StreamingReader;
 
 const MAX_INPUT_LEN: usize = 64;
@@ -2724,7 +2725,7 @@ pub struct App {
     pub should_quit: bool,
     pub launch_fullscreen_requested: bool,
     pub vip_audio_unlocked: bool,
-    search_return_page: Page,
+    config_revision: u64,
     playlist_return_page: Page,
     /// 作者页的上一级：从搜索页进是搜索页，从全屏页点作者名进是首页。
     author_return_page: Page,
@@ -2747,7 +2748,7 @@ pub struct App {
     mpris_last_signature: Option<u64>,
     mpris_last_playback: PlaybackRuntimeState,
     api: ApiState,
-    audio_player: AudioPlayer,
+    persistence: PersistenceWorker,
     /// 下载任务表（异步后台任务；状态行与图标都从这里读）。
     pub downloads: DownloadController,
     pub graphics_picker: Picker,
@@ -2762,6 +2763,7 @@ impl App {
     /// [`StartupInit`]，加载页随即可以显示真实进度。
     pub fn new(config: Config, theme: Theme) -> Result<Self> {
         let audio_player = AudioPlayer::new(&config)?;
+        let persistence = PersistenceWorker::spawn("cnmplayer-persistence")?;
         let saved_cookie = session::load_cookie().ok().flatten();
 
         let mut headers = header::HeaderMap::new();
@@ -2844,6 +2846,7 @@ impl App {
             should_quit: false,
             launch_fullscreen_requested: false,
             vip_audio_unlocked: false,
+            config_revision: 0,
             search_return_page: Page::Home,
             playlist_return_page: Page::Home,
             author_return_page: Page::Home,
@@ -2866,6 +2869,7 @@ impl App {
             mpris_last_signature: None,
             mpris_last_playback: PlaybackRuntimeState::Stopped,
             api,
+            persistence,
             audio_player,
             downloads: DownloadController {
                 manager: download_manager,
@@ -2904,6 +2908,14 @@ impl App {
         Ok(app)
     }
 
+    fn persist_config(&mut self) {
+        self.config_revision = self.config_revision.wrapping_add(1);
+        let snapshot = self.config.clone();
+        let _ = self.persistence.enqueue(move || snapshot.save());
+    }
+    pub fn flush_persistence(&self) -> Result<()> {
+        self.persistence.flush().map_err(anyhow::Error::msg)
+    }
     pub async fn tick(&mut self) {
         self.tick_audio().await;
         self.tick_cover_fetch();
@@ -3320,7 +3332,7 @@ impl App {
             }
         }
 
-        let _ = self.config.save();
+        self.persist_config();
     }
 
     pub fn clear_settings_item_hits(&mut self) {
@@ -3993,7 +4005,7 @@ impl App {
             Overlay::SettingsPlayback => self.handle_settings_playback_key(key),
             Overlay::SettingsKeybinds => self.handle_settings_keybinds_key(key),
             Overlay::SettingsLyrics => self.handle_settings_lyrics_key(key),
-            Overlay::SettingsDownload => self.handle_settings_download_key(key),
+            Overlay::SettingsDownload => self.handle_settings_download_key(key).await,
             Overlay::SettingsAbout => self.handle_settings_about_key(key),
             Overlay::SearchBox => self.handle_search_box_key(key).await,
         }
@@ -5113,8 +5125,8 @@ impl App {
         let id = &track.song_id;
         let path = self.audio_player.cached_song_path(id, quality);
 
-        if is_nonempty_file(&path) {
-            return match self.audio_player.play_from_file(&path) {
+        if is_nonempty_file(&path).await {
+            return match self.audio_player.play_from_file(&path).await {
                 Ok(_) => ok(self),
                 Err(err) => fail(err, self),
             };
@@ -6081,11 +6093,11 @@ impl App {
         match self.settings.lyrics_selected {
             0 => {
                 self.config.page_lyrics = !self.config.page_lyrics;
-                let _ = self.config.save();
+                self.persist_config();
             }
             1 => {
                 self.config.page_lyrics_drag = !self.config.page_lyrics_drag;
-                let _ = self.config.save();
+                self.persist_config();
             }
             2 => {
                 // 拖动关闭时吸附无意义：灰置且不可改。
@@ -6093,7 +6105,7 @@ impl App {
                     return;
                 }
                 self.config.page_lyrics_snap = !self.config.page_lyrics_snap;
-                let _ = self.config.save();
+                self.persist_config();
             }
             _ => {}
         }
@@ -6191,7 +6203,7 @@ impl App {
             .cycle(delta, self.vip_audio_unlocked);
         if next != self.config.download_audio_quality {
             self.config.download_audio_quality = next;
-            let _ = self.config.save();
+            self.persist_config();
         }
     }
 
@@ -6211,7 +6223,7 @@ impl App {
         self.settings.download_reset_armed = false;
         self.config.download_audio_quality = crate::data::config::default_download_audio_quality();
         self.config.download_path = None;
-        let _ = self.config.save();
+        self.persist_config();
         self.refresh_download_root();
         self.set_runtime_status(self.lang_text(
             "下载设置已恢复默认",
@@ -6290,16 +6302,16 @@ impl App {
     }
 
     /// 回车确认：`Null` = 显式禁用；非法（空 / 非绝对 / 不可写）保留修改前的值。
-    fn commit_download_path_edit(&mut self) {
+    async fn commit_download_path_edit(&mut self) {
         let Some(edit) = self.settings.download_path_edit.take() else {
             return;
         };
         let raw = edit.buffer.trim().to_string();
-        match crate::app::download::parse_download_path(&raw) {
+        match crate::app::download::validate_download_path(&raw).await {
             Ok(crate::app::download::DownloadPathChoice::Disabled) => {
                 self.config.download_path =
                     Some(crate::app::download::DOWNLOAD_PATH_NULL.to_string());
-                let _ = self.config.save();
+                self.persist_config();
                 self.refresh_download_root();
                 self.set_runtime_status(self.lang_text(
                     "已禁用下载（路径填 Null）",
@@ -6308,7 +6320,7 @@ impl App {
             }
             Ok(crate::app::download::DownloadPathChoice::Dir(path)) => {
                 self.config.download_path = Some(path.display().to_string());
-                let _ = self.config.save();
+                self.persist_config();
                 self.refresh_download_root();
                 self.set_runtime_status(format!(
                     "{}: {}",
@@ -6347,7 +6359,7 @@ impl App {
     /// 「下载设置」页：音质 / 路径 / 恢复默认三行。
     ///
     /// 编辑态下所有按键都进输入框（含 `t`）；非编辑态沿用设置弹窗的习惯（Esc 返回、t 关闭）。
-    fn handle_settings_download_key(&mut self, key: KeyEvent) {
+    async fn handle_settings_download_key(&mut self, key: KeyEvent) {
         if self.settings.download_path_edit.is_some() {
             match key.code {
                 KeyCode::Esc => {
@@ -6356,7 +6368,7 @@ impl App {
                         self.lang_text("已取消修改下载路径", "Download path edit cancelled"),
                     );
                 }
-                KeyCode::Enter => self.commit_download_path_edit(),
+                KeyCode::Enter => self.commit_download_path_edit().await,
                 KeyCode::Backspace => self.download_path_edit_backspace(),
                 KeyCode::Delete => self.download_path_edit_delete(),
                 KeyCode::Left => self.download_path_edit_move(-1),
@@ -6490,7 +6502,7 @@ impl App {
 
                     if let Some(slot) = self.keybind_value_mut_for_index(index) {
                         *slot = binding.clone();
-                        let _ = self.config.save();
+                        self.persist_config();
                         self.set_runtime_status(format!(
                             "{} [{}] {} {}",
                             self.lang_text("已将", "Bound"),
@@ -6507,7 +6519,7 @@ impl App {
 
         if is_reserved_reset_combo(key) {
             self.reset_keybinds_to_default();
-            let _ = self.config.save();
+            self.persist_config();
             self.set_runtime_status(
                 self.lang_text("已恢复默认快捷键", "Restored default keybinds"),
             );
@@ -6620,13 +6632,13 @@ impl App {
                 if let Ok(theme) = ThemeLoader::load(next_name) {
                     self.theme = theme;
                     self.config.theme = next_name.clone();
-                    let _ = self.config.save();
+                    self.persist_config();
                 }
             }
             1 => {
                 if delta != 0 {
                     self.config.transparent_background = !self.config.transparent_background;
-                    let _ = self.config.save();
+                    self.persist_config();
                 }
             }
             2 => {
@@ -6635,7 +6647,7 @@ impl App {
                         Language::Zh => Language::En,
                         Language::En => Language::Zh,
                     };
-                    let _ = self.config.save();
+                    self.persist_config();
                 }
             }
             3 => {
@@ -6643,7 +6655,7 @@ impl App {
                     let next_protocol = self.config.graphics_protocol.cycle(delta);
                     if next_protocol != self.config.graphics_protocol {
                         self.config.graphics_protocol = next_protocol;
-                        let _ = self.config.save();
+                        self.persist_config();
                     }
                 }
             }
@@ -6653,14 +6665,14 @@ impl App {
             7 => {
                 if delta != 0 {
                     self.config.show_hints = !self.config.show_hints;
-                    let _ = self.config.save();
+                    self.persist_config();
                 }
             }
             8 => {
                 if delta != 0 {
                     let was_small_context = self.is_small_window_context();
                     self.config.small_window_display = !self.config.small_window_display;
-                    let _ = self.config.save();
+                    self.persist_config();
                     if !was_small_context && self.is_small_window_context() {
                         self.close_panels_for_small_window();
                     }
@@ -6670,7 +6682,7 @@ impl App {
             9 => {
                 if delta != 0 {
                     self.config.home_more_recommend = !self.config.home_more_recommend;
-                    let _ = self.config.save();
+                    self.persist_config();
                     if self.page == Page::Home {
                         if let Err(err) = self.load_home_recommendations().await {
                             self.browse.home.status_line = format!(
@@ -6697,30 +6709,30 @@ impl App {
         match self.settings.playback_selected {
             0 => {
                 self.config.visualize = self.config.visualize.cycle(delta);
-                let _ = self.config.save();
+                self.persist_config();
             }
             1 => {
                 self.config.super_smooth_bar = !self.config.super_smooth_bar;
-                let _ = self.config.save();
+                self.persist_config();
             }
             2 => {
                 self.config.bars_gap = !self.config.bars_gap;
-                let _ = self.config.save();
+                self.persist_config();
             }
             3 => {
                 self.config.bar_number = cycle_bar_number(self.config.bar_number, delta);
-                let _ = self.config.save();
+                self.persist_config();
             }
             4 => {
                 self.config.bar_channels = match self.config.bar_channels {
                     BarChannels::Mono => BarChannels::Stereo,
                     BarChannels::Stereo => BarChannels::Mono,
                 };
-                let _ = self.config.save();
+                self.persist_config();
             }
             5 => {
                 self.config.album_border = !self.config.album_border;
-                let _ = self.config.save();
+                self.persist_config();
             }
             6 => {
                 let next = self
@@ -6731,7 +6743,7 @@ impl App {
             }
             7 => {
                 self.config.playback_memory = !self.config.playback_memory;
-                let _ = self.config.save();
+                self.persist_config();
                 if self.config.playback_memory {
                     self.persist_playback_memory();
                 } else {
@@ -7366,204 +7378,56 @@ impl App {
         });
     }
 
-    pub fn fullscreen_config_snapshot(&self) -> crate::tmplayer::HostConfigSync {
-        crate::tmplayer::HostConfigSync {
-            theme: self.config.theme.clone(),
-            transparent_background: self.config.transparent_background,
-            album_border: self.config.album_border,
-            language: self.config.language,
-            graphics_protocol: self.config.graphics_protocol,
-            page_lyrics: self.config.page_lyrics,
-            page_lyrics_drag: self.config.page_lyrics_drag,
-            page_lyrics_snap: self.config.page_lyrics_snap,
-            page_lyrics_pos_x: self.config.page_lyrics_pos_x,
-            page_lyrics_pos_y: self.config.page_lyrics_pos_y,
-            audio_quality: self.config.audio_quality,
-            download_audio_quality: self.config.download_audio_quality,
-            download_path: self.config.download_path.clone(),
-            eq_bands_db: self.config.eq_bands_db,
-            playback_memory: self.config.playback_memory,
-            vip_audio_unlocked: self.vip_audio_unlocked,
-            show_hints: self.config.show_hints,
-            small_window_display: self.config.small_window_display,
-            home_more_recommend: self.config.home_more_recommend,
-            visualize: self.config.visualize,
-            super_smooth_bar: self.config.super_smooth_bar,
-            bars_gap: self.config.bars_gap,
-            bar_number: self.config.bar_number,
-            bar_channels: self.config.bar_channels,
-            bar_channel_reverse: self.config.bar_channel_reverse,
-        }
+    pub fn fullscreen_config_signature(&self) -> u64 {
+        self.config_revision
     }
 
-    pub async fn fullscreen_apply_config_sync(&mut self, sync: crate::tmplayer::HostConfigSync) {
-        let mut changed = false;
-        let mut home_more_recommend_changed = false;
+    pub fn fullscreen_config_snapshot(&self) -> Config {
+        self.config.clone()
+    }
 
-        if self.config.theme != sync.theme {
-            // 同步来的主题格式有问题时回退默认主题，而不是卡在旧主题上。
-            self.theme = ThemeLoader::load_or_default(&sync.theme);
-            self.config.theme = sync.theme;
-            changed = true;
-        }
-
-        if self.config.transparent_background != sync.transparent_background {
-            self.config.transparent_background = sync.transparent_background;
-            changed = true;
-        }
-
-        if self.config.album_border != sync.album_border {
-            self.config.album_border = sync.album_border;
-            changed = true;
-        }
-
-        if self.config.language != sync.language {
-            self.config.language = sync.language;
-            changed = true;
-        }
-
-        if self.config.graphics_protocol != sync.graphics_protocol {
-            self.config.graphics_protocol = sync.graphics_protocol;
-            changed = true;
-        }
-
-        if self.config.page_lyrics != sync.page_lyrics {
-            self.config.page_lyrics = sync.page_lyrics;
-            changed = true;
-        }
-
-        if self.config.page_lyrics_drag != sync.page_lyrics_drag {
-            self.config.page_lyrics_drag = sync.page_lyrics_drag;
-            changed = true;
-        }
-
-        if self.config.page_lyrics_snap != sync.page_lyrics_snap {
-            self.config.page_lyrics_snap = sync.page_lyrics_snap;
-            changed = true;
-        }
-
-        // 全屏页也可能改到浮窗位置（拖拽时由宿主写、这里只做兜底同步）。
-        let pos_x = sync.page_lyrics_pos_x.clamp(0.0, 1.0);
-        if (self.config.page_lyrics_pos_x - pos_x).abs() > f32::EPSILON {
-            self.config.page_lyrics_pos_x = pos_x;
-            changed = true;
-        }
-        let pos_y = sync.page_lyrics_pos_y.clamp(0.0, 1.0);
-        if (self.config.page_lyrics_pos_y - pos_y).abs() > f32::EPSILON {
-            self.config.page_lyrics_pos_y = pos_y;
-            changed = true;
-        }
-
-        if self.vip_audio_unlocked != sync.vip_audio_unlocked {
-            self.vip_audio_unlocked = sync.vip_audio_unlocked;
-            changed = true;
-        }
-
-        let clamped_quality = sync.audio_quality.clamp_for_vip(self.vip_audio_unlocked);
-        if self.config.audio_quality != clamped_quality {
-            self.config.audio_quality = clamped_quality;
-            changed = true;
-        }
-
-        // 下载音质与播放音质同一套可选值，同样按会员收口。
-        let clamped_download_quality = sync
+    pub async fn fullscreen_apply_config_sync(&mut self, mut config: Config) {
+        config.audio_quality = config.audio_quality.clamp_for_vip(self.vip_audio_unlocked);
+        config.download_audio_quality = config
             .download_audio_quality
             .clamp_for_vip(self.vip_audio_unlocked);
-        if self.config.download_audio_quality != clamped_download_quality {
-            self.config.download_audio_quality = clamped_download_quality;
-            changed = true;
+        config.page_lyrics_pos_x = config.page_lyrics_pos_x.clamp(0.0, 1.0);
+        config.page_lyrics_pos_y = config.page_lyrics_pos_y.clamp(0.0, 1.0);
+        if config.download_path != self.config.download_path {
+            if let Some(raw) = config.download_path.as_deref() {
+                if crate::app::download::validate_download_path(raw).await.is_err() {
+                    config.download_path = self.config.download_path.clone();
+                    self.set_runtime_status(self.lang_text(
+                        "下载目录不可写，保留原设置",
+                        "Download directory is not writable; keeping previous setting",
+                    ));
+                }
+            }
         }
-
-        // 全屏页改的下载路径：非法（空/非绝对/不可写）就保留修改前的值。
-        if self.config.download_path != sync.download_path
-            && sync
-                .download_path
-                .as_deref()
-                .is_none_or(|raw| crate::app::download::parse_download_path(raw).is_ok())
-        {
-            self.config.download_path = sync.download_path.clone();
-            changed = true;
+        let theme_changed = self.config.theme != config.theme;
+        let memory_changed = self.config.playback_memory != config.playback_memory;
+        let recommendations_changed = self.config.home_more_recommend != config.home_more_recommend;
+        if theme_changed {
+            self.theme = ThemeLoader::load_async(&config.theme).await.unwrap_or_default();
         }
-
-        if self.config.eq_bands_db != sync.eq_bands_db {
-            self.config.eq_bands_db = sync.eq_bands_db;
-            let _ = self
-                .audio_player
-                .set_eq(crate::tmplayer::app::state::EqSettings {
-                    bands_db: sync.eq_bands_db,
-                });
-            changed = true;
-        }
-
-        if self.config.playback_memory != sync.playback_memory {
-            self.config.playback_memory = sync.playback_memory;
-            changed = true;
+        self.playback.audio_player.set_eq(crate::tmplayer::app::state::EqSettings {
+            bands_db: config.eq_bands_db,
+        }).unwrap_or_else(|error| log::error!("apply EQ: {error:#}"));
+        self.config = config;
+        self.refresh_download_root();
+        self.persist_config();
+        if memory_changed {
             if self.config.playback_memory {
                 self.persist_playback_memory();
             } else {
                 self.clear_playback_memory();
             }
         }
-
-        if self.config.show_hints != sync.show_hints {
-            self.config.show_hints = sync.show_hints;
-            changed = true;
-        }
-
-        if self.config.small_window_display != sync.small_window_display {
-            self.config.small_window_display = sync.small_window_display;
-            changed = true;
-        }
-
-        if self.config.home_more_recommend != sync.home_more_recommend {
-            self.config.home_more_recommend = sync.home_more_recommend;
-            changed = true;
-            home_more_recommend_changed = true;
-        }
-
-        if self.config.visualize != sync.visualize {
-            self.config.visualize = sync.visualize;
-            changed = true;
-        }
-
-        if self.config.super_smooth_bar != sync.super_smooth_bar {
-            self.config.super_smooth_bar = sync.super_smooth_bar;
-            changed = true;
-        }
-
-        if self.config.bars_gap != sync.bars_gap {
-            self.config.bars_gap = sync.bars_gap;
-            changed = true;
-        }
-
-        if self.config.bar_number != sync.bar_number {
-            self.config.bar_number = sync.bar_number;
-            changed = true;
-        }
-
-        if self.config.bar_channels != sync.bar_channels {
-            self.config.bar_channels = sync.bar_channels;
-            changed = true;
-        }
-
-        if self.config.bar_channel_reverse != sync.bar_channel_reverse {
-            self.config.bar_channel_reverse = sync.bar_channel_reverse;
-            changed = true;
-        }
-
-        // 下载路径可能刚被全屏页改过：重算根目录并作废"已下载"缓存。
-        self.refresh_download_root();
-
-        if changed {
-            let _ = self.config.save();
-        }
-
-        if home_more_recommend_changed && self.page != Page::Login {
-            if let Err(err) = self.load_home_recommendations().await {
+        if recommendations_changed && self.page != Page::Login {
+            if let Err(error) = self.load_home_recommendations().await {
                 self.browse.home.status_line = format!(
-                    "{}: {}",
-                    self.lang_text("推荐歌单刷新失败", "Failed to refresh home recommendations",),
-                    err
+                    "{}: {error}",
+                    self.lang_text("推荐歌单刷新失败", "Failed to refresh home recommendations"),
                 );
             }
         }
@@ -7782,7 +7646,7 @@ impl App {
     }
 
     fn clear_playback_memory(&self) {
-        let _ = playback_session::clear();
+        let _ = self.persistence.enqueue(|| playback_session::clear());
     }
 
     fn persist_playback_memory(&self) {
@@ -7810,7 +7674,7 @@ impl App {
             updated_at: 0,
         };
 
-        let _ = playback_session::save(&record);
+        let _ = self.persistence.enqueue(move || playback_session::save(&record));
     }
 
     async fn try_restore_playback_memory(&mut self) {
@@ -7885,7 +7749,7 @@ impl App {
         let clamped = quality.clamp_for_vip(self.vip_audio_unlocked);
         if self.config.audio_quality != clamped {
             self.config.audio_quality = clamped;
-            let _ = self.config.save();
+            self.persist_config();
         }
     }
 
@@ -7929,9 +7793,9 @@ impl App {
         self.settings.reset_navigation();
         self.session_cookie = None;
         self.api.clear_cookie();
-        let _ = session::clear_cookie();
+        let _ = self.persistence.enqueue(|| session::clear_cookie());
         self.clear_playback_memory();
-        let _ = private_roam::clear();
+        let _ = self.persistence.enqueue(|| private_roam::clear());
         self.browse.reset_pages();
         self.vip_audio_unlocked = false;
         self.config.audio_quality = self.config.audio_quality.clamp_for_vip(false);
@@ -8461,7 +8325,7 @@ impl App {
             last_refresh_day: self.browse.private_roam.last_refresh_day,
             updated_at: 0,
         };
-        let _ = private_roam::save(&record);
+        let _ = self.persistence.enqueue(move || private_roam::save(&record));
     }
 
     fn load_private_roam_memory(&mut self) {
@@ -8989,7 +8853,8 @@ impl App {
     async fn mark_login_success(&mut self, text: &str) {
         self.session_cookie = self.api.session_cookie().map(|value| value.to_string());
         if let Some(cookie) = self.session_cookie.as_deref() {
-            let _ = session::save_cookie(cookie);
+            let cookie = cookie.to_string();
+            let _ = self.persistence.enqueue(move || session::save_cookie(&cookie));
         }
         self.refresh_vip_audio_access().await;
         let _ = self.refresh_liked_song_cache().await;

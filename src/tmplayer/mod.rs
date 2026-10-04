@@ -6,7 +6,6 @@ pub mod render;
 pub mod ui;
 pub mod utils;
 
-use crate::app::player::{cleanup_cache_dir, resolve_cache_root};
 use anyhow::Result;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};

@@ -348,7 +348,6 @@ pub struct AppState {
     pub playlist: Playlist,
 
     // Playlist overlay browsing list.
-    // For MultiAlbum, this can differ from `playlist` (playback queue).
     pub playlist_view: Playlist,
     pub spectrum: SpectrumData,
     pub spectrum_bar_smoother: Ema,
