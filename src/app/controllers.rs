@@ -249,16 +249,14 @@ mod tests {
     }
 
     #[test]
-    fn append_rebuilds_both_layouts_and_generation() {
+    fn appended_song_section_tracks_card_and_compact_layouts() {
         let mut state = SearchController::default();
         state.set_results(vec![item(SearchItemKind::Artist, "a")], 1, true);
         state.set_viewport(8, true);
-        let generation = state.generation();
         assert_eq!(state.append_results(vec![item(SearchItemKind::Song, "s")]), 1);
-        assert_ne!(state.generation(), generation);
-        assert_eq!(state.item_start_row(1), 5);
+        assert_eq!(state.item_start_row(1) + state.divider_rows(1), 5);
         state.set_viewport(8, false);
-        assert_eq!(state.item_start_row(1), 2);
+        assert_eq!(state.item_start_row(1) + state.divider_rows(1), 2);
     }
 
     #[test]

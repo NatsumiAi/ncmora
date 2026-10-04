@@ -21,7 +21,9 @@ pub const PLAYER_BAR_HEIGHT: u16 = 5;
 
 /// 收藏爱心（Nerd Font PUA）：实心 = 已收藏，空心 = 未收藏。
 /// 用码位转义书写，免得复制粘贴时被编辑器换成别的字形。
+#[cfg(test)]
 const HEART_LIKED: &str = "\u{f004}";
+#[cfg(test)]
 const HEART_UNLIKED: &str = "\u{f08a}";
 
 /// 控制行 `{prev} {play} {next} {mode}` 的命中区。
@@ -513,6 +515,22 @@ fn split_left_tail<'a>(line: &'a str, heart: &'a str, glyph: Option<char>) -> Le
 mod tests {
     use super::*;
     use crate::app::download::{DownloadState, state_glyph};
+
+    #[test]
+    fn ascii_suffix_geometry_covers_the_visible_heart_without_overlapping_download() {
+        let icons = UiIcons::with_console(crate::data::icons::IconMode::Ascii, true);
+        let area = row(5, 12);
+        let heart_text = icons.heart(true);
+        let (download, heart) = right_suffix_hits(area, heart_text, Some(icons.download()));
+        let heart = heart.unwrap();
+        let download = download.unwrap();
+        assert_eq!((heart.x, heart.width), (14, 3));
+        assert_eq!((download.x, download.width), (12, 1));
+        let line = compose_left_right_line("Title", "v [*]", 12);
+        assert!(line.ends_with("v [*]"));
+        assert_eq!(display_width(&line), 12);
+        assert!(right_suffix_hits(row(0, 2), heart_text, Some(icons.download())).1.is_none());
+    }
 
     fn row(x: u16, width: u16) -> Rect {
         Rect {
