@@ -166,14 +166,8 @@ fn render_playlist_list(f: &mut Frame, area: Rect, app: &mut AppState) {
     let total = app.playlist_view.items.len();
     let selected = app.playlist_view.selected.min(total.saturating_sub(1));
     let visible = list_rows as usize;
-    let mut start = if visible > 0 && total > visible && selected >= visible {
-        selected + 1 - visible
-    } else {
-        0
-    };
-    if visible > 0 && total > visible {
-        start = start.min(total - visible);
-    }
+    let start =
+        crate::ui::settings::scroll_for_focus(app.playlist_list_scroll, total, visible, selected);
     let end = if visible == 0 {
         0
     } else {
