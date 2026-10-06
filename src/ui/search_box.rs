@@ -16,6 +16,7 @@ pub fn draw_search_box_overlay(frame: &mut Frame, app: &App) {
     }
 
     let visible_h = app
+        .input
         .search_box_anim_height
         .min(TARGET_HEIGHT)
         .min(size.height);
@@ -53,14 +54,15 @@ pub fn draw_search_box_overlay(frame: &mut Frame, app: &App) {
         return;
     }
 
-    let input = app.search_box_input.clone();
+    let input = app.input.search_box_input.clone();
     let content = if input.trim().is_empty() {
         match app.config.language {
             Language::Zh => {
-                "请输入搜索内容（后缀 @single/@album/@list，或仅输入 @author）".to_string()
+                "输入关键词搜索（作者/歌单/单曲）；后缀 @single/@album/@author/@list 限定类型"
+                    .to_string()
             }
             Language::En => {
-                "Type to search (suffix @single/@album/@list, or only @author)".to_string()
+                "Search artists/playlists/songs; @single/@album/@author/@list to narrow".to_string()
             }
         }
     } else {
@@ -87,7 +89,7 @@ pub fn draw_search_box_overlay(frame: &mut Frame, app: &App) {
     // Use terminal-native block cursor without injecting extra glyphs into the text.
     let mut cursor_offset = 0u16;
     for (idx, ch) in input.chars().enumerate() {
-        if idx >= app.search_box_cursor {
+        if idx >= app.input.search_box_cursor {
             break;
         }
         cursor_offset = cursor_offset.saturating_add(ch.width().unwrap_or(1).max(1) as u16);

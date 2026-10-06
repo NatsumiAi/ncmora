@@ -1,10 +1,10 @@
+use crate::data::config::VisualizeMode;
 use crate::tmplayer::app::state::{AppState, LyricLine};
-use crate::tmplayer::data::config::VisualizeMode;
-use crate::tmplayer::render::{oscilloscope_renderer, spectrum_renderer};
+use crate::tmplayer::render::{oscilloscope_renderer, spectrum_renderer, vector_renderer};
 use crate::tmplayer::ui::borders::SOLID_BORDER;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
@@ -29,7 +29,7 @@ pub fn render(f: &mut Frame, lyric_area: Rect, spectrum_area: Rect, app: &mut Ap
         return;
     }
 
-    if app.config.visualize == VisualizeMode::Off {
+    if app.config.visualize == VisualizeMode::Lyrics {
         render_full_lyrics(f, inner, app);
         return;
     }
@@ -48,16 +48,22 @@ pub fn render(f: &mut Frame, lyric_area: Rect, spectrum_area: Rect, app: &mut Ap
         height: inner.height.saturating_sub(lyric_h),
     };
 
-    let (l1, l2) = current_two_lines(app);
-    if lyric_inner.height >= 1 && !l1.is_empty() {
+    let (current, second) = current_two_lines(app);
+    if lyric_inner.height >= 1
+        && let Some(current) = current
+    {
         f.render_widget(
-            Paragraph::new(current_line_widget(app, l1))
-                .style(
-                    Style::default()
-                        .fg(app.theme.color_accent2())
-                        .add_modifier(Modifier::BOLD),
-                )
-                .alignment(Alignment::Center),
+            Paragraph::new(timed_line(
+                current,
+                app.player.position.as_millis() as u64,
+                app,
+            ))
+            .style(
+                Style::default()
+                    .fg(app.theme.color_accent2())
+                    .add_modifier(Modifier::BOLD),
+            )
+            .alignment(Alignment::Center),
             Rect {
                 x: lyric_inner.x,
                 y: lyric_inner.y,
@@ -66,9 +72,9 @@ pub fn render(f: &mut Frame, lyric_area: Rect, spectrum_area: Rect, app: &mut Ap
             },
         );
     }
-    if lyric_inner.height >= 2 && !l2.is_empty() {
+    if lyric_inner.height >= 2 && !second.is_empty() {
         f.render_widget(
-            Paragraph::new(l2)
+            Paragraph::new(second)
                 .style(Style::default().fg(app.theme.color_subtext()))
                 .alignment(Alignment::Center),
             Rect {
@@ -81,9 +87,13 @@ pub fn render(f: &mut Frame, lyric_area: Rect, spectrum_area: Rect, app: &mut Ap
     }
 
     match app.config.visualize {
-        VisualizeMode::Off => {}
+        // 「关闭」档位在布局层就没有右栏这块区域（`tui::draw` 不再调用本函数）。
+        VisualizeMode::Hidden => {}
+        // 已在上面提前返回。
+        VisualizeMode::Lyrics => {}
         VisualizeMode::Bars => spectrum_renderer::render(f, spectrum_inner, app),
         VisualizeMode::Oscilloscope => oscilloscope_renderer::render(f, spectrum_inner, app),
+        VisualizeMode::Vector => vector_renderer::render(f, spectrum_inner, app),
     }
 }
 
@@ -120,16 +130,19 @@ fn centered_lyric_window(app: &AppState, visible_rows: usize) -> Vec<Line<'stati
             .as_deref()
             .is_some_and(|text| !text.trim().is_empty())
     });
-    let line_height = if has_translations { 2 } else { 1 };
-    let visible_lines = (rows_count / line_height).max(1);
-    let current_row = visible_lines / 2;
+    let line_height = if has_translations && rows_count >= 2 {
+        2
+    } else {
+        1
+    };
+    let visible_lines = rows_count.div_ceil(line_height);
+    let current_line_row = current_row / line_height;
 
     for line_row in 0..visible_lines {
-        let lyric_idx = current_idx as isize + line_row as isize - current_row as isize;
+        let lyric_idx = current_idx as isize + line_row as isize - current_line_row as isize;
         if lyric_idx < 0 || lyric_idx >= lines.len() as isize {
             continue;
         }
-
         let lyric = &lines[lyric_idx as usize];
         let style = if lyric_idx as usize == current_idx {
             Style::default()
@@ -140,30 +153,23 @@ fn centered_lyric_window(app: &AppState, visible_rows: usize) -> Vec<Line<'stati
         };
         let row = line_row * line_height;
         rows[row] = if lyric_idx as usize == current_idx {
-            progressive_line(
-                lyric,
-                lines.get(lyric_idx as usize + 1).map(|next| next.start_ms),
-                pos_ms,
-                app,
-            )
+            timed_line(lyric, pos_ms, app)
         } else {
             Line::from(Span::styled(lyric.text.clone(), style))
         };
-        if has_translations {
-            if let Some(translation) = lyric
+        if line_height == 2
+            && let Some(translation) = lyric
                 .translation
                 .as_deref()
                 .filter(|text| !text.trim().is_empty())
-            {
-                if row + 1 < rows.len() {
-                    rows[row + 1] = Line::from(Span::styled(
-                        translation.to_string(),
-                        Style::default()
-                            .fg(app.theme.color_subtext())
-                            .add_modifier(Modifier::ITALIC),
-                    ));
-                }
-            }
+            && row + 1 < rows.len()
+        {
+            rows[row + 1] = Line::from(Span::styled(
+                translation.to_string(),
+                Style::default()
+                    .fg(app.theme.color_subtext())
+                    .add_modifier(Modifier::ITALIC),
+            ));
         }
     }
 
@@ -177,83 +183,52 @@ fn no_lyrics_label(app: &AppState) -> &'static str {
     }
 }
 
-fn current_two_lines(app: &AppState) -> (&str, &str) {
+fn current_two_lines(app: &AppState) -> (Option<&LyricLine>, &str) {
     let Some(lines) = app.player.track.lyrics.as_ref() else {
-        return ("", "");
+        return (None, "");
     };
     if lines.is_empty() {
-        return ("", "");
+        return (None, "");
     }
 
     let pos_ms = app.player.position.as_millis() as u64;
     let idx = current_lyric_index(lines, pos_ms);
 
-    let l1 = lines.get(idx).map(|l| l.text.as_str()).unwrap_or("");
-    let l2 = lines
-        .get(idx)
+    let current = lines.get(idx);
+    let second = current
         .and_then(|line| line.translation.as_deref())
         .filter(|text| !text.trim().is_empty())
-        .or_else(|| lines.get(idx + 1).map(|l| l.text.as_str()))
+        .or_else(|| lines.get(idx + 1).map(|line| line.text.as_str()))
         .unwrap_or("");
-    (l1, l2)
+    (current, second)
 }
 
-fn current_line_widget(app: &AppState, text: &str) -> Line<'static> {
-    let Some(lines) = app.player.track.lyrics.as_ref() else {
-        return Line::from(text.to_string());
-    };
-    let idx = current_lyric_index(lines, app.player.position.as_millis() as u64);
-    let Some(line) = lines.get(idx) else {
-        return Line::from(text.to_string());
-    };
-    progressive_line(
-        line,
-        lines.get(idx + 1).map(|next| next.start_ms),
-        app.player.position.as_millis() as u64,
-        app,
-    )
-}
-
-fn progressive_line(
-    line: &LyricLine,
-    next_start_ms: Option<u64>,
-    pos_ms: u64,
-    app: &AppState,
-) -> Line<'static> {
-    let text = line.text.as_str();
-    if text.is_empty() {
-        return Line::default();
-    }
-
-    // The current line owns the interval until the next line, matching Pigma's
-    // smooth character-by-character highlight even when YRC word timing is absent.
-    let word_end_ms = line.words.iter().map(|word| word.end_ms).max();
-    let end_ms = next_start_ms
-        .filter(|next| *next > line.start_ms)
-        .or_else(|| word_end_ms.filter(|end| *end > line.start_ms))
-        .unwrap_or_else(|| line.start_ms.saturating_add(4_000));
-    let duration_ms = end_ms.saturating_sub(line.start_ms).max(1);
-    let progress =
-        (pos_ms.saturating_sub(line.start_ms) as f32 / duration_ms as f32).clamp(0.0, 1.0);
-    let total_chars = text.chars().count();
-    let split_at = ((total_chars as f32) * progress).floor() as usize;
-
-    let mut rendered = Line::default();
-    for (index, (byte_start, ch)) in text.char_indices().enumerate() {
-        let byte_end = byte_start + ch.len_utf8();
-        let style = if index < split_at {
-            Style::default().fg(app.theme.color_accent2())
-        } else if index == split_at {
+fn timed_line(line: &LyricLine, pos_ms: u64, app: &AppState) -> Line<'static> {
+    if line.words.is_empty() {
+        return Line::from(Span::styled(
+            line.text.clone(),
             Style::default()
-                .fg(Color::White)
-                .bg(app.theme.color_accent())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(app.theme.color_subtext())
-        };
-        rendered.push_span(Span::styled(text[byte_start..byte_end].to_string(), style));
+                .fg(app.theme.color_accent2())
+                .add_modifier(Modifier::BOLD),
+        ));
     }
-    rendered.alignment(Alignment::Center)
+    Line::from(
+        line.words
+            .iter()
+            .map(|word| {
+                let style = if pos_ms >= word.end_ms {
+                    Style::default().fg(app.theme.color_accent2())
+                } else if pos_ms >= word.start_ms {
+                    Style::default()
+                        .fg(app.theme.color_accent2())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(app.theme.color_subtext())
+                };
+                Span::styled(word.text.clone(), style)
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn current_lyric_index(lines: &[LyricLine], pos_ms: u64) -> usize {

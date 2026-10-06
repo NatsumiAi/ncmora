@@ -1,5 +1,5 @@
-use crate::data::assets;
-use anyhow::Result;
+use crate::data::{assets, atomic_file};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -40,7 +40,7 @@ impl GraphicsProtocol {
             GraphicsProtocol::Off => 0,
             GraphicsProtocol::Halfblocks => 1,
         };
-        let next = (current as i32 + delta).rem_euclid(Self::ALL.len() as i32) as usize;
+        let next = (current + delta).rem_euclid(Self::ALL.len() as i32) as usize;
         Self::ALL[next]
     }
 
@@ -57,7 +57,6 @@ pub struct Config {
     pub theme: String,
     pub ui_fps: u32,
     pub spectrum_hz: u32,
-    pub mpris_poll_ms: u64,
 
     #[serde(default = "default_visualize")]
     pub visualize: VisualizeMode,
@@ -74,12 +73,8 @@ pub struct Config {
     #[serde(default)]
     pub graphics_protocol: GraphicsProtocol,
 
-    #[serde(default = "default_kitty_cover_scale_percent")]
-    pub kitty_cover_scale_percent: u8,
-
     #[serde(default)]
     pub super_smooth_bar: bool,
-
     #[serde(default)]
     pub bars_gap: bool,
 
@@ -93,21 +88,6 @@ pub struct Config {
     pub bar_channel_reverse: bool,
 
     #[serde(default)]
-    pub lyrics_cover_fetch: bool,
-
-    #[serde(default)]
-    pub lyrics_cover_download: bool,
-
-    #[serde(default)]
-    pub audio_fingerprint: bool,
-
-    #[serde(default)]
-    pub acoustid_api_key: String,
-
-    #[serde(default)]
-    pub resume_last_position: bool,
-
-    #[serde(default)]
     pub default_opening_title: String,
 
     #[serde(default = "default_language")]
@@ -116,14 +96,42 @@ pub struct Config {
     #[serde(default = "default_page_lyrics")]
     pub page_lyrics: bool,
 
+    /// 歌词浮窗是否允许鼠标拖动。
+    #[serde(default = "default_page_lyrics_drag")]
+    pub page_lyrics_drag: bool,
+
+    /// 拖动结束后是否吸附到最近的边（左/右/上/下，另一轴保持自由；
+    /// 仅拖动开启时可改）。
+    #[serde(default = "default_page_lyrics_snap")]
+    pub page_lyrics_snap: bool,
+
+    /// 歌词浮窗左上角在内容区内的归一化位置（0..=1），默认右下角。
+    #[serde(default = "default_page_lyrics_pos_x")]
+    pub page_lyrics_pos_x: f32,
+    #[serde(default = "default_page_lyrics_pos_y")]
+    pub page_lyrics_pos_y: f32,
+
     #[serde(default = "default_audio_quality")]
     pub audio_quality: AudioQuality,
+
+    /// 下载音频的档位：可选值与「播放设置 / 音质」同一套（按会员放开），
+    /// 默认写死为与播放默认档一致的 `exhigh`。
+    #[serde(default = "default_download_audio_quality")]
+    pub download_audio_quality: AudioQuality,
+
+    /// 下载目录（绝对路径，含末尾的 `ncmora/`）。`None` = 未自定义，
+    /// 用系统音乐目录下的 `ncmora/`；系统没有音乐目录时回退 `~/Music/`。
+    #[serde(default)]
+    pub download_path: Option<String>,
 
     #[serde(default)]
     pub playback_memory: bool,
 
     #[serde(default = "default_show_hints")]
     pub show_hints: bool,
+
+    #[serde(default = "default_small_window_display")]
+    pub small_window_display: bool,
 
     #[serde(default)]
     pub home_more_recommend: bool,
@@ -187,6 +195,17 @@ pub struct Config {
 
     #[serde(default = "default_keybind_toggle_like_collapsed")]
     pub keybind_toggle_like_collapsed: String,
+
+    #[serde(default = "default_keybind_small_window_toggle")]
+    pub keybind_small_window_toggle: String,
+
+    /// 主应用：下载当前聚焦的单曲（再按一次取消在途下载）。
+    #[serde(default = "default_keybind_download")]
+    pub keybind_download: String,
+
+    /// 全屏页：下载当前播放的单曲（再按一次取消在途下载）。
+    #[serde(default = "default_keybind_download_fullscreen")]
+    pub keybind_download_fullscreen: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,22 +251,48 @@ impl Default for CacheConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VisualizeMode {
-    Off,
+    /// 只显示歌词，不画可视化。旧配置里写的就是 `off`，故保留该别名。
+    #[serde(alias = "off")]
+    Lyrics,
+    /// 右侧（可视化 + 歌词）整块收起，全屏页只留歌曲信息区，并摊满整宽。
+    Hidden,
     Bars,
     Oscilloscope,
+    /// 左右声道作 X/Y 的李萨如图（矢量模式）。与示波器同样读 PCM 抽头，不需要 cava。
+    Vector,
 }
 
 impl VisualizeMode {
+    /// 该模式是否依赖 cava 的频谱数据。示波器读播放链路上的 PCM 抽头，不需要。
+    pub fn needs_cava(self) -> bool {
+        matches!(self, VisualizeMode::Bars)
+    }
+
+    /// 数据源就绪，可供用户选中。
+    pub fn is_available(self) -> bool {
+        !self.needs_cava() || crate::tmplayer::audio::cava::is_available()
+    }
+
+    /// 切到下一个**可用**模式：数据源缺失的模式被跳过，而不是让整项无法调整。
+    ///
+    /// 数组按「显示内容由少到多」排列；`unwrap_or(1)` 兜到 `Lyrics`，
+    /// 免得理论上找不到自身时把右侧区整个收掉。
     pub fn cycle(self, delta: i32) -> Self {
-        const MODES: [VisualizeMode; 3] = [
-            VisualizeMode::Off,
+        const MODES: [VisualizeMode; 5] = [
+            VisualizeMode::Hidden,
+            VisualizeMode::Lyrics,
             VisualizeMode::Bars,
             VisualizeMode::Oscilloscope,
+            VisualizeMode::Vector,
         ];
 
-        let index = MODES.iter().position(|mode| *mode == self).unwrap_or(1) as i32;
-        let next = (index + delta).rem_euclid(MODES.len() as i32) as usize;
-        MODES[next]
+        let len = MODES.len() as i32;
+        let step = if delta < 0 { -1 } else { 1 };
+        let start = MODES.iter().position(|mode| *mode == self).unwrap_or(1) as i32;
+        (1..=len)
+            .map(|offset| MODES[(start + step * offset).rem_euclid(len) as usize])
+            .find(|mode| mode.is_available())
+            .unwrap_or(self)
     }
 }
 
@@ -365,7 +410,8 @@ fn default_visualize() -> VisualizeMode {
     if crate::tmplayer::audio::cava::is_available() {
         VisualizeMode::Bars
     } else {
-        VisualizeMode::Off
+        // 示波器不依赖 cava，比直接关掉可视化更有用。
+        VisualizeMode::Oscilloscope
     }
 }
 
@@ -375,10 +421,6 @@ fn default_eq_bands_db() -> [f32; crate::tmplayer::app::state::EQ_BANDS] {
 
 fn default_album_border() -> bool {
     true
-}
-
-fn default_kitty_cover_scale_percent() -> u8 {
-    100
 }
 
 fn default_bar_number() -> BarNumber {
@@ -397,8 +439,29 @@ fn default_page_lyrics() -> bool {
     false
 }
 
+fn default_page_lyrics_drag() -> bool {
+    true
+}
+
+fn default_page_lyrics_snap() -> bool {
+    true
+}
+
+fn default_page_lyrics_pos_x() -> f32 {
+    1.0
+}
+
+fn default_page_lyrics_pos_y() -> f32 {
+    1.0
+}
+
 fn default_audio_quality() -> AudioQuality {
     AudioQuality::Exhigh
+}
+
+/// 下载音质的默认档与播放默认档同源：两处只留一个真值来源。
+pub fn default_download_audio_quality() -> AudioQuality {
+    default_audio_quality()
 }
 
 fn default_show_hints() -> bool {
@@ -498,35 +561,51 @@ fn default_keybind_toggle_like_collapsed() -> String {
     "Alt+L".to_string()
 }
 
+fn default_small_window_display() -> bool {
+    true
+}
+
+fn default_keybind_small_window_toggle() -> String {
+    "Alt+X".to_string()
+}
+
+fn default_keybind_download() -> String {
+    "Ctrl+Alt+D".to_string()
+}
+
+fn default_keybind_download_fullscreen() -> String {
+    "Ctrl+D".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             theme: "frappe".to_string(),
             ui_fps: 30,
             spectrum_hz: 30,
-            mpris_poll_ms: 100,
             visualize: default_visualize(),
             eq_bands_db: default_eq_bands_db(),
             transparent_background: true,
             album_border: default_album_border(),
             graphics_protocol: GraphicsProtocol::default(),
-            kitty_cover_scale_percent: default_kitty_cover_scale_percent(),
             super_smooth_bar: false,
             bars_gap: false,
             bar_number: default_bar_number(),
             bar_channels: default_bar_channels(),
             bar_channel_reverse: false,
-            lyrics_cover_fetch: false,
-            lyrics_cover_download: false,
-            audio_fingerprint: false,
-            acoustid_api_key: String::new(),
-            resume_last_position: false,
             default_opening_title: String::new(),
             language: default_language(),
             page_lyrics: default_page_lyrics(),
+            page_lyrics_drag: default_page_lyrics_drag(),
+            page_lyrics_snap: default_page_lyrics_snap(),
+            page_lyrics_pos_x: default_page_lyrics_pos_x(),
+            page_lyrics_pos_y: default_page_lyrics_pos_y(),
             audio_quality: default_audio_quality(),
+            download_audio_quality: default_download_audio_quality(),
+            download_path: None,
             playback_memory: false,
             show_hints: default_show_hints(),
+            small_window_display: default_small_window_display(),
             home_more_recommend: false,
             cache: CacheConfig::default(),
             keybind_search_box: default_keybind_search_box(),
@@ -548,17 +627,23 @@ impl Default for Config {
             keybind_fullscreen_eq_reset: default_keybind_fullscreen_eq_reset(),
             keybind_toggle_like_fullscreen: default_keybind_toggle_like_fullscreen(),
             keybind_toggle_like_collapsed: default_keybind_toggle_like_collapsed(),
+            keybind_small_window_toggle: default_keybind_small_window_toggle(),
+            keybind_download: default_keybind_download(),
+            keybind_download_fullscreen: default_keybind_download_fullscreen(),
         }
     }
 }
 
 impl Config {
     pub fn load_or_default() -> Result<Self> {
-        let _ = assets::ensure_assets_ready();
-        let path = Self::default_path();
+        assets::ensure_assets_ready()?;
+        Self::load_from_path(&Self::default_path())
+    }
+
+    fn load_from_path(path: &std::path::Path) -> Result<Self> {
         if !path.exists() {
             let cfg = Self::default();
-            let _ = cfg.save();
+            cfg.save_to_path(path)?;
             return Ok(cfg);
         }
 
@@ -566,7 +651,8 @@ impl Config {
         let legacy_startup_folder_key_present = raw.contains(LEGACY_STARTUP_FOLDER_KEY_KEBAB)
             || raw.contains(LEGACY_STARTUP_FOLDER_KEY);
         let graphics_protocol_needs_save = graphics_protocol_needs_save(&raw);
-        let mut cfg: Config = toml::from_str(&raw).unwrap_or_default();
+        let mut cfg: Config =
+            toml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
 
         if cfg.ui_fps == 0 {
             cfg.ui_fps = 30;
@@ -575,10 +661,13 @@ impl Config {
             cfg.spectrum_hz = 30;
         }
 
-        let mut forced_visualize_off = false;
-        if !crate::tmplayer::audio::cava::is_available() && cfg.visualize != VisualizeMode::Off {
-            cfg.visualize = VisualizeMode::Off;
-            forced_visualize_off = true;
+        cfg.page_lyrics_pos_x = cfg.page_lyrics_pos_x.clamp(0.0, 1.0);
+        cfg.page_lyrics_pos_y = cfg.page_lyrics_pos_y.clamp(0.0, 1.0);
+
+        let mut forced_visualize_fallback = false;
+        if !cfg.visualize.is_available() {
+            cfg.visualize = VisualizeMode::Oscilloscope;
+            forced_visualize_fallback = true;
         }
 
         let mut migrated_legacy_sidebar = false;
@@ -590,6 +679,10 @@ impl Config {
         if !raw.contains("default_opening_title")
             || !raw.contains("language")
             || !raw.contains("page_lyrics")
+            || !raw.contains("page_lyrics_drag")
+            || !raw.contains("page_lyrics_snap")
+            || !raw.contains("page_lyrics_pos_x")
+            || !raw.contains("page_lyrics_pos_y")
             || !raw.contains("eq_bands_db")
             || !raw.contains("audio_quality")
             || !raw.contains("playback_memory")
@@ -608,7 +701,7 @@ impl Config {
             || !raw.contains("keybind_page_up")
             || !raw.contains("keybind_page_down")
             || !raw.contains("keybind_prev")
-            || forced_visualize_off
+            || forced_visualize_fallback
             || !raw.contains("keybind_next")
             || !raw.contains("keybind_toggle_play_pause")
             || !raw.contains("keybind_toggle_mode")
@@ -620,24 +713,29 @@ impl Config {
             || !raw.contains("keybind_fullscreen_eq_reset")
             || !raw.contains("keybind_toggle_like_fullscreen")
             || !raw.contains("keybind_toggle_like_collapsed")
+            || !raw.contains("small_window_display")
+            || !raw.contains("keybind_small_window_toggle")
+            || !raw.contains("download_audio_quality")
+            || !raw.contains("download_path")
+            || !raw.contains("keybind_download")
+            || !raw.contains("keybind_download_fullscreen")
             || legacy_startup_folder_key_present
             || migrated_legacy_sidebar
         {
-            let _ = cfg.save();
+            cfg.save_to_path(path)?;
         }
 
         Ok(cfg)
     }
 
     pub fn save(&self) -> Result<()> {
-        let _ = assets::ensure_assets_ready();
-        let path = Self::default_path();
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let raw = toml::to_string_pretty(self).unwrap_or_default();
-        fs::write(path, raw)?;
-        Ok(())
+        assets::ensure_assets_ready()?;
+        self.save_to_path(&Self::default_path())
+    }
+
+    fn save_to_path(&self, path: &std::path::Path) -> Result<()> {
+        let raw = toml::to_string_pretty(self).context("serialize configuration")?;
+        atomic_file::write_atomic(path, raw.as_bytes())
     }
 
     fn default_path() -> PathBuf {
@@ -663,7 +761,7 @@ fn graphics_protocol_needs_save(raw: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::GraphicsProtocol;
+    use super::{GraphicsProtocol, VisualizeMode};
     use serde::Deserialize;
 
     #[derive(Debug, Deserialize)]
@@ -687,5 +785,42 @@ mod tests {
                 toml::from_str(&format!("protocol = \"{}\"", raw)).unwrap();
             assert_eq!(parsed.protocol, expected);
         }
+    }
+
+    /// 「仅歌词」曾经写作 `off`；手改或沿用旧配置的用户不能因为改名而丢档位。
+    #[test]
+    fn visualize_keeps_legacy_off_value_loadable() {
+        #[derive(Debug, Deserialize)]
+        struct VisualizeWrapper {
+            visualize: VisualizeMode,
+        }
+
+        let cases = [
+            ("lyrics", VisualizeMode::Lyrics),
+            ("off", VisualizeMode::Lyrics),
+            ("hidden", VisualizeMode::Hidden),
+            ("bars", VisualizeMode::Bars),
+            ("oscilloscope", VisualizeMode::Oscilloscope),
+            ("vector", VisualizeMode::Vector),
+        ];
+
+        for (raw, expected) in cases {
+            let parsed: VisualizeWrapper =
+                toml::from_str(&format!("visualize = \"{}\"", raw)).unwrap();
+            assert_eq!(parsed.visualize, expected);
+        }
+    }
+
+    #[test]
+    fn corrupt_config_is_rejected_without_replacement() {
+        let dir =
+            std::env::temp_dir().join(format!("cnmplayer-config-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("default.toml");
+        std::fs::write(&path, "not = [valid").unwrap();
+        assert!(super::Config::load_from_path(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not = [valid");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

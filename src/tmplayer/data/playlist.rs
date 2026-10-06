@@ -1,8 +1,6 @@
-use std::path::PathBuf;
-
 #[derive(Debug, Clone)]
 pub struct PlaylistItem {
-    pub path: PathBuf,
+    pub song_id: Option<String>,
     pub title: String,
 }
 
@@ -36,43 +34,5 @@ impl Playlist {
         if !self.items.is_empty() {
             self.selected = (self.selected + 1).min(self.items.len() - 1);
         }
-    }
-
-    pub fn next_index_sequence(&self) -> Option<usize> {
-        let cur = self.current?;
-        if self.items.is_empty() {
-            None
-        } else {
-            Some((cur + 1) % self.items.len())
-        }
-    }
-
-    pub fn next_index_no_wrap(&self) -> Option<usize> {
-        let cur = self.current?;
-        if self.items.is_empty() {
-            return None;
-        }
-        if cur + 1 >= self.items.len() {
-            None
-        } else {
-            Some(cur + 1)
-        }
-    }
-
-    pub fn prev_index_sequence(&self) -> Option<usize> {
-        let cur = self.current?;
-        if self.items.is_empty() {
-            None
-        } else {
-            Some((cur + self.items.len() - 1) % self.items.len())
-        }
-    }
-
-    pub fn prev_index_no_wrap(&self) -> Option<usize> {
-        let cur = self.current?;
-        if self.items.is_empty() {
-            return None;
-        }
-        if cur == 0 { None } else { Some(cur - 1) }
     }
 }

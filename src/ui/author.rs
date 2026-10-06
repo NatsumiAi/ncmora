@@ -16,7 +16,7 @@ pub fn draw_author(frame: &mut Frame, app: &mut App) {
     let size = frame.area();
     frame.render_widget(Block::default().style(base_bg_style(app)), size);
 
-    if size.width < 40 || size.height < 14 {
+    if !app.config.small_window_display && (size.width < 40 || size.height < 14) {
         frame.render_widget(
             Paragraph::new(match app.config.language {
                 Language::Zh => "终端窗口过小",
@@ -46,17 +46,21 @@ pub fn draw_author(frame: &mut Frame, app: &mut App) {
         (rows[0], Rect::default())
     };
 
+    // 封面宽度上限 26 格（见 draw_*_header 的 cols[0] 约束），折算方形边长上限 13 行；
+    // header 再上下内缩 1 行，故顶部区域超过 15 行只会产生空白。此处封顶，
+    // 多出的高度全部让给下方列表。
+    const HEADER_MAX_HEIGHT: u16 = 15;
+    let header_height = (content_area.height * 34 / 100).min(HEADER_MAX_HEIGHT);
     let main = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
+        .constraints([Constraint::Length(header_height), Constraint::Min(1)])
         .split(content_area);
 
     draw_author_header(frame, app, main[0]);
     draw_author_tiles(frame, app, main[1]);
 
     if app.config.page_lyrics {
-        let panel_area = page_lyrics::overlay_panel_area(content_area);
-        page_lyrics::draw_page_lyrics_panel(frame, app, panel_area);
+        page_lyrics::draw_page_lyrics_overlay(frame, app, content_area);
     }
     if app.config.show_hints {
         draw_author_hint(frame, app, hint_area);
@@ -83,50 +87,51 @@ fn draw_author_header(frame: &mut Frame, app: &mut App, area: Rect) {
         .split(inner);
 
     let mut cover_line_limit = inner.height;
-    let cover_block = centered_visual_square_block(cols[0]);
-    if !cover_block.is_empty() {
-        frame.render_widget(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(app.theme.color_surface())),
-            cover_block,
+    let cover_area = centered_visual_square_block(cols[0]);
+    if !cover_area.is_empty() {
+        cover_line_limit = cover_area.height;
+        let bg_style = surface_bg_style(app);
+        let draw_ascii = app.draw_ascii();
+        let text_style = Style::default().fg(app.theme.color_text());
+        app.browse.author.cover.render(
+            frame,
+            &mut app.graphics_picker,
+            cover_area,
+            text_style,
+            Some(bg_style),
+            draw_ascii,
         );
-
-        let cover_area = cover_block.inner(ratatui::layout::Margin {
-            horizontal: 1,
-            vertical: 1,
-        });
-        if !cover_area.is_empty() {
-            cover_line_limit = cover_area.height;
-            let bg_style = surface_bg_style(app);
-            let draw_ascii = app.draw_ascii();
-            let text_style = Style::default().fg(app.theme.color_text());
-            app.author.cover.render(
-                frame,
-                &mut app.graphics_picker,
-                cover_area,
-                text_style,
-                Some(bg_style),
-                draw_ascii,
-            );
-        }
     }
 
-    let hot_count = app.author.hot_songs.len();
-    let album_count = app.author.albums.len();
-    let ep_count = app.author.eps.len();
-    let single_count = app.author.singles.len();
+    let hot_count = app.browse.author.hot_songs.len();
+    let album_count = app.browse.author.albums.len();
+    let ep_count = app.browse.author.eps.len();
+    let single_count = app.browse.author.singles.len();
 
     let info_area = cols[1].inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 0,
     });
+    // 文字内容与封面同高、顶端对齐。
+    let info_area = if cover_area.is_empty() {
+        info_area
+    } else {
+        Rect {
+            x: info_area.x,
+            y: cover_area.y,
+            width: info_area.width,
+            height: cover_area.height,
+        }
+    };
     if info_area.width == 0 || info_area.height == 0 {
         return;
     }
 
-    let description_line_limit =
-        intro_line_limit(&app.author.description, info_area.width, cover_line_limit);
+    let description_line_limit = intro_line_limit(
+        &app.browse.author.description,
+        info_area.width,
+        cover_line_limit,
+    );
     let available_extra = info_area.height.saturating_sub(3);
     let spacer_height = u16::from(description_line_limit > 0 && available_extra >= 2);
     let description_height = available_extra
@@ -136,7 +141,7 @@ fn draw_author_header(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut cursor_y = info_area.y;
 
     frame.render_widget(
-        Paragraph::new(app.author.title.as_str()).style(
+        Paragraph::new(app.browse.author.title.as_str()).style(
             Style::default()
                 .fg(app.theme.color_text())
                 .add_modifier(Modifier::BOLD),
@@ -152,7 +157,7 @@ fn draw_author_header(frame: &mut Frame, app: &mut App, area: Rect) {
 
     if cursor_y < info_area.y + info_area.height {
         frame.render_widget(
-            Paragraph::new(app.author.artist.as_str())
+            Paragraph::new(app.browse.author.artist.as_str())
                 .style(Style::default().fg(app.theme.color_subtext())),
             Rect {
                 x: info_area.x,
@@ -170,7 +175,7 @@ fn draw_author_header(frame: &mut Frame, app: &mut App, area: Rect) {
 
     if description_height > 0 && cursor_y < info_area.y + info_area.height {
         frame.render_widget(
-            Paragraph::new(app.author.description.as_str())
+            Paragraph::new(app.browse.author.description.as_str())
                 .style(Style::default().fg(app.theme.color_text()))
                 .wrap(Wrap { trim: true }),
             Rect {
@@ -226,13 +231,13 @@ fn draw_author_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
     let col_step = tile_w.saturating_add(2);
     let row_step = tile_h.saturating_add(1);
     let columns = usize::from((inner.width / col_step).max(1));
-    app.author.set_columns(columns);
+    app.browse.author.set_columns(columns);
 
     let visible_rows = usize::from((inner.height / row_step).max(1));
-    app.author.set_visible_rows(visible_rows);
-    let row_offset = app.author.effective_scroll_row_offset();
+    app.browse.author.set_visible_rows(visible_rows);
+    let row_offset = app.browse.author.effective_scroll_row_offset();
 
-    for index in 0..app.author.tiles.len() {
+    for index in 0..app.browse.author.tiles.len() {
         let row = index / columns;
         if row < row_offset {
             continue;
@@ -265,7 +270,7 @@ fn draw_author_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
             index,
         );
 
-        let focused = index == app.author.focused_idx;
+        let focused = index == app.browse.author.focused_idx;
         let tile_bg = if focused {
             app.theme.color_surface()
         } else {
@@ -322,7 +327,7 @@ fn draw_author_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 Style::default().fg(app.theme.color_text())
             };
-            app.author.tiles[index].cover.render(
+            app.browse.author.tiles[index].cover.render(
                 frame,
                 &mut app.graphics_picker,
                 cover_rect,
@@ -333,7 +338,7 @@ fn draw_author_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
         }
 
         let (title, subtitle) = {
-            let tile = &app.author.tiles[index];
+            let tile = &app.browse.author.tiles[index];
             (tile.title.clone(), tile.subtitle.clone())
         };
 
@@ -361,19 +366,17 @@ fn draw_author_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn centered_visual_square_block(area: Rect) -> Rect {
-    if area.width < 4 || area.height < 3 {
+    if area.width < 2 || area.height < 1 {
         return Rect::default();
     }
 
-    let content_width = area.width.saturating_sub(2);
-    let content_height = area.height.saturating_sub(2);
-    let side = content_height.min(content_width / 2);
+    let side = area.height.min(area.width / 2);
     if side == 0 {
         return Rect::default();
     }
 
-    let width = side.saturating_mul(2).saturating_add(2);
-    let height = side.saturating_add(2);
+    let width = side.saturating_mul(2);
+    let height = side;
     Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,

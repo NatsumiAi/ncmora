@@ -1,22 +1,19 @@
 cff-version: 1.2.0
-message: "If you use NCMora in your work, please cite this repository."
-title: "NCMora (Customized Netease Music Player)"
-version: "0.1.0"
+message: "If you use CNMPlayer in your work, please cite this repository."
+title: "CNMPlayer (Customized Netease Music Player)"
+version: "0.6.2"
 license: "AGPL-3.0-only"
 authors:
   - name: "Bingcheng Li"
-repository-code: "https://github.com/NatsumiAi/ncmora"
-url: "https://github.com/NatsumiAi/ncmora"
+repository-code: "https://github.com/professor-lee/CNMPlayer"
+url: "https://github.com/professor-lee/CNMPlayer"
 keywords:
   - "Rust"
   - "TUI"
   - "NetEase Cloud Music"
   - "music player"
-abstract: "NCMora (Customized Netease Music Player) is a Rust-based TUI client for NetEase Cloud Music with login, search, playlist browsing, streaming playback, and an embedded fullscreen playback page."
+abstract: "CNMPlayer (Customized Netease Music Player) is a Rust-based TUI client for NetEase Cloud Music with login, search, playlist browsing, streaming playback, and an embedded fullscreen playback page."
 references:
-  - type: generic
-    title: "TMPlayer"
-    url: "https://github.com/professor-lee/TMPlayer"
   - type: generic
     title: "ncm-api-rs"
     url: "https://github.com/imsyy/ncm-api-rs"

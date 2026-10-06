@@ -30,8 +30,6 @@ mod song_purchased;
 mod song_red_count;
 mod song_singledownlist;
 mod song_url;
-mod song_url_match;
-mod song_url_ncmget;
 mod song_url_v1;
 mod song_url_v1_302;
 mod song_wiki_summary;
@@ -480,7 +478,6 @@ mod voice_upload;
 pub struct Query {
     pub params: HashMap<String, String>,
     pub cookie: Option<String>,
-    pub proxy: Option<String>,
     pub real_ip: Option<String>,
     pub random_cn_ip: bool,
     pub ua: Option<String>,
@@ -545,7 +542,6 @@ impl Query {
             crypto,
             cookie: self.cookie.clone(),
             ua: self.ua.clone(),
-            proxy: self.proxy.clone(),
             real_ip: self.real_ip.clone(),
             random_cn_ip: self.random_cn_ip,
             e_r: self.e_r,

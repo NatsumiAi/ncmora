@@ -66,7 +66,22 @@ impl tmplayer::HostPlaybackBridge for AppFullscreenBridge<'_> {
             },
             position: runtime.position,
             volume: runtime.volume,
+            seeking: runtime.seeking,
+            download: match runtime.download {
+                None => tmplayer::DownloadIconState::Hidden,
+                Some(app::download::DownloadState::NotDownloaded) => {
+                    tmplayer::DownloadIconState::NotDownloaded
+                }
+                Some(app::download::DownloadState::Downloading) => {
+                    tmplayer::DownloadIconState::Downloading
+                }
+                Some(app::download::DownloadState::Done) => tmplayer::DownloadIconState::Done,
+            },
         }
+    }
+
+    fn pcm_ring(&self) -> std::sync::Arc<tmplayer::audio::pcm_tap::PcmRing> {
+        self.app.pcm_ring()
     }
 
     fn snapshot(&mut self) -> tmplayer::HostPlaybackSnapshot {
@@ -74,6 +89,7 @@ impl tmplayer::HostPlaybackBridge for AppFullscreenBridge<'_> {
 
         if snapshot.now_playing.is_none() {
             return tmplayer::HostPlaybackSnapshot {
+                playlist_cover: snapshot.playlist_cover,
                 playlist: Vec::new(),
                 current_index: None,
                 current_track: None,
@@ -119,6 +135,7 @@ impl tmplayer::HostPlaybackBridge for AppFullscreenBridge<'_> {
         tmplayer::HostPlaybackSnapshot {
             playlist,
             current_index: snapshot.current_index,
+            playlist_cover: snapshot.playlist_cover,
             current_track,
             current_liked: snapshot.now_playing_liked,
             state: match snapshot.state {
@@ -136,11 +153,19 @@ impl tmplayer::HostPlaybackBridge for AppFullscreenBridge<'_> {
         }
     }
 
-    fn config_snapshot(&self) -> tmplayer::HostConfigSync {
+    fn config_signature(&self) -> u64 {
+        self.app.fullscreen_config_signature()
+    }
+
+    fn vip_audio_unlocked(&self) -> bool {
+        self.app.vip_audio_unlocked
+    }
+
+    fn config_snapshot(&self) -> Config {
         self.app.fullscreen_config_snapshot()
     }
 
-    async fn apply_config_sync(&mut self, config: tmplayer::HostConfigSync) {
+    async fn apply_config_sync(&mut self, config: Config) {
         self.app.fullscreen_apply_config_sync(config).await;
     }
 
@@ -175,6 +200,10 @@ impl tmplayer::HostPlaybackBridge for AppFullscreenBridge<'_> {
     async fn toggle_like_current(&mut self) {
         self.app.fullscreen_toggle_like().await;
     }
+
+    fn download_current(&mut self) {
+        self.app.download_current_song();
+    }
 }
 
 pub struct Storage {
@@ -185,38 +214,107 @@ pub struct Storage {
 fn try_get_storage() -> Option<Storage> {
     let app = "ncmora";
     let base = BaseDirs::new()?;
-    let cache = base.cache_dir().join(&app);
-    let config = base.config_dir().join(&app);
+    let cache = base.cache_dir().join(app);
+    let config = base.config_dir().join(app);
     let storage = Storage { cache, config };
     Some(storage)
 }
 
 fn stroage_or_abort() -> Storage {
     let msg = "Failed to initialize workdir, abort!";
-    try_get_storage().expect(&msg)
+    try_get_storage().expect(msg)
 }
 
-pub static STORAGE: LazyLock<Storage> = LazyLock::new(|| stroage_or_abort());
+pub static STORAGE: LazyLock<Storage> = LazyLock::new(stroage_or_abort);
+
+/// 原生音频库（ALSA/PipeWire 等）绕过 log crate 直接写 stderr，而 TUI 画面走 stdout，
+/// 两者指向同一个 tty 时告警就会糊在画面上。这里把 fd 2 整体引向文件。
+///
+/// 单独用一个文件：ftail 以 `append(false)` 持有 `Player.log` 的写偏移，
+/// 若共用同一文件，它与原生库会互相覆盖。
+#[cfg(unix)]
+fn redirect_stderr_to_file(path: &std::path::Path) -> Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    // 复制成功后原 fd 关闭也不影响 fd 2。
+    if unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) } == -1 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+/// 单个日志文件的体积上限（MB）。超出后 ftail 轮转为 `.old`，
+/// 而 stderr 文件由 `trim_stderr_log_if_needed` 就地截断。
+const LOG_MAX_FILE_SIZE_MB: u64 = 4;
+
+#[cfg(unix)]
+pub static STDERR_LOG_PATH: LazyLock<PathBuf> =
+    LazyLock::new(|| STORAGE.cache.join("Player.stderr.log"));
+
+/// stderr 文件超限就截断。fd 2 以 `O_APPEND` 打开，
+/// 截断只是把长度归零，写偏移由内核在每次写入时重算，不会产生空洞。
+#[cfg(unix)]
+pub fn trim_stderr_log_if_needed() {
+    let path = &*STDERR_LOG_PATH;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() <= LOG_MAX_FILE_SIZE_MB * 1024 * 1024 {
+        return;
+    }
+    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(path) {
+        let _ = file.set_len(0);
+    }
+}
+
+#[cfg(not(unix))]
+pub fn trim_stderr_log_if_needed() {}
 
 async fn init_logger() -> Result<()> {
     create_dir_all(&STORAGE.cache).await?;
     let log_file = STORAGE.cache.join("Player.log");
     let _ = remove_file(&log_file).await;
-    let ftail = Ftail::new().single_file_env_level(&log_file, false);
+    // ftail 轮转产生的历史文件不会自己消失，启动时一并清掉。
+    for suffix in ["old", "old1", "old2", "old3"] {
+        let _ = remove_file(log_file.with_extension(format!("log.{suffix}"))).await;
+    }
+
+    #[cfg(unix)]
+    {
+        let stderr_file = STDERR_LOG_PATH.clone();
+        let _ = remove_file(&stderr_file).await;
+        redirect_stderr_to_file(&stderr_file)?;
+    }
+
+    let ftail = Ftail::new()
+        .max_file_size(LOG_MAX_FILE_SIZE_MB)
+        .single_file_env_level(&log_file, false);
     Ok(ftail.init()?)
 }
 
 #[compio::main]
 async fn main() -> Result<()> {
     init_logger().await?;
-    let config = Config::load_or_default()?;
-    let theme = ThemeLoader::load(&config.theme).unwrap_or_default();
+    let config = compio::runtime::spawn_blocking(Config::load_or_default)
+        .await
+        .map_err(|_| anyhow::anyhow!("configuration load task panicked"))??;
+    let theme = ThemeLoader::load_async(&config.theme)
+        .await
+        .unwrap_or_default();
     let mut app = App::new(config, theme).await?;
 
     let mut terminal = init_terminal()?;
     let run_result = run_app(&mut terminal, &mut app).await;
-    restore_terminal(&mut terminal)?;
-    run_result
+    let restore_result = restore_terminal(&mut terminal);
+    app.suspend_main_cava_for_fullscreen().await;
+    let persistence_result = app.flush_persistence();
+    run_result?;
+    restore_result?;
+    persistence_result
 }
 
 fn init_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -224,7 +322,9 @@ fn init_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
-    Ok(Terminal::new(backend)?)
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+    Ok(terminal)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
@@ -268,7 +368,11 @@ fn input_event() -> impl Stream<Item = impl AsyncFn(&mut App)> {
             Event::Mouse(e)
                 if matches!(
                     e.kind,
-                    MouseEventKind::Down(_) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    MouseEventKind::Down(_)
+                        | MouseEventKind::Up(_)
+                        | MouseEventKind::Drag(_)
+                        | MouseEventKind::ScrollUp
+                        | MouseEventKind::ScrollDown
                 ) => {}
             _ => return None,
         }
@@ -291,7 +395,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut Ap
         app.tick().await;
 
         if app.consume_fullscreen_launch_request() {
-            let bootstrap = app.build_fullscreen_bootstrap().await;
+            let bootstrap = app.build_fullscreen_bootstrap();
             launch_tmplayer_fullscreen(terminal, app, bootstrap).await?;
             continue;
         }
@@ -305,10 +409,18 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut Ap
             ui::draw_settings(frame, app);
         })?;
 
+        // 动画进行中（进度条脉冲、搜索框滑出、启动加载）加快重绘，
+        // 其余时间保持 1s 空闲节流（省电、减少终端输出）。
+        let redraw_sleep = if app.should_continuous_redraw() {
+            Duration::from_millis(33)
+        } else {
+            Duration::from_secs(1)
+        };
+
         select_biased! {
             f = input.next().fuse() => if let Some(f) = f { f(app).await },
             _ = wait_cava_event(&mut app.cava).fuse() => (),
-            _ = sleep(Duration::from_secs(1)).fuse() => (),
+            _ = sleep(redraw_sleep).fuse() => (),
         }
     }
 }
@@ -328,26 +440,39 @@ async fn launch_tmplayer_fullscreen(
     app: &mut App,
     bootstrap: tmplayer::FullscreenBootstrap,
 ) -> Result<()> {
+    log::info!("entering fullscreen");
     play_fullscreen_transition(terminal, app, true).await?;
-    app.suspend_main_cava_for_fullscreen();
+    app.suspend_main_cava_for_fullscreen().await;
     restore_terminal(terminal)?;
 
     let config = app.config.clone();
     let mut bridge = AppFullscreenBridge { app };
-    let status_text = match tmplayer::run_fullscreen(&config, bootstrap, Some(&mut bridge)).await {
-        Ok(tmplayer::FullscreenExit::BackToHost) => String::new(),
-        Ok(tmplayer::FullscreenExit::BackToHostOpenSettings) => {
-            bridge.app.open_settings_from_fullscreen();
-            String::new()
-        }
-        Err(err) => format!("TMPlayer 运行失败: {}", err),
+    let (exit, status_text) = match tmplayer::run_fullscreen(&config, bootstrap, &mut bridge).await
+    {
+        Ok(exit) => (Some(exit), String::new()),
+        Err(err) => (None, format!("TMPlayer 运行失败: {}", err)),
     };
+    log::info!("fullscreen returned: exit={exit:?} status={status_text}");
 
     *terminal = init_terminal()?;
     app.resume_main_cava_after_fullscreen();
     play_fullscreen_transition(terminal, app, false).await?;
     if !status_text.is_empty() {
         app.set_runtime_status(status_text);
+    }
+
+    // 全屏页里的点击交给宿主接着做：宿主在自己的页面上打开对应页面。
+    match exit {
+        Some(tmplayer::FullscreenExit::BackToHostOpenSettings) => {
+            app.open_settings_from_fullscreen()
+        }
+        Some(tmplayer::FullscreenExit::BackToHostOpenAuthor(index)) => {
+            app.open_author_page_from_fullscreen(index)
+        }
+        Some(tmplayer::FullscreenExit::BackToHostOpenAlbum) => {
+            app.open_album_page_from_fullscreen()
+        }
+        Some(tmplayer::FullscreenExit::BackToHost) | None => {}
     }
     Ok(())
 }

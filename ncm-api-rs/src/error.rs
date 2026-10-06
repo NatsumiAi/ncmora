@@ -7,6 +7,10 @@ pub enum NcmError {
     #[error("HTTP request failed: {0}")]
     Http(#[from] cyper::Error),
 
+    /// HTTP 发送到响应 body 完整读取共用一个 deadline
+    #[error("HTTP request timed out after {timeout:?} while waiting for the complete response")]
+    Timeout { timeout: std::time::Duration },
+
     /// API 业务错误（网易云返回非 200 状态码）
     #[error("API error (code={code}): {msg}")]
     Api { code: i64, msg: String },
@@ -27,9 +31,14 @@ pub enum NcmError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// 请求超时
-    #[error("Request timeout: {0}")]
-    Timeout(String),
+    /// 响应 JSON 无效；只保留格式、长度和解析位置，不包含原始响应内容
+    #[error("Invalid {format} JSON response ({body_len} bytes): {source}")]
+    ResponseDecode {
+        format: &'static str,
+        body_len: usize,
+        #[source]
+        source: serde_json::Error,
+    },
 
     /// 触发风控/限流（API 返回 503 或 IP 高频）
     #[error("Rate limited: {0}")]
@@ -52,6 +61,18 @@ impl NcmError {
             400 => NcmError::InvalidParam(msg),
             503 => NcmError::RateLimited(msg),
             _ => NcmError::Api { code, msg },
+        }
+    }
+
+    pub(crate) fn response_decode(
+        format: &'static str,
+        body_len: usize,
+        source: serde_json::Error,
+    ) -> Self {
+        Self::ResponseDecode {
+            format,
+            body_len,
+            source,
         }
     }
 }

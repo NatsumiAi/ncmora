@@ -36,25 +36,45 @@ pub fn draw_home(frame: &mut Frame, app: &mut App) {
         ])
         .split(size);
 
-    let (content_area, hint_area) = if app.config.show_hints {
-        let split = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(1)])
-            .split(rows[0]);
-        (split[0], split[1])
+    // 提示行叠在内容之上，不从内容区扣高度：否则开关"显示提示"会把
+    // 整页（含歌词框）挤上去一行。
+    let content_area = rows[0];
+    let lyrics_area = if app.config.page_lyrics {
+        page_lyrics::overlay_panel_area(content_area, app.page_lyrics_pos())
     } else {
-        (rows[0], Rect::default())
+        Rect::default()
+    };
+
+    // 提示留在内容区最后一行。歌词框贴在该区右下角，故提示宽度收窄到
+    // 歌词框左边缘为止——否则会横穿它、盖掉其边框。
+    let hint_area = if app.config.show_hints && content_area.height > 0 {
+        let width = if lyrics_area.height > 0 {
+            lyrics_area.x.saturating_sub(content_area.x)
+        } else {
+            content_area.width
+        };
+        if width > 0 {
+            Rect {
+                x: content_area.x,
+                y: content_area.y + content_area.height - 1,
+                width,
+                height: 1,
+            }
+        } else {
+            Rect::default()
+        }
+    } else {
+        Rect::default()
     };
 
     draw_tiles(frame, app, content_area);
-    if app.config.page_lyrics {
-        let panel_area = page_lyrics::overlay_panel_area(content_area);
-        page_lyrics::draw_page_lyrics_panel(frame, app, panel_area);
-    }
     if app.config.show_hints {
         draw_home_hint(frame, app, hint_area);
     }
-    if app.home_sidebar.is_visible() {
+    if lyrics_area.height > 0 {
+        page_lyrics::draw_page_lyrics_overlay(frame, app, content_area);
+    }
+    if app.browse.home_sidebar.is_visible() {
         draw_home_sidebar(frame, app, rows[0]);
     }
 
@@ -71,34 +91,39 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let tile_h = 12_u16.min(inner.height.saturating_sub(1)).max(6);
-    let tile_w = tile_h.saturating_mul(2).saturating_add(4);
-    let col_step = tile_w.saturating_add(2);
+    let tile_count = app.browse.home.tiles.len().max(1);
+    let gap = 2_u16;
+    let min_tile_w = 28_u16;
+    let max_columns =
+        usize::from((inner.width.saturating_add(gap) / min_tile_w.saturating_add(gap)).max(1));
+    let preferred_rows = if inner.height >= 18 && tile_count > 3 {
+        2
+    } else {
+        1
+    };
+    let columns = tile_count.div_ceil(preferred_rows).min(max_columns).max(1);
+    let columns_u16 = columns as u16;
+    let tile_w = inner
+        .width
+        .saturating_sub(gap.saturating_mul(columns_u16.saturating_sub(1)))
+        .saturating_div(columns_u16)
+        .max(14);
+    let preferred_tile_h = tile_w.saturating_sub(4).saturating_div(2).max(6);
+    let total_rows = tile_count.div_ceil(columns);
+    let target_rows = total_rows.min(usize::from((inner.height / 8).max(1))) as u16;
+    let tile_h = preferred_tile_h
+        .min(inner.height.saturating_sub(target_rows.saturating_sub(1)) / target_rows)
+        .max(6);
+    let col_step = tile_w.saturating_add(gap);
     let row_step = tile_h.saturating_add(1);
-    let columns = usize::from((inner.width / col_step).max(1));
-    app.home.set_columns(columns);
+    app.browse.home.set_columns(columns);
 
     let visible_rows = usize::from((inner.height / row_step).max(1));
-    app.home.set_visible_rows(visible_rows);
-    let row_offset = app.home.effective_scroll_row_offset();
+    app.browse.home.set_visible_rows(visible_rows);
+    let row_offset = app.browse.home.effective_scroll_row_offset();
 
-    let mut visible_indices = Vec::new();
-    for index in 0..app.home.tiles.len() {
-        let virtual_index = home_real_to_virtual_index(index, columns);
-        let row = virtual_index / columns;
-        if row < row_offset {
-            continue;
-        }
-        let visual_row = row - row_offset;
-        if visual_row < visible_rows {
-            visible_indices.push(index);
-        }
-    }
-    app.prepare_home_tile_covers(&visible_indices);
-
-    for index in 0..app.home.tiles.len() {
-        let virtual_index = home_real_to_virtual_index(index, columns);
-        let row = virtual_index / columns;
+    for index in 0..app.browse.home.tiles.len() {
+        let row = index / columns;
         if row < row_offset {
             continue;
         }
@@ -106,7 +131,7 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
         if visual_row >= visible_rows {
             continue;
         }
-        let col = virtual_index % columns;
+        let col = index % columns;
         let x = inner.x + (col as u16) * col_step;
         let y = inner.y + (visual_row as u16) * row_step;
         if x >= inner.x + inner.width || y >= inner.y + inner.height {
@@ -130,7 +155,7 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
             index,
         );
 
-        let focused = index == app.home.focused_idx;
+        let focused = index == app.browse.home.focused_idx;
         let tile_bg = if focused {
             app.theme.color_surface()
         } else {
@@ -165,7 +190,8 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
             continue;
         }
 
-        let text_rows = if inner_rect.height >= 4 { 2 } else { 1 };
+        // 文字只占底部一行，空出来的那行让封面吃掉。
+        let text_rows = 1;
         let cover_height = inner_rect.height.saturating_sub(text_rows);
         let cover_rect = Rect {
             x: inner_rect.x,
@@ -187,7 +213,7 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 Style::default().fg(app.theme.color_text())
             };
-            app.home.tiles[index].cover.render(
+            app.browse.home.tiles[index].cover.render(
                 frame,
                 &mut app.graphics_picker,
                 cover_rect,
@@ -197,10 +223,7 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
             );
         }
 
-        let (title, subtitle) = {
-            let tile = &app.home.tiles[index];
-            (tile.title.clone(), tile.subtitle.clone())
-        };
+        let title = app.browse.home.tiles[index].title.clone();
 
         let title_style = if focused {
             Style::default()
@@ -209,12 +232,8 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             Style::default().fg(app.theme.color_text())
         };
-        let subtitle_style = Style::default().fg(app.theme.color_subtext());
 
-        let mut lines = vec![Line::from(Span::styled(title, title_style))];
-        if text_rows > 1 {
-            lines.push(Line::from(Span::styled(subtitle, subtitle_style)));
-        }
+        let lines = vec![Line::from(Span::styled(title, title_style))];
 
         let content = Paragraph::new(lines)
             .wrap(Wrap { trim: true })
@@ -224,23 +243,18 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn home_real_to_virtual_index(index: usize, columns: usize) -> usize {
-    let cols = columns.max(1);
-    if cols <= 3 || index < 3 {
-        index
-    } else {
-        index.saturating_add(cols - 3)
-    }
-}
-
 fn draw_home_hint(frame: &mut Frame, app: &App, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
+    // 提示行是叠在卡片网格之上的，先清底再写，避免与卡片字符重叠。
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(base_bg_style(app)), area);
+
     let text = match app.config.language {
         Language::Zh => format!(
-            "{} 搜索  {} 设置  {} 侧边栏  {} 全屏  {} 退出",
+            "{} 搜索  {} 设置  {} 侧边栏  {}/F9 全屏  {} 退出",
             app.config.keybind_search_box,
             app.config.keybind_settings,
             app.config.keybind_sidebar,
@@ -248,7 +262,7 @@ fn draw_home_hint(frame: &mut Frame, app: &App, area: Rect) {
             app.config.keybind_quit
         ),
         Language::En => format!(
-            "{} Search  {} Settings  {} Sidebar  {} Fullscreen  {} Quit",
+            "{} Search  {} Settings  {} Sidebar  {}/F9 Fullscreen  {} Quit",
             app.config.keybind_search_box,
             app.config.keybind_settings,
             app.config.keybind_sidebar,
@@ -272,7 +286,7 @@ fn draw_home_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let max_width = (area.width / 3).max(24).min(area.width);
     app.set_home_sidebar_anim_span_cells(max_width);
-    let progress = app.home_sidebar.anim_progress.clamp(0.0, 1.0);
+    let progress = app.browse.home_sidebar.anim_progress.clamp(0.0, 1.0);
     let width = ((max_width as f32) * progress).round() as u16;
     if width < 12 {
         return;
@@ -329,21 +343,21 @@ fn draw_home_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Length(header_height), Constraint::Min(1)])
         .split(inner);
 
-    let user_name = if app.home_sidebar.user_name.trim().is_empty() {
+    let user_name = if app.browse.home_sidebar.user_name.trim().is_empty() {
         match app.config.language {
             Language::Zh => "未识别用户".to_string(),
             Language::En => "Unknown User".to_string(),
         }
     } else {
-        app.home_sidebar.user_name.clone()
+        app.browse.home_sidebar.user_name.clone()
     };
 
-    let status = if app.home_sidebar.loading {
+    let status = if app.browse.home_sidebar.loading {
         match app.config.language {
             Language::Zh => "正在同步歌单...".to_string(),
             Language::En => "Syncing playlists...".to_string(),
         }
-    } else if app.home_sidebar.status_line.trim().is_empty() {
+    } else if app.browse.home_sidebar.status_line.trim().is_empty() {
         match app.config.language {
             Language::Zh => "Ctrl+上下切换分区 上下切换歌单 Enter进入 Esc收起".to_string(),
             Language::En => {
@@ -352,7 +366,7 @@ fn draw_home_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         }
     } else {
-        app.home_sidebar.status_line.clone()
+        app.browse.home_sidebar.status_line.clone()
     };
 
     let mut header_lines = vec![Line::from(Span::styled(
@@ -377,8 +391,8 @@ fn draw_home_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(chunks[1]);
 
-    let created_items = app.home_sidebar.created_playlists.clone();
-    let collected_items = app.home_sidebar.collected_playlists.clone();
+    let created_items = app.browse.home_sidebar.created_playlists.clone();
+    let collected_items = app.browse.home_sidebar.collected_playlists.clone();
 
     draw_home_sidebar_section(
         frame,
@@ -417,7 +431,19 @@ fn draw_home_sidebar_section(
         return;
     }
 
-    let section_focused = app.home_sidebar.expanded && app.home_sidebar.focused_section == section;
+    // 整块分区都要能接住滚轮：列表短时下方空白处也属于该分区。
+    app.push_home_sidebar_section_hit(
+        crate::app::HitRect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: area.height,
+        },
+        section,
+    );
+
+    let section_focused =
+        app.browse.home_sidebar.expanded && app.browse.home_sidebar.focused_section == section;
     let section_title_style = if section_focused {
         Style::default()
             .fg(app.theme.color_accent2())
@@ -483,14 +509,18 @@ fn draw_home_sidebar_section(
         }
         let total = items.len();
         let focus_idx = if section_focused {
-            app.home_sidebar.focused_index.min(total.saturating_sub(1))
+            app.browse
+                .home_sidebar
+                .focused_index
+                .min(total.saturating_sub(1))
         } else {
             0
         };
         let mut start = if total <= max_rows {
             0
         } else {
-            app.home_sidebar
+            app.browse
+                .home_sidebar
                 .section_scroll_offset(section)
                 .min(total.saturating_sub(max_rows))
         };
@@ -503,7 +533,9 @@ fn draw_home_sidebar_section(
             }
             start = start.min(total.saturating_sub(max_rows));
         }
-        app.home_sidebar.set_section_scroll_offset(section, start);
+        app.browse
+            .home_sidebar
+            .set_section_scroll_offset(section, start);
 
         for (visual_idx, item) in items.iter().skip(start).take(max_rows).enumerate() {
             let idx = start + visual_idx;
@@ -522,7 +554,7 @@ fn draw_home_sidebar_section(
             let clipped_left = clip_to_display_width(&left, left_max);
             let used = display_width(&clipped_left) + display_width(&right);
             let spaces = usize::from(inner.width).saturating_sub(used).max(1);
-            let is_focused = section_focused && idx == app.home_sidebar.focused_index;
+            let is_focused = section_focused && idx == app.browse.home_sidebar.focused_index;
 
             app.push_home_sidebar_playlist_hit(
                 crate::app::HitRect {

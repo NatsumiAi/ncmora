@@ -1,4 +1,4 @@
-use crate::data::assets;
+use crate::data::{assets, atomic_file};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -17,7 +17,9 @@ pub fn load_cookie() -> Result<Option<String>> {
         return Ok(None);
     }
 
-    let raw = fs::read_to_string(&path)?;
+    let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    // 损坏的会话只代表本地登录状态失效：回到登录页，由下一次登录覆盖它。
+    // 文件读取权限/IO 错误仍然传播，避免把系统故障伪装成未登录。
     let record: SessionRecord = toml::from_str(&raw).unwrap_or_default();
     let cookie = record.cookie.trim().to_string();
     if cookie.is_empty() {
@@ -29,18 +31,12 @@ pub fn load_cookie() -> Result<Option<String>> {
 
 pub fn save_cookie(cookie: &str) -> Result<()> {
     let path = session_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
-    }
-
     let record = SessionRecord {
         cookie: cookie.to_string(),
         updated_at: now_unix(),
     };
-
-    let raw = toml::to_string_pretty(&record).unwrap_or_default();
-    fs::write(&path, raw).with_context(|| format!("write {}", path.display()))?;
-    Ok(())
+    let raw = toml::to_string_pretty(&record).context("serialize session cookie")?;
+    atomic_file::write_atomic_with_mode(&path, raw.as_bytes(), Some(0o600))
 }
 
 pub fn clear_cookie() -> Result<()> {
@@ -59,5 +55,5 @@ fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_secs() as i64)
-        .unwrap_or_default()
+        .unwrap_or(0)
 }

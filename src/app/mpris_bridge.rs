@@ -28,10 +28,12 @@ mod imp {
     use crate::app::player::cleanup_cache_dir;
     use crate::launch;
     use mpris_server::{Metadata, PlaybackStatus, Player, Time, zbus};
+    use parking_lot::Mutex;
     use std::collections::hash_map::DefaultHasher;
     use std::fs;
     use std::hash::{Hash, Hasher};
     use std::sync::mpsc::{self as std_mpsc, Receiver, Sender};
+    use std::time::{Duration, Instant};
 
     pub struct MprisBridge {
         tx: see::unsync::Sender<Option<MprisSyncPayload>>,
@@ -41,14 +43,23 @@ mod imp {
     impl MprisBridge {
         pub fn new(cache_root: &Path, cache_policy: &CacheConfig) -> Self {
             let art_dir = cache_root.join("mpris_art");
-            let _ = fs::create_dir_all(&art_dir);
-            let _ = cleanup_cache_dir(&art_dir, cache_policy);
 
             let (tx, mut rx) = see::unsync::channel(None);
             let (event_tx, event_rx) = std_mpsc::channel::<MprisControlEvent>();
             let cache_policy = cache_policy.clone();
 
             let task = async move {
+                let startup_dir = art_dir.clone();
+                let startup_policy = cache_policy.clone();
+                if compio::runtime::spawn_blocking(move || {
+                    let _ = fs::create_dir_all(&startup_dir);
+                    let _ = cleanup_cache_dir(&startup_dir, &startup_policy);
+                })
+                .await
+                .is_err()
+                {
+                    log::warn!("mpris cache initialization task panicked");
+                }
                 let player = match Player::builder("ncmora")
                     .can_play(true)
                     .can_pause(true)
@@ -158,9 +169,16 @@ mod imp {
         player.set_position(time_from_duration(payload.position));
 
         if let Some(track) = payload.track {
-            player
-                .set_metadata(build_metadata(art_dir, cache_policy, &track))
-                .await?;
+            let art_dir = art_dir.to_path_buf();
+            let cache_policy = cache_policy.clone();
+            match compio::runtime::spawn_blocking(move || {
+                build_metadata(&art_dir, &cache_policy, &track)
+            })
+            .await
+            {
+                Ok(metadata) => player.set_metadata(metadata).await?,
+                Err(_) => log::warn!("mpris metadata export task panicked"),
+            }
         }
 
         Ok(())
@@ -200,28 +218,26 @@ mod imp {
             metadata.set_comment(Some([format!("song_id={}", track.song_id)]));
         }
 
-        if let Some(lyrics) = &track.lyrics {
-            if !lyrics.is_empty() {
-                let text = lyrics
-                    .iter()
-                    .map(|line| line.text.trim())
-                    .filter(|line| !line.is_empty())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !text.is_empty() {
-                    metadata.set_lyrics(Some(text));
-                }
+        if let Some(lyrics) = &track.lyrics
+            && !lyrics.is_empty()
+        {
+            let text = lyrics
+                .iter()
+                .map(|line| line.text.trim())
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !text.is_empty() {
+                metadata.set_lyrics(Some(text));
             }
         }
 
-        if let Some(bytes) = track.cover.as_deref() {
-            if !bytes.is_empty() {
-                if let Some(art_url) =
-                    persist_cover_as_file_url(art_dir, cache_policy, &track.song_id, bytes)
-                {
-                    metadata.set_art_url(Some(art_url));
-                }
-            }
+        if let Some(bytes) = track.cover.as_deref()
+            && !bytes.is_empty()
+            && let Some(art_url) =
+                persist_cover_as_file_url(art_dir, cache_policy, &track.song_id, bytes)
+        {
+            metadata.set_art_url(Some(art_url));
         }
 
         metadata
@@ -243,13 +259,33 @@ mod imp {
 
         if !path.is_file() {
             fs::write(&path, bytes).ok()?;
-            let _ = cleanup_cache_dir(art_dir, cache_policy);
+            cleanup_art_dir_throttled(art_dir, cache_policy);
+            // 清理可能按容量把刚写的文件也删了，补写一次。
             if !path.is_file() {
                 fs::write(&path, bytes).ok()?;
             }
         }
 
         Some(format!("file://{}", path.to_string_lossy()))
+    }
+
+    /// `cleanup_cache_dir` 会 `read_dir` 整个目录并对每个文件取 metadata，
+    /// 开销随封面数量线性增长。原先每写一张封面就调一次，等于每次切歌
+    /// 全目录扫描。这里限制最短间隔，把它摊薄成周期性维护。
+    fn cleanup_art_dir_throttled(art_dir: &Path, cache_policy: &CacheConfig) {
+        const MIN_INTERVAL: Duration = Duration::from_secs(300);
+        static LAST_RUN: Mutex<Option<Instant>> = Mutex::new(None);
+
+        let mut last = LAST_RUN.lock();
+        if let Some(at) = *last
+            && at.elapsed() < MIN_INTERVAL
+        {
+            return;
+        }
+        *last = Some(Instant::now());
+        drop(last);
+
+        let _ = cleanup_cache_dir(art_dir, cache_policy);
     }
 
     fn sanitize_for_filename(input: &str) -> String {
@@ -278,8 +314,8 @@ mod imp {
 }
 
 #[cfg(target_os = "windows")]
-mod imp {
-    use super::{CacheConfig, MprisControlEvent, MprisSyncPayload, Path};
+mod windows_imp {
+    use super::{CacheConfig, MprisControlEvent, MprisSyncPayload, Path, PlaybackRuntimeState};
     use crate::app::player::cleanup_cache_dir;
     use souvlaki::{
         MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition,
@@ -291,7 +327,7 @@ mod imp {
     use std::hash::{Hash, Hasher};
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::path::PathBuf;
-    use std::sync::mpsc::{self as std_mpsc, Receiver, Sender};
+    use std::sync::mpsc::{self, Receiver, Sender};
     use std::time::Duration;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::Com::{
@@ -310,7 +346,7 @@ mod imp {
     pub struct MprisBridge {
         controls: Option<MediaControls>,
         event_rx: Receiver<MprisControlEvent>,
-        art_dir: std::path::PathBuf,
+        art_dir: PathBuf,
         cache_policy: CacheConfig,
     }
 
@@ -319,10 +355,8 @@ mod imp {
             let art_dir = cache_root.join("smtc_art");
             let _ = fs::create_dir_all(&art_dir);
             let _ = cleanup_cache_dir(&art_dir, cache_policy);
-
-            let (event_tx, event_rx) = std_mpsc::channel::<MprisControlEvent>();
+            let (event_tx, event_rx) = mpsc::channel();
             let controls = create_controls(event_tx);
-
             Self {
                 controls,
                 event_rx,
@@ -335,24 +369,21 @@ mod imp {
             let Some(controls) = self.controls.as_mut() else {
                 return;
             };
-
             let playback = match payload.playback {
-                super::PlaybackRuntimeState::Playing => MediaPlayback::Playing {
+                PlaybackRuntimeState::Playing => MediaPlayback::Playing {
                     progress: Some(MediaPosition(payload.position)),
                 },
-                super::PlaybackRuntimeState::Paused => MediaPlayback::Paused {
+                PlaybackRuntimeState::Paused => MediaPlayback::Paused {
                     progress: Some(MediaPosition(payload.position)),
                 },
-                super::PlaybackRuntimeState::Stopped => MediaPlayback::Stopped,
+                PlaybackRuntimeState::Stopped => MediaPlayback::Stopped,
             };
-            if let Err(err) = controls.set_playback(playback) {
-                log::debug!("SMTC playback sync failed: {err}");
+            if let Err(error) = controls.set_playback(playback) {
+                log::debug!("SMTC playback sync failed: {error}");
             }
-
             let Some(track) = payload.track.as_ref() else {
                 return;
             };
-
             let cover_url = track
                 .cover
                 .as_deref()
@@ -373,8 +404,8 @@ mod imp {
                 duration: (track.duration_ms > 0)
                     .then(|| Duration::from_millis(track.duration_ms as u64)),
             };
-            if let Err(err) = controls.set_metadata(metadata) {
-                log::debug!("SMTC metadata sync failed: {err}");
+            if let Err(error) = controls.set_metadata(metadata) {
+                log::debug!("SMTC metadata sync failed: {error}");
             }
         }
 
@@ -384,16 +415,14 @@ mod imp {
     }
 
     fn create_controls(event_tx: Sender<MprisControlEvent>) -> Option<MediaControls> {
-        if let Err(err) = ensure_start_menu_shortcut() {
-            log::warn!("failed to create the NCMora Start menu shortcut: {err}");
+        if let Err(error) = ensure_start_menu_shortcut() {
+            log::warn!("failed to create the NCMora Start menu shortcut: {error}");
         }
-
         let hwnd = unsafe { GetConsoleWindow() };
         if hwnd.is_null() {
             log::warn!("SMTC unavailable: console window handle is missing");
             return None;
         }
-
         let config = PlatformConfig {
             display_name: "NCMora",
             dbus_name: "ncmora",
@@ -401,28 +430,24 @@ mod imp {
         };
         let mut controls = match MediaControls::new(config) {
             Ok(controls) => controls,
-            Err(err) => {
-                log::warn!("SMTC initialization failed: {err}");
+            Err(error) => {
+                log::warn!("SMTC initialization failed: {error}");
                 return None;
             }
         };
-
-        if let Err(err) = controls.attach(move |event| {
+        if let Err(error) = controls.attach(move |event| {
             if let Some(event) = map_control_event(event) {
                 let _ = event_tx.send(event);
             }
         }) {
-            log::warn!("SMTC event registration failed: {err}");
+            log::warn!("SMTC event registration failed: {error}");
             return None;
         }
-
         Some(controls)
     }
 
     fn ensure_start_menu_shortcut() -> windows::core::Result<()> {
-        let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-        initialized.ok()?;
-
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok()?;
         let result = create_start_menu_shortcut();
         unsafe { CoUninitialize() };
         result
@@ -436,11 +461,9 @@ mod imp {
         let programs = unsafe { programs_raw.to_string() };
         unsafe { CoTaskMemFree(Some(programs_raw.as_ptr().cast())) };
         let shortcut_path = PathBuf::from(programs?).join("NCMora.lnk");
-
         let exe_wide = wide_nul(exe_path.as_os_str());
         let shortcut_wide = wide_nul(shortcut_path.as_os_str());
         let working_dir_wide = exe_path.parent().map(|path| wide_nul(path.as_os_str()));
-
         let shell_link: IShellLinkW =
             unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)? };
         unsafe {
@@ -505,10 +528,9 @@ mod imp {
     }
 
     fn seek_delta_micros(direction: SeekDirection) -> i64 {
-        let delta = 10_000_000;
         match direction {
-            SeekDirection::Forward => delta,
-            SeekDirection::Backward => -delta,
+            SeekDirection::Forward => 10_000_000,
+            SeekDirection::Backward => -10_000_000,
         }
     }
 
@@ -524,10 +546,16 @@ mod imp {
     ) -> Option<String> {
         let mut hasher = DefaultHasher::new();
         bytes.hash(&mut hasher);
-        let hash = hasher.finish();
-        let safe_id = sanitize_for_filename(song_id);
-        let path = art_dir.join(format!("{}_{}.img", safe_id, hash));
-
+        let safe_id: String = song_id
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+            .collect();
+        let safe_id = if safe_id.is_empty() {
+            "track"
+        } else {
+            &safe_id
+        };
+        let path = art_dir.join(format!("{}_{}.img", safe_id, hasher.finish()));
         if !path.is_file() {
             fs::write(&path, bytes).ok()?;
             let _ = cleanup_cache_dir(art_dir, cache_policy);
@@ -535,20 +563,7 @@ mod imp {
                 fs::write(&path, bytes).ok()?;
             }
         }
-
         Some(format!("file://{}", path.to_string_lossy()))
-    }
-
-    fn sanitize_for_filename(input: &str) -> String {
-        let out: String = input
-            .chars()
-            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
-            .collect();
-        if out.is_empty() {
-            "track".to_string()
-        } else {
-            out
-        }
     }
 
     #[cfg(test)]
@@ -581,6 +596,9 @@ mod imp {
     }
 }
 
+#[cfg(target_os = "windows")]
+use windows_imp as imp;
+
 #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
 mod imp {
     use super::{CacheConfig, MprisControlEvent, MprisSyncPayload, Path};
@@ -592,7 +610,7 @@ mod imp {
             Self
         }
 
-        pub fn update(&mut self, _payload: MprisSyncPayload) {}
+        pub fn update(&self, _payload: MprisSyncPayload) {}
 
         pub fn drain_control_events(&self) -> Vec<MprisControlEvent> {
             Vec::new()

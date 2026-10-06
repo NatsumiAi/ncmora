@@ -1,5 +1,5 @@
+use crate::data::config::BarChannels;
 use crate::tmplayer::app::state::AppState;
-use crate::tmplayer::data::config::BarChannels;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -18,8 +18,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
     if bars_h == 0 {
         return;
     }
-
     let bars = &app.spectrum.bars;
+    let bars_left = &app.spectrum.bars_left;
+    let bars_right = &app.spectrum.bars_right;
     let mono_count = bars.len().max(1);
     if app.spectrum_render_grid.len() != bars_h {
         app.spectrum_render_grid.resize_with(bars_h, Vec::new);
@@ -40,12 +41,14 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
 
     let draw_vals = build_display_vals(
         bars,
+        bars_left,
+        bars_right,
         draw_total,
         app.config.bar_channels,
         app.config.bar_channel_reverse,
     );
     let mut x_cursor = x_offset.min(w);
-    for (i, &val) in draw_vals.iter().enumerate() {
+    for (i, &val) in draw_vals[..draw_total.min(192)].iter().enumerate() {
         if x_cursor >= w {
             break;
         }
@@ -109,7 +112,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut AppState) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-fn compute_bar_layout(
+pub(crate) fn compute_bar_layout(
     width: usize,
     gap: bool,
     data_len: usize,
@@ -192,43 +195,38 @@ fn compute_bar_layout(
 }
 
 fn build_display_vals(
-    data: &[f32],
+    mono: &[f32],
+    left: &[f32],
+    right: &[f32],
     draw_total: usize,
     mode: BarChannels,
     reverse: bool,
-) -> Vec<f32> {
-    let data_len = data.len().max(1);
+) -> [f32; 192] {
+    let mut values = [0.0; 192];
+    let draw_total = draw_total.min(values.len());
     if draw_total == 0 {
-        return Vec::new();
+        return values;
     }
-
     match mode {
-        BarChannels::Mono => (0..draw_total)
-            .map(|i| {
-                if reverse {
-                    sample_val(data, data_len, draw_total, draw_total - 1 - i)
-                } else {
-                    sample_val(data, data_len, draw_total, i)
-                }
-            })
-            .collect(),
+        BarChannels::Mono => {
+            let data_len = mono.len().max(1);
+            for (i, value) in values[..draw_total].iter_mut().enumerate() {
+                let idx = if reverse { draw_total - 1 - i } else { i };
+                *value = sample_val(mono, data_len, draw_total, idx);
+            }
+        }
         BarChannels::Stereo => {
             let per_side = (draw_total / 2).max(1);
-            let mut right: Vec<f32> = (0..per_side)
-                .map(|i| {
-                    if reverse {
-                        sample_val(data, data_len, per_side, per_side - 1 - i)
-                    } else {
-                        sample_val(data, data_len, per_side, i)
-                    }
-                })
-                .collect();
-            let mut left = right.clone();
-            left.reverse();
-            left.append(&mut right);
-            left
+            let left_len = left.len().max(1);
+            let right_len = right.len().max(1);
+            for i in 0..per_side {
+                let idx = if reverse { per_side - 1 - i } else { i };
+                values[i] = sample_val(left, left_len, per_side, per_side - 1 - idx);
+                values[per_side + i] = sample_val(right, right_len, per_side, idx);
+            }
         }
     }
+    values
 }
 
 fn sample_val(data: &[f32], data_len: usize, draw_len: usize, i: usize) -> f32 {
@@ -242,7 +240,7 @@ fn apply_height_curve(v: f32) -> f32 {
     v.powf(0.72)
 }
 
-fn density_char(level: usize, height: usize) -> char {
+pub(crate) fn density_char(level: usize, height: usize) -> char {
     // bottom dense, top light
     if height == 0 {
         return ' ';
@@ -262,7 +260,7 @@ fn density_char(level: usize, height: usize) -> char {
     }
 }
 
-fn smooth_char(frac: f32) -> char {
+pub(crate) fn smooth_char(frac: f32) -> char {
     // Order: " ▂▃▄▅▆▇█" (low to high)
     if frac <= 0.0 {
         ' '
@@ -301,5 +299,29 @@ fn mix(a: Color, b: Color, t: f32) -> Color {
             Color::Rgb(r, g, b)
         }
         _ => a,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mono_display_uses_the_entire_area_without_mirroring() {
+        let mono = [0.1, 0.2, 0.4, 0.9];
+        let values = build_display_vals(&mono, &[1.0; 4], &[0.0; 4], 4, BarChannels::Mono, false);
+        assert_eq!(values[..4], mono);
+        let reverse = build_display_vals(&mono, &[], &[], 4, BarChannels::Mono, true);
+        assert_eq!(reverse[..4], [0.9, 0.4, 0.2, 0.1]);
+    }
+
+    #[test]
+    fn stereo_display_values_preserve_distinct_channels() {
+        let mono = [0.0; 3];
+        let left = [1.0, 0.0, 0.0];
+        let right = [0.0, 0.0, 0.0];
+        let values = build_display_vals(&mono, &left, &right, 6, BarChannels::Stereo, false);
+        assert!(values[..3].iter().any(|value| *value > 0.0));
+        assert!(values[3..6].iter().all(|value| *value == 0.0));
     }
 }

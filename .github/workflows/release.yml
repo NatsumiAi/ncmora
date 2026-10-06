@@ -1,91 +1,209 @@
 name: Release
 
+# Build Linux and Windows artifacts before publishing a tagged release.
+
 on:
   push:
-    tags:
-      - "v*"
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build, e.g. v0.6.0'
+        required: true
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  guard:
+    name: Verify tag/version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Resolve tag
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$GITHUB_REF_NAME"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.tag }}
+
+      - name: Tag must match Cargo.toml version
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          WANT_VER="${TAG#v}"
+          HAVE_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          if [ "$WANT_VER" != "$HAVE_VER" ]; then
+            echo "::error::tag version $WANT_VER != Cargo.toml version $HAVE_VER"
+            exit 1
+          fi
+
   build:
-    name: Build ${{ matrix.target }}
+    # 用产物架构名（amd64/aarch64）而非 Rust 三元组：与 tarball 名一致，也更短
+    name: Build ${{ matrix.arch }}
+    needs: guard
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          - runner: windows-2025
             target: x86_64-pc-windows-msvc
-            archive: zip
-          - os: ubuntu-latest
+            arch: windows-amd64
+          - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            archive: tar.gz
-          - os: macos-14
-            target: aarch64-apple-darwin
-            archive: tar.gz
-    runs-on: ${{ matrix.os }}
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      TAG: ${{ needs.guard.outputs.tag }}
+      ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.tag }}
 
-      - name: Install Linux build dependencies
+      - name: Install system dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libdbus-1-dev pkg-config
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config \
+            libasound2-dev libchafa-dev libpipewire-0.3-dev libssl-dev libglib2.0-dev libclang-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.95.0
           targets: ${{ matrix.target }}
 
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
-
-      - name: Package Unix archive
-        if: matrix.archive == 'tar.gz'
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-          VERSION: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          mkdir -p "staging/ncmora-${VERSION}-${TARGET}"
-          cp "target/${TARGET}/release/ncmora" "staging/ncmora-${VERSION}-${TARGET}/"
-          strip "staging/ncmora-${VERSION}-${TARGET}/ncmora" || true
-          tar -C staging -czf "ncmora-${VERSION}-${TARGET}.tar.gz" "ncmora-${VERSION}-${TARGET}"
-
-      - name: Package Windows archive
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        env:
-          TARGET: ${{ matrix.target }}
-          VERSION: ${{ github.ref_name }}
-        run: |
-          $folder = "ncmora-$env:VERSION-$env:TARGET"
-          New-Item -ItemType Directory -Path "staging\$folder" -Force | Out-Null
-          Copy-Item "target\$env:TARGET\release\ncmora.exe" "staging\$folder\"
-          Compress-Archive -Path "staging\$folder" -DestinationPath "$folder.zip"
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          name: ncmora-${{ matrix.target }}
-          path: ncmora-*
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Package Linux
+        if: runner.os == 'Linux'
+        run: |
+          mkdir pkg
+          cp "target/${{ matrix.target }}/release/ncmora" pkg/
+          cp LICENSE pkg/
+          (cd pkg && tar -cJf "../ncmora-${TAG}-${{ matrix.target }}.tar.xz" ncmora LICENSE)
+
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path pkg | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/ncmora.exe" pkg/
+          Copy-Item LICENSE pkg/
+          Compress-Archive -Path pkg/* -DestinationPath "ncmora-${{ needs.guard.outputs.tag }}-${{ matrix.target }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ matrix.arch }}
+          path: |
+            ncmora-*.tar.xz
+            ncmora-*.zip
+          if-no-files-found: error
+
+  gate:
+    name: Release gate
+    needs: [guard, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.tag }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config \
+            libasound2-dev libpipewire-0.3-dev libssl-dev libglib2.0-dev libclang-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test workspace default features
+        run: cargo test --workspace --locked --all-targets
+
+      - name: Test workspace without default features
+        run: cargo test --workspace --locked --all-targets --no-default-features
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rel-*
+          merge-multiple: true
+          path: dist
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum *.tar.xz *.zip > SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-checksums
+          path: dist/SHA256SUMS
           if-no-files-found: error
 
   publish:
-    name: Publish GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
+    name: GitHub Release
+    needs: [guard, build, gate]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
+      # gh release create --verify-tag 需要 git 仓库上下文来校验 tag，
+      # 缺了 checkout 会以 "fatal: not a git repository" 失败。
+      - uses: actions/checkout@v4
         with:
-          path: dist
-          pattern: ncmora-*
-          merge-multiple: true
+          ref: ${{ needs.guard.outputs.tag }}
 
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
+      # 下到子目录：避免 ./*.tar.xz 把仓库自身文件也匹配进去
+      - uses: actions/download-artifact@v4
         with:
-          tag_name: ${{ github.ref_name }}
-          generate_release_notes: true
-          files: dist/ncmora-*
+          pattern: rel-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-checksums
+          path: dist
+
+      # create 已存在时回退为 upload，保证 re-run 幂等
+      - name: Create release with tarballs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.guard.outputs.tag }}
+        run: |
+          gh release create "$TAG" --verify-tag --generate-notes dist/ncmora-* dist/SHA256SUMS \
+            || gh release upload "$TAG" --clobber dist/ncmora-* dist/SHA256SUMS
