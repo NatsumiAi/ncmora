@@ -91,6 +91,10 @@ impl Default for Theme {
 }
 
 pub fn detect_color_capability() -> ColorCapability {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return ColorCapability::NoColor;
+    }
+
     let colorterm = std::env::var("COLORTERM")
         .unwrap_or_default()
         .to_lowercase();
@@ -103,7 +107,13 @@ pub fn detect_color_capability() -> ColorCapability {
         return ColorCapability::Ansi256;
     }
 
-    ColorCapability::NoColor
+    // Windows Terminal and modern Windows console hosts support ANSI truecolor
+    // even when they do not set TERM/COLORTERM (the common Windows case).
+    #[cfg(windows)]
+    return ColorCapability::TrueColor;
+
+    #[cfg(not(windows))]
+    return ColorCapability::NoColor;
 }
 
 fn map_color(cap: ColorCapability, rgb: (u8, u8, u8)) -> Color {

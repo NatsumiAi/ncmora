@@ -381,6 +381,7 @@ pub async fn run(
         &mut last_host_config_signature,
     )
     .await;
+    let entered_at = Instant::now();
 
     let loop_result: Result<()> = async {
         loop {
@@ -399,6 +400,11 @@ pub async fn run(
                 match event::read()? {
                     Event::Key(k) => {
                         let action = map_key(k, app.overlay, &app.config);
+                        if action == Action::Quit
+                            && entered_at.elapsed() < Duration::from_millis(500)
+                        {
+                            continue;
+                        }
                         handle_action(app, host_bridge, action, &last_layout).await?;
                         state_changed = true;
                     }

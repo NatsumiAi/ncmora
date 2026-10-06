@@ -91,11 +91,31 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let tile_h = 12_u16.min(inner.height.saturating_sub(1)).max(6);
-    let tile_w = tile_h.saturating_mul(2).saturating_add(4);
-    let col_step = tile_w.saturating_add(2);
+    let tile_count = app.browse.home.tiles.len().max(1);
+    let gap = 2_u16;
+    let min_tile_w = 28_u16;
+    let max_columns =
+        usize::from((inner.width.saturating_add(gap) / min_tile_w.saturating_add(gap)).max(1));
+    let preferred_rows = if inner.height >= 18 && tile_count > 3 {
+        2
+    } else {
+        1
+    };
+    let columns = tile_count.div_ceil(preferred_rows).min(max_columns).max(1);
+    let columns_u16 = columns as u16;
+    let tile_w = inner
+        .width
+        .saturating_sub(gap.saturating_mul(columns_u16.saturating_sub(1)))
+        .saturating_div(columns_u16)
+        .max(14);
+    let preferred_tile_h = tile_w.saturating_sub(4).saturating_div(2).max(6);
+    let total_rows = tile_count.div_ceil(columns);
+    let target_rows = total_rows.min(usize::from((inner.height / 8).max(1))) as u16;
+    let tile_h = preferred_tile_h
+        .min(inner.height.saturating_sub(target_rows.saturating_sub(1)) / target_rows)
+        .max(6);
+    let col_step = tile_w.saturating_add(gap);
     let row_step = tile_h.saturating_add(1);
-    let columns = usize::from((inner.width / col_step).max(1));
     app.browse.home.set_columns(columns);
 
     let visible_rows = usize::from((inner.height / row_step).max(1));
@@ -103,8 +123,7 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
     let row_offset = app.browse.home.effective_scroll_row_offset();
 
     for index in 0..app.browse.home.tiles.len() {
-        let virtual_index = home_real_to_virtual_index(index, columns);
-        let row = virtual_index / columns;
+        let row = index / columns;
         if row < row_offset {
             continue;
         }
@@ -112,7 +131,7 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
         if visual_row >= visible_rows {
             continue;
         }
-        let col = virtual_index % columns;
+        let col = index % columns;
         let x = inner.x + (col as u16) * col_step;
         let y = inner.y + (visual_row as u16) * row_step;
         if x >= inner.x + inner.width || y >= inner.y + inner.height {
@@ -224,15 +243,6 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn home_real_to_virtual_index(index: usize, columns: usize) -> usize {
-    let cols = columns.max(1);
-    if cols <= 3 || index < 3 {
-        index
-    } else {
-        index.saturating_add(cols - 3)
-    }
-}
-
 fn draw_home_hint(frame: &mut Frame, app: &App, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -244,7 +254,7 @@ fn draw_home_hint(frame: &mut Frame, app: &App, area: Rect) {
 
     let text = match app.config.language {
         Language::Zh => format!(
-            "{} 搜索  {} 设置  {} 侧边栏  {} 全屏  {} 退出",
+            "{} 搜索  {} 设置  {} 侧边栏  {}/F9 全屏  {} 退出",
             app.config.keybind_search_box,
             app.config.keybind_settings,
             app.config.keybind_sidebar,
@@ -252,7 +262,7 @@ fn draw_home_hint(frame: &mut Frame, app: &App, area: Rect) {
             app.config.keybind_quit
         ),
         Language::En => format!(
-            "{} Search  {} Settings  {} Sidebar  {} Fullscreen  {} Quit",
+            "{} Search  {} Settings  {} Sidebar  {}/F9 Fullscreen  {} Quit",
             app.config.keybind_search_box,
             app.config.keybind_settings,
             app.config.keybind_sidebar,

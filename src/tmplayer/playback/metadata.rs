@@ -1,4 +1,4 @@
-use crate::tmplayer::app::state::LyricLine;
+use crate::tmplayer::app::state::{LyricLine, LyricWord};
 
 pub fn parse_lrc(content: &str) -> Option<Vec<LyricLine>> {
     let mut out: Vec<LyricLine> = Vec::new();
@@ -119,6 +119,107 @@ pub fn parse_lyrics(content: &str) -> Option<Vec<LyricLine>> {
         .or_else(|| parse_plain_lyrics(content))
 }
 
+pub fn parse_yrc(content: &str) -> Option<Vec<LyricLine>> {
+    let mut lines = Vec::new();
+    for raw in content.lines() {
+        let raw = raw.trim();
+        let Some((tag, body)) = raw.strip_prefix('[').and_then(|line| line.split_once(']')) else {
+            continue;
+        };
+        let Some((start, duration)) = tag.split_once(',') else {
+            continue;
+        };
+        let (Ok(start_ms), Ok(duration_ms)) = (start.parse::<u64>(), duration.parse::<u64>())
+        else {
+            continue;
+        };
+
+        let mut fragments = Vec::new();
+        let mut cursor = 0;
+        while let Some(open_offset) = body[cursor..].find('(') {
+            let open = cursor + open_offset;
+            let Some(close_offset) = body[open + 1..].find(')') else {
+                break;
+            };
+            let close = open + 1 + close_offset;
+            let mut fields = body[open + 1..close].split(',');
+            let (Some(word_start), Some(word_duration)) = (fields.next(), fields.next()) else {
+                break;
+            };
+            let (Ok(word_start), Ok(word_duration)) =
+                (word_start.parse::<u64>(), word_duration.parse::<u64>())
+            else {
+                cursor = close + 1;
+                continue;
+            };
+            let text_start = close + 1;
+            let text_end = body[text_start..]
+                .find('(')
+                .map(|offset| text_start + offset)
+                .unwrap_or(body.len());
+            let text = &body[text_start..text_end];
+            if !text.is_empty() {
+                fragments.push((word_start, word_duration, text));
+            }
+            cursor = text_end;
+        }
+        if fragments.is_empty() {
+            continue;
+        }
+
+        // NetEase has emitted both absolute and line-relative word starts.
+        let absolute =
+            fragments[0].0 >= start_ms && fragments[0].0 <= start_ms.saturating_add(duration_ms);
+        let words: Vec<LyricWord> = fragments
+            .into_iter()
+            .map(|(word_start, word_duration, text)| {
+                let word_start = if absolute {
+                    word_start
+                } else {
+                    start_ms.saturating_add(word_start)
+                };
+                LyricWord {
+                    start_ms: word_start,
+                    end_ms: word_start.saturating_add(word_duration),
+                    text: text.to_string(),
+                }
+            })
+            .collect();
+        let text = words.iter().map(|word| word.text.as_str()).collect();
+        lines.push(LyricLine {
+            start_ms,
+            text,
+            translation: None,
+            words,
+        });
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        lines.sort_by_key(|line| line.start_ms);
+        Some(lines)
+    }
+}
+
+pub fn attach_translations(lines: &mut [LyricLine], content: &str) {
+    let Some(translations) = parse_lrc(content).or_else(|| parse_netease_json_lyrics(content))
+    else {
+        return;
+    };
+    for line in lines {
+        let translated = translations
+            .iter()
+            .min_by_key(|candidate| candidate.start_ms.abs_diff(line.start_ms));
+        if let Some(translated) = translated
+            && translated.start_ms.abs_diff(line.start_ms) <= 2_000
+            && !translated.text.trim().is_empty()
+            && translated.text != line.text
+        {
+            line.translation = Some(translated.text.clone());
+        }
+    }
+}
+
 fn parse_lrc_time_tag(tag: &str) -> Option<u64> {
     // Supports mm:ss, mm:ss.xx, mm:ss.xxx
     // Rejects metadata tags like "ti:xxx" by requiring numeric mm and ss.
@@ -161,7 +262,25 @@ fn parse_lrc_time_tag(tag: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_lyrics, parse_netease_json_lyrics};
+    use super::{attach_translations, parse_lyrics, parse_netease_json_lyrics, parse_yrc};
+
+    #[test]
+    fn yrc_preserves_absolute_and_relative_word_timing() {
+        let mut lines = parse_yrc(concat!(
+            "[1000,800](1000,400,0)Hel(1400,400,0)lo\n",
+            "[3000,800](0,400,0)世(400,400,0)界"
+        ))
+        .expect("YRC lines");
+        assert_eq!(lines[0].text, "Hello");
+        assert_eq!(lines[0].words[0].start_ms, 1000);
+        assert_eq!(lines[0].words[1].end_ms, 1800);
+        assert_eq!(lines[1].words[0].start_ms, 3000);
+        assert_eq!(lines[1].words[1].start_ms, 3400);
+
+        attach_translations(&mut lines, "[00:01.00]你好\n[00:03.00]World");
+        assert_eq!(lines[0].translation.as_deref(), Some("你好"));
+        assert_eq!(lines[1].translation.as_deref(), Some("World"));
+    }
 
     #[test]
     fn parses_netease_json_line_lyrics() {

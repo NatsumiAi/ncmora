@@ -201,7 +201,7 @@ pub fn map_key(ev: KeyEvent, overlay: Overlay, config: &Config) -> Action {
         return Action::ToggleDownload;
     }
 
-    if keybind_matches(&config.keybind_fullscreen, ev) {
+    if matches!(ev.code, KeyCode::F(9)) || keybind_matches(&config.keybind_fullscreen, ev) {
         return Action::Quit;
     }
     if ev.modifiers.contains(KeyModifiers::CONTROL)
@@ -297,9 +297,10 @@ fn keybind_matches(binding: &str, key: KeyEvent) -> bool {
 }
 
 fn key_event_to_keybind_text(key: KeyEvent) -> Option<String> {
+    let (key_code, control_char) = control_char_key_code(key.code);
     let mut parts: Vec<&str> = Vec::new();
 
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
+    if key.modifiers.contains(KeyModifiers::CONTROL) || control_char {
         parts.push("Ctrl");
     }
     if key.modifiers.contains(KeyModifiers::ALT) {
@@ -307,18 +308,30 @@ fn key_event_to_keybind_text(key: KeyEvent) -> Option<String> {
     }
 
     let include_shift = key.modifiers.contains(KeyModifiers::SHIFT)
-        && !matches!(key.code, KeyCode::Char(ch) if ch.is_ascii_alphabetic());
+        && !matches!(key_code, KeyCode::Char(ch) if ch.is_ascii_alphabetic());
     if include_shift {
         parts.push("Shift");
     }
 
-    let key_token = key_code_to_keybind_token(key.code)?;
+    let key_token = key_code_to_keybind_token(key_code)?;
     let mut out = parts.join("+");
     if !out.is_empty() {
         out.push('+');
     }
     out.push_str(&key_token);
     Some(out)
+}
+
+fn control_char_key_code(code: KeyCode) -> (KeyCode, bool) {
+    let KeyCode::Char(ch) = code else {
+        return (code, false);
+    };
+    let value = ch as u32;
+    if (1..=26).contains(&value) {
+        let letter = char::from_u32(u32::from(b'a') + value - 1).unwrap_or(ch);
+        return (KeyCode::Char(letter), true);
+    }
+    (code, false)
 }
 
 fn normalize_keybind_text(raw: &str) -> Option<String> {
@@ -528,6 +541,21 @@ mod tests {
 
         let ev = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
         assert_eq!(map_key(ev, Overlay::None, &config), Action::ToggleDownload);
+    }
+
+    #[test]
+    fn windows_control_character_matches_ctrl_binding() {
+        let config = crate::data::config::Config::default();
+        let ev = KeyEvent::new(KeyCode::Char('\u{6}'), KeyModifiers::NONE);
+        assert_eq!(map_key(ev, Overlay::None, &config), Action::Quit);
+        assert_eq!(
+            map_key(
+                KeyEvent::new(KeyCode::F(9), KeyModifiers::NONE),
+                Overlay::None,
+                &config
+            ),
+            Action::Quit
+        );
     }
 
     /// 设置类弹窗里的 Esc 必须走"关闭弹窗"而不是退出全屏页。

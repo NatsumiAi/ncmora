@@ -440,6 +440,7 @@ async fn launch_tmplayer_fullscreen(
     app: &mut App,
     bootstrap: tmplayer::FullscreenBootstrap,
 ) -> Result<()> {
+    log::info!("entering fullscreen");
     play_fullscreen_transition(terminal, app, true).await?;
     app.suspend_main_cava_for_fullscreen().await;
     restore_terminal(terminal)?;
@@ -451,6 +452,7 @@ async fn launch_tmplayer_fullscreen(
         Ok(exit) => (Some(exit), String::new()),
         Err(err) => (None, format!("TMPlayer 运行失败: {}", err)),
     };
+    log::info!("fullscreen returned: exit={exit:?} status={status_text}");
 
     *terminal = init_terminal()?;
     app.resume_main_cava_after_fullscreen();

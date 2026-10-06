@@ -29,7 +29,7 @@ use crate::render::graphics_overlay::cover_viewport;
 use crate::tmplayer::app::state::LyricLine;
 use crate::tmplayer::audio::cava::{CavaChannels, CavaConfig, MiniCavaState};
 use crate::tmplayer::audio::pcm_tap::PcmRing;
-use crate::tmplayer::playback::metadata::parse_lyrics;
+use crate::tmplayer::playback::metadata::{attach_translations, parse_lyrics, parse_yrc};
 use crate::ui::page_lyrics;
 use crate::ui::theme::Theme;
 use anyhow::{Context, Result, anyhow, bail};
@@ -1497,36 +1497,16 @@ const HOME_DAILY_RECOMMEND_TILE_ID: &str = "__cnm_daily_recommend_songs__";
 const HOME_PRIVATE_ROAM_TILE_ID: &str = "__cnm_private_roam__";
 const HOME_PINNED_TITLES: [&str; 3] = ["每日推荐", "私人雷达", "私人漫游"];
 
-fn home_tile_real_to_virtual_index(index: usize, columns: usize) -> usize {
-    let cols = columns.max(1);
-    if cols <= 3 || index < 3 {
-        index
-    } else {
-        index.saturating_add(cols - 3)
-    }
+fn home_tile_real_to_virtual_index(index: usize, _columns: usize) -> usize {
+    index
 }
 
 fn home_tile_virtual_to_real_index(
     virtual_index: usize,
-    columns: usize,
+    _columns: usize,
     tile_len: usize,
 ) -> Option<usize> {
-    let cols = columns.max(1);
-
-    if cols <= 3 {
-        return (virtual_index < tile_len).then_some(virtual_index);
-    }
-
-    if virtual_index < 3 {
-        return (virtual_index < tile_len).then_some(virtual_index);
-    }
-
-    if virtual_index < cols {
-        return None;
-    }
-
-    let real_index = virtual_index.saturating_sub(cols - 3);
-    (real_index < tile_len).then_some(real_index)
+    (virtual_index < tile_len).then_some(virtual_index)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2711,9 +2691,7 @@ async fn loop_lyric_fetch(
             api.set_cookie(cookie.to_string());
         }
 
-        let lyric = api.lyric(&req.song_id).await.ok()?;
-        let lrc = lyric.body.pointer("/lrc/lyric")?.as_str()?;
-        parse_lyrics(lrc)
+        fetch_song_lyrics(&mut api, &req.song_id).await
     };
     latest_fetch::run_latest(rx, tx, async move |req: LyricFetchRequest| {
         let lyrics = process_fn(&req).await;
@@ -2724,6 +2702,28 @@ async fn loop_lyric_fetch(
         }
     })
     .await;
+}
+
+async fn fetch_song_lyrics(api: &mut ApiState, song_id: &str) -> Option<Vec<LyricLine>> {
+    if let Ok(response) = api.lyric_new(song_id).await
+        && let Some(lines) = parse_lyric_body(&response.body)
+    {
+        return Some(lines);
+    }
+    let response = api.lyric(song_id).await.ok()?;
+    parse_lyric_body(&response.body)
+}
+
+fn parse_lyric_body(body: &Value) -> Option<Vec<LyricLine>> {
+    let yrc = body.pointer("/yrc/lyric").and_then(Value::as_str);
+    let lrc = body.pointer("/lrc/lyric").and_then(Value::as_str);
+    let mut lines = yrc
+        .and_then(parse_yrc)
+        .or_else(|| lrc.and_then(parse_lyrics))?;
+    if let Some(translated) = body.pointer("/tlyric/lyric").and_then(Value::as_str) {
+        attach_translations(&mut lines, translated);
+    }
+    Some(lines)
 }
 
 pub struct App {
@@ -3038,7 +3038,22 @@ impl App {
     }
 
     pub async fn handle_key(&mut self, key: KeyEvent) {
-        if key.kind != KeyEventKind::Press {
+        let fullscreen_key = matches!(key.code, KeyCode::F(9))
+            || keybind_matches(self.config.keybind_fullscreen.as_str(), key);
+        if fullscreen_key {
+            log::info!(
+                "fullscreen key: code={:?} modifiers={:?} kind={:?} page={:?} overlay={:?} size={}x{}",
+                key.code,
+                key.modifiers,
+                key.kind,
+                self.page,
+                self.overlay,
+                self.term_width,
+                self.term_height
+            );
+        }
+        if key.kind != KeyEventKind::Press && !(key.kind == KeyEventKind::Repeat && fullscreen_key)
+        {
             return;
         }
 
@@ -3046,6 +3061,19 @@ impl App {
             && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
         {
             self.should_quit = true;
+            return;
+        }
+
+        // F9 is a fallback for hosts that reserve or
+        // rewrite Ctrl+letter combinations. Handle fullscreen before the
+        // small-window and overlay dispatchers, and don't let the generic
+        // hotkey debounce swallow it.
+        if self.page != Page::Login
+            && self.page != Page::Loading
+            && self.overlay.is_none()
+            && fullscreen_key
+        {
+            self.trigger_keybind_action(KeybindAction::Fullscreen).await;
             return;
         }
 
@@ -4131,6 +4159,11 @@ impl App {
             return false;
         }
 
+        if matches!(action, KeybindAction::Fullscreen) {
+            self.trigger_keybind_action(action).await;
+            return true;
+        }
+
         if !self.can_execute_global_hotkey() {
             return true;
         }
@@ -4156,8 +4189,15 @@ impl App {
             KeybindAction::Fullscreen => {
                 // 全屏页普通布局最小宽度为 50；更窄的窗口直接忽略打开全屏，
                 // 避免“进入全屏后立即因过小退出”。
-                if self.term_width >= FULLSCREEN_MIN_WIDTH {
+                if self.term_width == 0 || self.term_width >= FULLSCREEN_MIN_WIDTH {
                     self.launch_fullscreen_requested = true;
+                    log::info!("fullscreen launch requested");
+                } else {
+                    log::warn!(
+                        "fullscreen blocked: terminal width {} < {}",
+                        self.term_width,
+                        FULLSCREEN_MIN_WIDTH
+                    );
                 }
             }
             KeybindAction::Settings => self.open_settings(),
@@ -5658,15 +5698,8 @@ impl App {
             track.cover = Some(bytes);
         }
 
-        if allow_network
-            && track.lyrics.is_none()
-            && let Ok(lyric) = self.api.lyric(&track.song_id).await
-            && let Some(raw_lrc) = lyric
-                .body
-                .pointer("/lrc/lyric")
-                .and_then(|value| value.as_str())
-        {
-            track.lyrics = crate::tmplayer::playback::metadata::parse_lyrics(raw_lrc);
+        if allow_network && track.lyrics.is_none() {
+            track.lyrics = fetch_song_lyrics(&mut self.api, &track.song_id).await;
         }
     }
 
@@ -7844,8 +7877,9 @@ impl App {
             .map(|line| line.text.clone())
             .unwrap_or_default();
         let next = lines
-            .get(idx + 1)
-            .map(|line| line.text.clone())
+            .get(idx)
+            .and_then(|line| line.translation.clone())
+            .or_else(|| lines.get(idx + 1).map(|line| line.text.clone()))
             .unwrap_or_default();
         (current, next)
     }
@@ -10445,9 +10479,10 @@ fn is_reserved_reset_combo(key: KeyEvent) -> bool {
 }
 
 fn key_event_to_keybind_text(key: KeyEvent) -> Option<String> {
+    let (key_code, control_char) = control_char_key_code(key.code);
     let mut parts: Vec<&str> = Vec::new();
 
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
+    if key.modifiers.contains(KeyModifiers::CONTROL) || control_char {
         parts.push("Ctrl");
     }
     if key.modifiers.contains(KeyModifiers::ALT) {
@@ -10455,18 +10490,30 @@ fn key_event_to_keybind_text(key: KeyEvent) -> Option<String> {
     }
 
     let include_shift = key.modifiers.contains(KeyModifiers::SHIFT)
-        && !matches!(key.code, KeyCode::Char(ch) if ch.is_ascii_alphabetic());
+        && !matches!(key_code, KeyCode::Char(ch) if ch.is_ascii_alphabetic());
     if include_shift {
         parts.push("Shift");
     }
 
-    let key_token = key_code_to_keybind_token(key.code)?;
+    let key_token = key_code_to_keybind_token(key_code)?;
     let mut out = parts.join("+");
     if !out.is_empty() {
         out.push('+');
     }
     out.push_str(&key_token);
     Some(out)
+}
+
+fn control_char_key_code(code: KeyCode) -> (KeyCode, bool) {
+    let KeyCode::Char(ch) = code else {
+        return (code, false);
+    };
+    let value = ch as u32;
+    if (1..=26).contains(&value) {
+        let letter = char::from_u32(u32::from(b'a') + value - 1).unwrap_or(ch);
+        return (KeyCode::Char(letter), true);
+    }
+    (code, false)
 }
 
 fn normalize_keybind_text(raw: &str) -> Option<String> {
@@ -10629,6 +10676,18 @@ fn placeholder_cover_ascii(width: u16, height: u16, ch: char) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fullscreen_binding_accepts_windows_control_character() {
+        assert!(keybind_matches(
+            "Ctrl+F",
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)
+        ));
+        assert!(keybind_matches(
+            "Ctrl+F",
+            KeyEvent::new(KeyCode::Char('\u{6}'), KeyModifiers::NONE)
+        ));
+    }
 
     #[test]
     fn cached_cover_requires_decodable_image_and_terminal_marker() {

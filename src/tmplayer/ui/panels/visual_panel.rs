@@ -48,16 +48,22 @@ pub fn render(f: &mut Frame, lyric_area: Rect, spectrum_area: Rect, app: &mut Ap
         height: inner.height.saturating_sub(lyric_h),
     };
 
-    let (l1, l2) = current_two_lines(app);
-    if lyric_inner.height >= 1 && !l1.is_empty() {
+    let (current, second) = current_two_lines(app);
+    if lyric_inner.height >= 1
+        && let Some(current) = current
+    {
         f.render_widget(
-            Paragraph::new(l1)
-                .style(
-                    Style::default()
-                        .fg(app.theme.color_accent2())
-                        .add_modifier(Modifier::BOLD),
-                )
-                .alignment(Alignment::Center),
+            Paragraph::new(timed_line(
+                current,
+                app.player.position.as_millis() as u64,
+                app,
+            ))
+            .style(
+                Style::default()
+                    .fg(app.theme.color_accent2())
+                    .add_modifier(Modifier::BOLD),
+            )
+            .alignment(Alignment::Center),
             Rect {
                 x: lyric_inner.x,
                 y: lyric_inner.y,
@@ -66,9 +72,9 @@ pub fn render(f: &mut Frame, lyric_area: Rect, spectrum_area: Rect, app: &mut Ap
             },
         );
     }
-    if lyric_inner.height >= 2 && !l2.is_empty() {
+    if lyric_inner.height >= 2 && !second.is_empty() {
         f.render_widget(
-            Paragraph::new(l2)
+            Paragraph::new(second)
                 .style(Style::default().fg(app.theme.color_subtext()))
                 .alignment(Alignment::Center),
             Rect {
@@ -119,9 +125,21 @@ fn centered_lyric_window(app: &AppState, visible_rows: usize) -> Vec<Line<'stati
 
     let pos_ms = app.player.position.as_millis() as u64;
     let current_idx = current_lyric_index(lines, pos_ms);
+    let has_translations = lines.iter().any(|line| {
+        line.translation
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+    });
+    let line_height = if has_translations && rows_count >= 2 {
+        2
+    } else {
+        1
+    };
+    let visible_lines = rows_count.div_ceil(line_height);
+    let current_line_row = current_row / line_height;
 
-    for (row, output) in rows.iter_mut().enumerate().take(rows_count) {
-        let lyric_idx = current_idx as isize + row as isize - current_row as isize;
+    for line_row in 0..visible_lines {
+        let lyric_idx = current_idx as isize + line_row as isize - current_line_row as isize;
         if lyric_idx < 0 || lyric_idx >= lines.len() as isize {
             continue;
         }
@@ -133,7 +151,26 @@ fn centered_lyric_window(app: &AppState, visible_rows: usize) -> Vec<Line<'stati
         } else {
             Style::default().fg(app.theme.color_subtext())
         };
-        *output = Line::from(Span::styled(lyric.text.clone(), style));
+        let row = line_row * line_height;
+        rows[row] = if lyric_idx as usize == current_idx {
+            timed_line(lyric, pos_ms, app)
+        } else {
+            Line::from(Span::styled(lyric.text.clone(), style))
+        };
+        if line_height == 2
+            && let Some(translation) = lyric
+                .translation
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+            && row + 1 < rows.len()
+        {
+            rows[row + 1] = Line::from(Span::styled(
+                translation.to_string(),
+                Style::default()
+                    .fg(app.theme.color_subtext())
+                    .add_modifier(Modifier::ITALIC),
+            ));
+        }
     }
 
     rows
@@ -146,20 +183,52 @@ fn no_lyrics_label(app: &AppState) -> &'static str {
     }
 }
 
-fn current_two_lines(app: &AppState) -> (&str, &str) {
+fn current_two_lines(app: &AppState) -> (Option<&LyricLine>, &str) {
     let Some(lines) = app.player.track.lyrics.as_ref() else {
-        return ("", "");
+        return (None, "");
     };
     if lines.is_empty() {
-        return ("", "");
+        return (None, "");
     }
 
     let pos_ms = app.player.position.as_millis() as u64;
     let idx = current_lyric_index(lines, pos_ms);
 
-    let l1 = lines.get(idx).map(|l| l.text.as_str()).unwrap_or("");
-    let l2 = lines.get(idx + 1).map(|l| l.text.as_str()).unwrap_or("");
-    (l1, l2)
+    let current = lines.get(idx);
+    let second = current
+        .and_then(|line| line.translation.as_deref())
+        .filter(|text| !text.trim().is_empty())
+        .or_else(|| lines.get(idx + 1).map(|line| line.text.as_str()))
+        .unwrap_or("");
+    (current, second)
+}
+
+fn timed_line(line: &LyricLine, pos_ms: u64, app: &AppState) -> Line<'static> {
+    if line.words.is_empty() {
+        return Line::from(Span::styled(
+            line.text.clone(),
+            Style::default()
+                .fg(app.theme.color_accent2())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    Line::from(
+        line.words
+            .iter()
+            .map(|word| {
+                let style = if pos_ms >= word.end_ms {
+                    Style::default().fg(app.theme.color_accent2())
+                } else if pos_ms >= word.start_ms {
+                    Style::default()
+                        .fg(app.theme.color_accent2())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(app.theme.color_subtext())
+                };
+                Span::styled(word.text.clone(), style)
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn current_lyric_index(lines: &[LyricLine], pos_ms: u64) -> usize {
