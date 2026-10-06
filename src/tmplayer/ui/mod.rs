@@ -1,5 +1,4 @@
 pub mod borders;
-pub mod theme;
 pub mod tui;
 
 pub mod components {

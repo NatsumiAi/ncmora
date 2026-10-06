@@ -1,10 +1,10 @@
+use crate::data::config::VisualizeMode;
 use crate::tmplayer::app::state::{AppState, LyricLine};
-use crate::tmplayer::data::config::VisualizeMode;
 use crate::tmplayer::render::{oscilloscope_renderer, spectrum_renderer, vector_renderer};
 use crate::tmplayer::ui::borders::SOLID_BORDER;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
@@ -51,7 +51,7 @@ pub fn render(f: &mut Frame, lyric_area: Rect, spectrum_area: Rect, app: &mut Ap
     let (l1, l2) = current_two_lines(app);
     if lyric_inner.height >= 1 && !l1.is_empty() {
         f.render_widget(
-            Paragraph::new(current_line_widget(app, l1))
+            Paragraph::new(l1)
                 .style(
                     Style::default()
                         .fg(app.theme.color_accent2())
@@ -119,21 +119,12 @@ fn centered_lyric_window(app: &AppState, visible_rows: usize) -> Vec<Line<'stati
 
     let pos_ms = app.player.position.as_millis() as u64;
     let current_idx = current_lyric_index(lines, pos_ms);
-    let has_translations = lines.iter().any(|line| {
-        line.translation
-            .as_deref()
-            .is_some_and(|text| !text.trim().is_empty())
-    });
-    let line_height = if has_translations { 2 } else { 1 };
-    let visible_lines = (rows_count / line_height).max(1);
-    let current_row = visible_lines / 2;
 
-    for line_row in 0..visible_lines {
-        let lyric_idx = current_idx as isize + line_row as isize - current_row as isize;
+    for (row, output) in rows.iter_mut().enumerate().take(rows_count) {
+        let lyric_idx = current_idx as isize + row as isize - current_row as isize;
         if lyric_idx < 0 || lyric_idx >= lines.len() as isize {
             continue;
         }
-
         let lyric = &lines[lyric_idx as usize];
         let style = if lyric_idx as usize == current_idx {
             Style::default()
@@ -142,33 +133,7 @@ fn centered_lyric_window(app: &AppState, visible_rows: usize) -> Vec<Line<'stati
         } else {
             Style::default().fg(app.theme.color_subtext())
         };
-        let row = line_row * line_height;
-        rows[row] = if lyric_idx as usize == current_idx {
-            progressive_line(
-                lyric,
-                lines.get(lyric_idx as usize + 1).map(|next| next.start_ms),
-                pos_ms,
-                app,
-            )
-        } else {
-            Line::from(Span::styled(lyric.text.clone(), style))
-        };
-        if has_translations {
-            if let Some(translation) = lyric
-                .translation
-                .as_deref()
-                .filter(|text| !text.trim().is_empty())
-            {
-                if row + 1 < rows.len() {
-                    rows[row + 1] = Line::from(Span::styled(
-                        translation.to_string(),
-                        Style::default()
-                            .fg(app.theme.color_subtext())
-                            .add_modifier(Modifier::ITALIC),
-                    ));
-                }
-            }
-        }
+        *output = Line::from(Span::styled(lyric.text.clone(), style));
     }
 
     rows
@@ -193,71 +158,8 @@ fn current_two_lines(app: &AppState) -> (&str, &str) {
     let idx = current_lyric_index(lines, pos_ms);
 
     let l1 = lines.get(idx).map(|l| l.text.as_str()).unwrap_or("");
-    let l2 = lines
-        .get(idx)
-        .and_then(|line| line.translation.as_deref())
-        .filter(|text| !text.trim().is_empty())
-        .or_else(|| lines.get(idx + 1).map(|l| l.text.as_str()))
-        .unwrap_or("");
+    let l2 = lines.get(idx + 1).map(|l| l.text.as_str()).unwrap_or("");
     (l1, l2)
-}
-
-fn current_line_widget(app: &AppState, text: &str) -> Line<'static> {
-    let Some(lines) = app.player.track.lyrics.as_ref() else {
-        return Line::from(text.to_string());
-    };
-    let idx = current_lyric_index(lines, app.player.position.as_millis() as u64);
-    let Some(line) = lines.get(idx) else {
-        return Line::from(text.to_string());
-    };
-    progressive_line(
-        line,
-        lines.get(idx + 1).map(|next| next.start_ms),
-        app.player.position.as_millis() as u64,
-        app,
-    )
-}
-
-fn progressive_line(
-    line: &LyricLine,
-    next_start_ms: Option<u64>,
-    pos_ms: u64,
-    app: &AppState,
-) -> Line<'static> {
-    let text = line.text.as_str();
-    if text.is_empty() {
-        return Line::default();
-    }
-
-    // The current line owns the interval until the next line, matching Pigma's
-    // smooth character-by-character highlight even when YRC word timing is absent.
-    let word_end_ms = line.words.iter().map(|word| word.end_ms).max();
-    let end_ms = next_start_ms
-        .filter(|next| *next > line.start_ms)
-        .or_else(|| word_end_ms.filter(|end| *end > line.start_ms))
-        .unwrap_or_else(|| line.start_ms.saturating_add(4_000));
-    let duration_ms = end_ms.saturating_sub(line.start_ms).max(1);
-    let progress =
-        (pos_ms.saturating_sub(line.start_ms) as f32 / duration_ms as f32).clamp(0.0, 1.0);
-    let total_chars = text.chars().count();
-    let split_at = ((total_chars as f32) * progress).floor() as usize;
-
-    let mut rendered = Line::default();
-    for (index, (byte_start, ch)) in text.char_indices().enumerate() {
-        let byte_end = byte_start + ch.len_utf8();
-        let style = if index < split_at {
-            Style::default().fg(app.theme.color_accent2())
-        } else if index == split_at {
-            Style::default()
-                .fg(Color::White)
-                .bg(app.theme.color_accent())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(app.theme.color_subtext())
-        };
-        rendered.push_span(Span::styled(text[byte_start..byte_end].to_string(), style));
-    }
-    rendered.alignment(Alignment::Center)
 }
 
 fn current_lyric_index(lines: &[LyricLine], pos_ms: u64) -> usize {

@@ -1,7 +1,19 @@
 [package]
 name = "ncmora"
-version = "0.6.0"
+version = "0.6.2"
 edition = "2024"
+rust-version = "1.95"
+description = "A Rust TUI client for NetEase Cloud Music"
+license = "AGPL-3.0-only"
+repository = "https://github.com/NatsumiAi/ncmora"
+homepage = "https://github.com/NatsumiAi/ncmora"
+readme = "README.md"
+keywords = ["tui", "music", "netease", "player"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[workspace]
+members = [".", "ncm-api-rs"]
+resolver = "3"
 
 [features]
 default = ["easter-egg"]
@@ -29,13 +41,16 @@ compio = { version = "0.19", features = ["macros", "time"] }
 http = "1.4"
 see = { git = "https://github.com/compio-rs/see" }
 unicode-width = "0.2"
-rodio = { git = "https://github.com/RustAudio/rodio", default-features = false, features = ["playback", "symphonia"] }
+rodio = { git = "https://github.com/RustAudio/rodio", default-features = false, features = ["playback", "symphonia", "pipewire"] }
 
 # 标准 较高 极高 mp3
 # 无损 Hi-Res 高清环绕声 flac !VIP
 # 沉浸环绕声 杜比全景声 超清母带 flac !SVIP
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac"] }
 lofty = "0.25.4"
+
+[build-dependencies]
+embed-resource = "3.0.11"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -58,6 +73,3 @@ codegen-units = 1
 panic = "abort"
 lto = true
 strip = true
-
-[build-dependencies]
-embed-resource = "3.0.11"

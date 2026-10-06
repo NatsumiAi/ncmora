@@ -14,7 +14,7 @@
 
 use crate::tmplayer::app::state::AppState;
 use crate::tmplayer::audio::pcm_tap::PcmSnapshot;
-use crate::tmplayer::ui::theme::Theme;
+use crate::ui::theme::Theme;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -81,7 +81,7 @@ fn rasterize(scope: &mut ScopeScratch, w_cells: usize, h_cells: usize, gain: f32
 
     let window = window_frames(snapshot);
     if window < 2 {
-        // 环里还没有样本（无宿主、刚启动）。此时同样画居中直线，与落平后的
+        // 环里还没有样本（刚启动）。此时同样画居中直线，与落平后的
         // 静止态是同一幅画面，不是空白。
         draw_flat_line(grid, w_cells, h_cells);
         return;
@@ -307,7 +307,7 @@ fn mix(a: Color, b: Color, t: f32) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tmplayer::ui::theme::{ColorCapability, ThemeName, ThemePalette};
+    use crate::ui::theme::{ColorCapability, Theme, ThemePalette};
 
     const RATE: u32 = 48_000;
 
@@ -462,7 +462,7 @@ mod tests {
         );
     }
 
-    /// 环里没有样本时（无宿主、刚启动）画的必须与落平后完全一致 —— 否则启动
+    /// 环里没有样本时（刚启动）画的必须与落平后完全一致 —— 否则启动
     /// 瞬间会闪一下空白，或停止后画面与启动态不符。
     #[test]
     fn no_samples_matches_settled_frame() {
@@ -482,7 +482,7 @@ mod tests {
 
     fn test_theme() -> Theme {
         Theme {
-            name: ThemeName::Frappe,
+            name: "frappe".to_string(),
             palette: ThemePalette {
                 text: (198, 208, 245),
                 subtext: (165, 173, 206),

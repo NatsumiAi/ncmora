@@ -207,7 +207,6 @@ async fn run_startup_init(
                 });
             }
             Some(Ok(false)) => {
-                let _ = session::clear_cookie();
                 let _ = tx.send(StartupEvent::SessionRejected);
             }
             Some(Err(err)) => {
@@ -297,14 +296,14 @@ async fn run_startup_init(
 impl App {
     /// 排空启动初始化事件并逐条应用。
     pub(super) async fn tick_startup_init(&mut self) {
-        for event in self.startup.drain() {
+        for event in self.startup.init.drain() {
             self.apply_startup_event(event).await;
         }
 
         // 兜底：任务若没落 `Done` 就结束（事件通道断开），加载页也必须能出去。
-        if self.startup.finished()
+        if self.startup.init.finished()
             && self.page == Page::Loading
-            && !self.startup_loading_complete_requested
+            && !self.startup.complete_requested
         {
             self.finish_startup_loading();
         }
@@ -312,20 +311,23 @@ impl App {
 
     async fn apply_startup_event(&mut self, event: StartupEvent) {
         match event {
-            StartupEvent::Step { done } => self.startup.mark_done(done),
+            StartupEvent::Step { done } => self.startup.init.mark_done(done),
             StartupEvent::SessionRestored { cookie } => {
                 self.session_cookie = cookie;
-                self.startup_loading_target = Page::Home;
+                self.startup.target = Page::Home;
             }
             StartupEvent::SessionRejected => {
-                // 存档的清除在后台上报「失效」时就已完成。
-                self.startup_loading_target = Page::Login;
-                self.startup.collapse_to_done();
+                let _ = self.persistence.enqueue_latest(
+                    crate::data::persistence::PersistenceKey::Session,
+                    session::clear_cookie,
+                );
+                self.startup.target = Page::Login;
+                self.startup.init.collapse_to_done();
             }
             StartupEvent::SessionUnavailable => {
                 // 存档保持不动：下次启动还有机会直接恢复登录。
-                self.startup_loading_target = Page::Login;
-                self.startup.collapse_to_done();
+                self.startup.target = Page::Login;
+                self.startup.init.collapse_to_done();
             }
             StartupEvent::Vip { unlocked } => self.apply_vip_audio_access(unlocked),
             StartupEvent::Account(profile) => self.apply_account_profile(profile),
@@ -342,7 +344,7 @@ impl App {
                 if self.session_cookie.is_some() {
                     // 播放记忆恢复要写 App 状态，留在主循环做，算作最后一步。
                     self.try_restore_playback_memory().await;
-                    self.startup.complete_step();
+                    self.startup.init.complete_step();
                 }
                 self.finish_startup_loading();
             }

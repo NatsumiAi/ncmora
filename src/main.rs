@@ -89,6 +89,7 @@ impl tmplayer::HostPlaybackBridge for AppFullscreenBridge<'_> {
 
         if snapshot.now_playing.is_none() {
             return tmplayer::HostPlaybackSnapshot {
+                playlist_cover: snapshot.playlist_cover,
                 playlist: Vec::new(),
                 current_index: None,
                 current_track: None,
@@ -134,6 +135,7 @@ impl tmplayer::HostPlaybackBridge for AppFullscreenBridge<'_> {
         tmplayer::HostPlaybackSnapshot {
             playlist,
             current_index: snapshot.current_index,
+            playlist_cover: snapshot.playlist_cover,
             current_track,
             current_liked: snapshot.now_playing_liked,
             state: match snapshot.state {
@@ -151,11 +153,19 @@ impl tmplayer::HostPlaybackBridge for AppFullscreenBridge<'_> {
         }
     }
 
-    fn config_snapshot(&self) -> tmplayer::HostConfigSync {
+    fn config_signature(&self) -> u64 {
+        self.app.fullscreen_config_signature()
+    }
+
+    fn vip_audio_unlocked(&self) -> bool {
+        self.app.vip_audio_unlocked
+    }
+
+    fn config_snapshot(&self) -> Config {
         self.app.fullscreen_config_snapshot()
     }
 
-    async fn apply_config_sync(&mut self, config: tmplayer::HostConfigSync) {
+    async fn apply_config_sync(&mut self, config: Config) {
         self.app.fullscreen_apply_config_sync(config).await;
     }
 
@@ -204,18 +214,18 @@ pub struct Storage {
 fn try_get_storage() -> Option<Storage> {
     let app = "ncmora";
     let base = BaseDirs::new()?;
-    let cache = base.cache_dir().join(&app);
-    let config = base.config_dir().join(&app);
+    let cache = base.cache_dir().join(app);
+    let config = base.config_dir().join(app);
     let storage = Storage { cache, config };
     Some(storage)
 }
 
 fn stroage_or_abort() -> Storage {
     let msg = "Failed to initialize workdir, abort!";
-    try_get_storage().expect(&msg)
+    try_get_storage().expect(msg)
 }
 
-pub static STORAGE: LazyLock<Storage> = LazyLock::new(|| stroage_or_abort());
+pub static STORAGE: LazyLock<Storage> = LazyLock::new(stroage_or_abort);
 
 /// 原生音频库（ALSA/PipeWire 等）绕过 log crate 直接写 stderr，而 TUI 画面走 stdout，
 /// 两者指向同一个 tty 时告警就会糊在画面上。这里把 fd 2 整体引向文件。
@@ -289,14 +299,22 @@ async fn init_logger() -> Result<()> {
 #[compio::main]
 async fn main() -> Result<()> {
     init_logger().await?;
-    let config = Config::load_or_default()?;
-    let theme = ThemeLoader::load(&config.theme).unwrap_or_default();
-    let mut app = App::new(config, theme)?;
+    let config = compio::runtime::spawn_blocking(Config::load_or_default)
+        .await
+        .map_err(|_| anyhow::anyhow!("configuration load task panicked"))??;
+    let theme = ThemeLoader::load_async(&config.theme)
+        .await
+        .unwrap_or_default();
+    let mut app = App::new(config, theme).await?;
 
     let mut terminal = init_terminal()?;
     let run_result = run_app(&mut terminal, &mut app).await;
-    restore_terminal(&mut terminal)?;
-    run_result
+    let restore_result = restore_terminal(&mut terminal);
+    app.suspend_main_cava_for_fullscreen().await;
+    let persistence_result = app.flush_persistence();
+    run_result?;
+    restore_result?;
+    persistence_result
 }
 
 fn init_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -304,7 +322,9 @@ fn init_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
-    Ok(Terminal::new(backend)?)
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+    Ok(terminal)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
@@ -375,7 +395,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut Ap
         app.tick().await;
 
         if app.consume_fullscreen_launch_request() {
-            let bootstrap = app.build_fullscreen_bootstrap().await;
+            let bootstrap = app.build_fullscreen_bootstrap();
             launch_tmplayer_fullscreen(terminal, app, bootstrap).await?;
             continue;
         }
@@ -421,16 +441,16 @@ async fn launch_tmplayer_fullscreen(
     bootstrap: tmplayer::FullscreenBootstrap,
 ) -> Result<()> {
     play_fullscreen_transition(terminal, app, true).await?;
-    app.suspend_main_cava_for_fullscreen();
+    app.suspend_main_cava_for_fullscreen().await;
     restore_terminal(terminal)?;
 
     let config = app.config.clone();
     let mut bridge = AppFullscreenBridge { app };
-    let (exit, status_text) =
-        match tmplayer::run_fullscreen(&config, bootstrap, Some(&mut bridge)).await {
-            Ok(exit) => (Some(exit), String::new()),
-            Err(err) => (None, format!("TMPlayer 运行失败: {}", err)),
-        };
+    let (exit, status_text) = match tmplayer::run_fullscreen(&config, bootstrap, &mut bridge).await
+    {
+        Ok(exit) => (Some(exit), String::new()),
+        Err(err) => (None, format!("TMPlayer 运行失败: {}", err)),
+    };
 
     *terminal = init_terminal()?;
     app.resume_main_cava_after_fullscreen();

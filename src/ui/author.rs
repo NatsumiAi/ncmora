@@ -93,7 +93,7 @@ fn draw_author_header(frame: &mut Frame, app: &mut App, area: Rect) {
         let bg_style = surface_bg_style(app);
         let draw_ascii = app.draw_ascii();
         let text_style = Style::default().fg(app.theme.color_text());
-        app.author.cover.render(
+        app.browse.author.cover.render(
             frame,
             &mut app.graphics_picker,
             cover_area,
@@ -103,10 +103,10 @@ fn draw_author_header(frame: &mut Frame, app: &mut App, area: Rect) {
         );
     }
 
-    let hot_count = app.author.hot_songs.len();
-    let album_count = app.author.albums.len();
-    let ep_count = app.author.eps.len();
-    let single_count = app.author.singles.len();
+    let hot_count = app.browse.author.hot_songs.len();
+    let album_count = app.browse.author.albums.len();
+    let ep_count = app.browse.author.eps.len();
+    let single_count = app.browse.author.singles.len();
 
     let info_area = cols[1].inner(ratatui::layout::Margin {
         horizontal: 1,
@@ -127,8 +127,11 @@ fn draw_author_header(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let description_line_limit =
-        intro_line_limit(&app.author.description, info_area.width, cover_line_limit);
+    let description_line_limit = intro_line_limit(
+        &app.browse.author.description,
+        info_area.width,
+        cover_line_limit,
+    );
     let available_extra = info_area.height.saturating_sub(3);
     let spacer_height = u16::from(description_line_limit > 0 && available_extra >= 2);
     let description_height = available_extra
@@ -138,7 +141,7 @@ fn draw_author_header(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut cursor_y = info_area.y;
 
     frame.render_widget(
-        Paragraph::new(app.author.title.as_str()).style(
+        Paragraph::new(app.browse.author.title.as_str()).style(
             Style::default()
                 .fg(app.theme.color_text())
                 .add_modifier(Modifier::BOLD),
@@ -154,7 +157,7 @@ fn draw_author_header(frame: &mut Frame, app: &mut App, area: Rect) {
 
     if cursor_y < info_area.y + info_area.height {
         frame.render_widget(
-            Paragraph::new(app.author.artist.as_str())
+            Paragraph::new(app.browse.author.artist.as_str())
                 .style(Style::default().fg(app.theme.color_subtext())),
             Rect {
                 x: info_area.x,
@@ -172,7 +175,7 @@ fn draw_author_header(frame: &mut Frame, app: &mut App, area: Rect) {
 
     if description_height > 0 && cursor_y < info_area.y + info_area.height {
         frame.render_widget(
-            Paragraph::new(app.author.description.as_str())
+            Paragraph::new(app.browse.author.description.as_str())
                 .style(Style::default().fg(app.theme.color_text()))
                 .wrap(Wrap { trim: true }),
             Rect {
@@ -228,13 +231,13 @@ fn draw_author_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
     let col_step = tile_w.saturating_add(2);
     let row_step = tile_h.saturating_add(1);
     let columns = usize::from((inner.width / col_step).max(1));
-    app.author.set_columns(columns);
+    app.browse.author.set_columns(columns);
 
     let visible_rows = usize::from((inner.height / row_step).max(1));
-    app.author.set_visible_rows(visible_rows);
-    let row_offset = app.author.effective_scroll_row_offset();
+    app.browse.author.set_visible_rows(visible_rows);
+    let row_offset = app.browse.author.effective_scroll_row_offset();
 
-    for index in 0..app.author.tiles.len() {
+    for index in 0..app.browse.author.tiles.len() {
         let row = index / columns;
         if row < row_offset {
             continue;
@@ -267,7 +270,7 @@ fn draw_author_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
             index,
         );
 
-        let focused = index == app.author.focused_idx;
+        let focused = index == app.browse.author.focused_idx;
         let tile_bg = if focused {
             app.theme.color_surface()
         } else {
@@ -324,7 +327,7 @@ fn draw_author_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 Style::default().fg(app.theme.color_text())
             };
-            app.author.tiles[index].cover.render(
+            app.browse.author.tiles[index].cover.render(
                 frame,
                 &mut app.graphics_picker,
                 cover_rect,
@@ -335,7 +338,7 @@ fn draw_author_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
         }
 
         let (title, subtitle) = {
-            let tile = &app.author.tiles[index];
+            let tile = &app.browse.author.tiles[index];
             (tile.title.clone(), tile.subtitle.clone())
         };
 

@@ -1,25 +1,19 @@
 use crate::app::{SIDEBAR_ANIM_DURATION, cubic_bezier_y};
 use crate::data::config::Language;
+use crate::data::config::{Config, VisualizeMode};
 use crate::tmplayer::audio::smoother::Ema;
-use crate::tmplayer::data::config::Config;
 use crate::tmplayer::data::playlist::Playlist;
-use crate::tmplayer::playback::remote_fetch::TrackKey;
 use crate::tmplayer::render::cover_cache::CoverCache;
 use crate::tmplayer::render::cover_cache::CoverKey;
 use crate::tmplayer::render::cover_renderer::render_cover_ascii;
-use crate::tmplayer::ui::theme::Theme;
+use crate::ui::theme::Theme;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlayMode {
-    Idle,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackState {
@@ -34,28 +28,6 @@ pub enum RepeatMode {
     Shuffle,
     LoopAll,
     LoopOne,
-}
-
-impl RepeatMode {
-    pub fn next(self) -> Self {
-        match self {
-            RepeatMode::Sequence => RepeatMode::Shuffle,
-            RepeatMode::Shuffle => RepeatMode::LoopAll,
-            RepeatMode::LoopAll => RepeatMode::LoopOne,
-            RepeatMode::LoopOne => RepeatMode::Sequence,
-        }
-    }
-
-    pub fn symbol(self) -> &'static str {
-        match self {
-            // 需求：使用 Nerd Font 图标
-            // 顺序播放 ，随机播放 ，列表循环 ，单曲循环 
-            RepeatMode::Sequence => "",
-            RepeatMode::Shuffle => "",
-            RepeatMode::LoopAll => "",
-            RepeatMode::LoopOne => "",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -109,7 +81,6 @@ pub struct TrackMetadata {
     pub duration: Duration,
     pub cover: Option<Vec<u8>>,
     pub cover_hash: Option<u64>,
-    pub cover_folder: Option<PathBuf>,
     pub lyrics: Option<Vec<LyricLine>>,
 }
 
@@ -120,7 +91,6 @@ pub struct CoverSnapshot {
     pub album: String,
     pub cover: Option<Vec<u8>>,
     pub cover_hash: Option<u64>,
-    pub cover_folder: Option<PathBuf>,
 }
 
 impl From<&TrackMetadata> for CoverSnapshot {
@@ -131,7 +101,6 @@ impl From<&TrackMetadata> for CoverSnapshot {
             album: t.album.clone(),
             cover: t.cover.clone(),
             cover_hash: t.cover_hash,
-            cover_folder: t.cover_folder.clone(),
         }
     }
 }
@@ -145,19 +114,19 @@ pub struct CoverAnim {
     pub started_at: Instant,
     pub duration: Duration,
 }
-
-#[derive(Debug, Clone)]
-pub struct PlaylistAlbumAnim {
-    pub from_cover: Option<Vec<u8>>,
-    pub from_hash: Option<u64>,
-    pub from_folder: Option<PathBuf>,
-    pub to_cover: Option<Vec<u8>>,
-    pub to_hash: Option<u64>,
-    pub to_folder: Option<PathBuf>,
-    // -1 => slide left (next), +1 => slide right (prev)
-    pub dir: i8,
-    pub started_at: Instant,
-    pub duration: Duration,
+impl CoverAnim {
+    pub fn slide_offsets(&self, width: u16, now: Instant) -> (i16, i16) {
+        let width = width.min(i16::MAX as u16) as i16;
+        let progress = (now.saturating_duration_since(self.started_at).as_secs_f32()
+            / self.duration.as_secs_f32())
+        .clamp(0.0, 1.0);
+        let offset = (progress * f32::from(width)).round() as i16;
+        if self.dir < 0 {
+            (-offset, width - offset)
+        } else {
+            (offset, -width + offset)
+        }
+    }
 }
 
 impl Default for TrackMetadata {
@@ -169,7 +138,6 @@ impl Default for TrackMetadata {
             duration: Duration::from_secs(0),
             cover: None,
             cover_hash: None,
-            cover_folder: None,
             lyrics: None,
         }
     }
@@ -327,7 +295,6 @@ impl ScopeGain {
 
 #[derive(Debug)]
 pub struct PlayerState {
-    pub mode: PlayMode,
     pub playback: PlaybackState,
     pub position: Duration,
     pub volume: f32,
@@ -341,7 +308,6 @@ pub struct PlayerState {
 impl Default for PlayerState {
     fn default() -> Self {
         Self {
-            mode: PlayMode::Idle,
             playback: PlaybackState::Stopped,
             position: Duration::from_secs(0),
             volume: 0.0,
@@ -359,23 +325,14 @@ pub enum Overlay {
     Playlist,
     SettingsModal,
     BarSettingsModal,
-    LocalAudioSettingsModal,
     LyricsSettingsModal,
     /// 「下载设置」页：音质 / 路径 / 恢复默认。
     DownloadSettingsModal,
     /// 下载路径的行内编辑（独立 overlay，字符按键因此直接进输入框）。
     DownloadPathEditModal,
     AboutModal,
-    AcoustIdModal,
     HelpModal,
     EqModal,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalFolderKind {
-    Plain,
-    Album,
-    MultiAlbum,
 }
 
 #[derive(Debug)]
@@ -389,13 +346,14 @@ pub struct AppState {
     pub playlist: Playlist,
 
     // Playlist overlay browsing list.
-    // For MultiAlbum, this can differ from `playlist` (playback queue).
     pub playlist_view: Playlist,
     pub spectrum: SpectrumData,
     pub spectrum_bar_smoother: Ema,
+    pub spectrum_left_smoother: Ema,
+    pub spectrum_right_smoother: Ema,
     pub spectrum_render_grid: Vec<Vec<char>>,
 
-    /// 宿主播放链路上的 PCM 抽头环；无宿主（独立全屏）时为 None。
+    /// 宿主播放链路上的 PCM 抽头环；进入全屏事件循环时绑定。
     pub pcm_ring: Option<Arc<crate::tmplayer::audio::pcm_tap::PcmRing>>,
     /// 示波器的复用缓冲，渲染路径因此零分配。
     pub scope: crate::tmplayer::render::oscilloscope_renderer::ScopeScratch,
@@ -405,20 +363,20 @@ pub struct AppState {
     pub vector: crate::tmplayer::render::vector_renderer::VectorState,
 
     pub cover_cache: RefCell<CoverCache>,
-    pub cover_dominant_rgb_cache: RefCell<HashMap<u64, (u8, u8, u8)>>,
 
     cover_render_tx: Sender<CoverRenderRequest>,
     cover_render_rx: Receiver<CoverRenderResult>,
     cover_render_inflight: RefCell<HashSet<CoverKey>>,
-    remote_last_sent: Option<TrackKey>,
 
     pub overlay: Overlay,
 
     pub settings_selected: usize,
     pub bar_settings_selected: usize,
-    pub local_audio_settings_selected: usize,
     pub lyrics_settings_selected: usize,
     pub help_keybind_selected: usize,
+    /// 按键提示弹窗的滚动偏移：与主应用/应用内列表一致，仅当焦点行越过
+    /// 可视窗口边界时才挪动。
+    pub help_keybind_scroll: usize,
     pub vip_audio_unlocked: bool,
 
     /// 信息区下载图标状态（宿主每帧同步）。
@@ -435,25 +393,9 @@ pub struct AppState {
     pub eq: EqSettings,
     pub eq_selected: usize,
 
-    pub acoustid_input: String,
-
-    // Folder that backs the *current playback queue* (contains audio files).
-    pub local_folder: Option<PathBuf>,
-
-    pub local_folder_kind: LocalFolderKind,
-
-    // For MultiAlbum: all album folders under `local_root_folder`.
-    pub local_album_folders: Vec<PathBuf>,
-    // Which album folder is currently being *viewed* in the playlist overlay.
-    pub local_view_album_index: usize,
-    pub local_view_album_folder: Option<PathBuf>,
-
-    // Album cover shown in the playlist overlay's top area.
-    pub local_view_album_cover: Option<Vec<u8>>,
-    pub local_view_album_cover_hash: Option<u64>,
-    pub ncm_cover_cache_dir: Option<PathBuf>,
-
-    pub playlist_album_anim: Option<PlaylistAlbumAnim>,
+    // Host-provided playlist cover shown in the playlist overlay.
+    pub playlist_cover: Option<Vec<u8>>,
+    pub playlist_cover_hash: Option<u64>,
 
     pub cover_anim: Option<CoverAnim>,
     pub pending_system_cover_anim: Option<(CoverSnapshot, i8, Instant)>,
@@ -489,7 +431,6 @@ struct CoverRenderRequest {
     key: CoverKey,
     bytes: Vec<u8>,
     placeholder: char,
-    persist_folder: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -518,15 +459,6 @@ impl AppState {
                 let ascii = render_cover_ascii(&req.bytes, req.key.width, req.key.height)
                     .unwrap_or_else(|| fill_ascii(req.key.width, req.key.height, req.placeholder));
 
-                if let Some(folder) = req.persist_folder.as_deref() {
-                    let _ = crate::tmplayer::playback::local_player::write_cover_ascii_cache(
-                        folder,
-                        req.key.hash,
-                        req.key.width,
-                        req.key.height,
-                        &ascii,
-                    );
-                }
                 let _ = cover_render_res_tx.send(CoverRenderResult {
                     key: req.key,
                     ascii,
@@ -544,23 +476,23 @@ impl AppState {
             playlist_view: Playlist::default(),
             spectrum: SpectrumData::default(),
             spectrum_bar_smoother: Ema::new(0.35, 64),
+            spectrum_left_smoother: Ema::new(0.35, 64),
+            spectrum_right_smoother: Ema::new(0.35, 64),
             spectrum_render_grid: Vec::new(),
             pcm_ring: None,
             scope: Default::default(),
             scope_gain: ScopeGain::default(),
             vector: Default::default(),
             cover_cache: RefCell::new(CoverCache::new(20)),
-            cover_dominant_rgb_cache: RefCell::new(HashMap::new()),
             cover_render_tx,
             cover_render_rx,
             cover_render_inflight: RefCell::new(HashSet::new()),
-            remote_last_sent: None,
             overlay: Overlay::None,
             settings_selected: 0,
             bar_settings_selected: 0,
-            local_audio_settings_selected: 0,
             lyrics_settings_selected: 0,
             help_keybind_selected: 0,
+            help_keybind_scroll: 0,
             vip_audio_unlocked: false,
             download_state: crate::tmplayer::DownloadIconState::Hidden,
             download_phase_start: Instant::now(),
@@ -571,19 +503,8 @@ impl AppState {
 
             eq: EqSettings::default(),
             eq_selected: 0,
-
-            acoustid_input: String::new(),
-
-            local_folder: None,
-            local_folder_kind: LocalFolderKind::Plain,
-            local_album_folders: Vec::new(),
-            local_view_album_index: 0,
-            local_view_album_folder: None,
-            local_view_album_cover: None,
-            local_view_album_cover_hash: None,
-            ncm_cover_cache_dir: None,
-
-            playlist_album_anim: None,
+            playlist_cover: None,
+            playlist_cover_hash: None,
 
             cover_anim: None,
             pending_system_cover_anim: None,
@@ -601,19 +522,6 @@ impl AppState {
             playlist_slide_started_at: None,
             last_frame: Instant::now(),
         }
-    }
-
-    pub fn reset_remote_fetch_state(&mut self) {
-        self.remote_last_sent = None;
-    }
-
-    pub fn cover_dominant_rgb(&self, hash: u64, bytes: &[u8]) -> Option<(u8, u8, u8)> {
-        if let Some(rgb) = self.cover_dominant_rgb_cache.borrow().get(&hash).copied() {
-            return Some(rgb);
-        }
-        let rgb = crate::tmplayer::render::dominant_color::dominant_rgb_from_image_bytes(bytes)?;
-        self.cover_dominant_rgb_cache.borrow_mut().insert(hash, rgb);
-        Some(rgb)
     }
 
     pub fn set_toast(&mut self, msg: impl Into<String>) {
@@ -644,13 +552,7 @@ impl AppState {
             crate::app::download::resolve_download_root(self.config.download_path.as_deref());
     }
 
-    pub fn queue_cover_ascii_render(
-        &self,
-        key: CoverKey,
-        bytes: &[u8],
-        placeholder: char,
-        persist_folder: Option<PathBuf>,
-    ) {
+    pub fn queue_cover_ascii_render(&self, key: CoverKey, bytes: &[u8], placeholder: char) {
         if self.cover_cache.borrow().contains(key) {
             return;
         }
@@ -662,7 +564,6 @@ impl AppState {
             key,
             bytes: bytes.to_vec(),
             placeholder,
-            persist_folder,
         });
     }
 
@@ -684,28 +585,22 @@ impl AppState {
             }
         }
 
-        if let Some(anim) = &self.cover_anim {
-            if now.duration_since(anim.started_at) >= anim.duration {
-                self.cover_anim = None;
-            }
+        if let Some(anim) = &self.cover_anim
+            && now.duration_since(anim.started_at) >= anim.duration
+        {
+            self.cover_anim = None;
         }
 
-        if let Some(anim) = &self.playlist_album_anim {
-            if now.duration_since(anim.started_at) >= anim.duration {
-                self.playlist_album_anim = None;
-            }
+        if let Some((_, _, at)) = &self.pending_system_cover_anim
+            && now.duration_since(*at) > Duration::from_secs(2)
+        {
+            self.pending_system_cover_anim = None;
         }
 
-        if let Some((_, _, at)) = &self.pending_system_cover_anim {
-            if now.duration_since(*at) > Duration::from_secs(2) {
-                self.pending_system_cover_anim = None;
-            }
-        }
-
-        if let Some((_, at)) = &self.toast {
-            if now.duration_since(*at) > Duration::from_millis(1500) {
-                self.toast = None;
-            }
+        if let Some((_, at)) = &self.toast
+            && now.duration_since(*at) > Duration::from_millis(1500)
+        {
+            self.toast = None;
         }
 
         self.tick_playlist_slide(now);
@@ -713,7 +608,7 @@ impl AppState {
             .tick(self.player.playback == PlaybackState::Playing, dt);
 
         self.vector.tick(
-            self.config.visualize == crate::tmplayer::data::config::VisualizeMode::Vector,
+            self.config.visualize == VisualizeMode::Vector,
             self.player.playback == PlaybackState::Playing,
             dt,
         );
@@ -777,10 +672,7 @@ impl AppState {
             return true;
         }
 
-        if self.cover_anim.is_some()
-            || self.playlist_album_anim.is_some()
-            || self.pending_system_cover_anim.is_some()
-        {
+        if self.cover_anim.is_some() || self.pending_system_cover_anim.is_some() {
             return true;
         }
 
@@ -801,7 +693,7 @@ impl AppState {
     }
 
     pub fn active_render_fps(&self) -> u32 {
-        use crate::tmplayer::data::config::VisualizeMode;
+        use crate::data::config::VisualizeMode;
 
         let base = self.config.ui_fps.clamp(10, 60);
         // 频谱靠 cava 的拖尾衰减，示波器靠自己的收尾动画：暂停后两者都还在动。
@@ -840,22 +732,18 @@ impl AppState {
 
     /// 示波器的包络动画（起振或回落）正在进行，需要持续重绘把它推完。
     fn scope_is_animating(&self) -> bool {
-        matches!(
-            self.config.visualize,
-            crate::tmplayer::data::config::VisualizeMode::Oscilloscope
-        ) && self.scope_gain.is_animating()
+        matches!(self.config.visualize, VisualizeMode::Oscilloscope)
+            && self.scope_gain.is_animating()
     }
 
     /// 矢量模式的快动画（分散 / 回位）进行中，需要持续重绘把它推完。
     fn vector_is_animating(&self) -> bool {
-        self.config.visualize == crate::tmplayer::data::config::VisualizeMode::Vector
-            && self.vector.is_animating()
+        self.config.visualize == VisualizeMode::Vector && self.vector.is_animating()
     }
 
     /// 矢量模式停稳后的尘埃按 Astra Sparkle 持续明灭，暂停下也要维持基础帧率重绘。
     fn vector_is_floating(&self) -> bool {
-        self.config.visualize == crate::tmplayer::data::config::VisualizeMode::Vector
-            && self.vector.is_floating()
+        self.config.visualize == VisualizeMode::Vector && self.vector.is_floating()
     }
 
     pub fn start_cover_anim(
@@ -907,7 +795,7 @@ mod tests {
                 fall = 0.0;
             }
             prev = out;
-            out = mem * k + out;
+            out += mem * k;
             mem = out;
             out_series.push(out * (1.0 - k) / raw);
         }

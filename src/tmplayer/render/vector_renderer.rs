@@ -32,7 +32,7 @@
 use crate::tmplayer::app::state::AppState;
 use crate::tmplayer::audio::pcm_tap::PcmSnapshot;
 use crate::tmplayer::render::oscilloscope_renderer::{braille_bit, set_pixel};
-use crate::tmplayer::ui::theme::Theme;
+use crate::ui::theme::Theme;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
@@ -248,6 +248,12 @@ impl VectorState {
         self.observed_level = level;
         self.w_cells = w_cells;
         self.h_cells = h_cells;
+        // Calibrate before the first rasterization with real samples. The
+        // event loop ticks before it draws, so waiting for the next tick would
+        // render one frame with the floor denominator instead of this peak.
+        if level.is_none() || self.need_recalib || self.scale_peak == 0.0 {
+            self.update_scale_reference(level.unwrap_or(0.0));
+        }
     }
 
     /// 快动画（分散 / 聚集回归）进行中：需要 `spectrum_hz` 高帧率推完。
@@ -1154,6 +1160,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn first_vector_frame_uses_observed_peak_without_a_prior_tick() {
+        for amplitude in [0.01_f32, 0.8] {
+            let mut immediate = VectorState {
+                snapshot: synth(882, circle(amplitude, 110.0, std::f32::consts::FRAC_PI_2)),
+                ..Default::default()
+            };
+            immediate.observe(window_level(&immediate.snapshot), 40, 20);
+            immediate.rasterize();
+            let initialized = circle_state(amplitude);
+            assert_eq!(
+                lit_dots(&immediate),
+                lit_dots(&initialized),
+                "first frame must use the same calibrated scale as normal playback"
+            );
+            immediate.observe(None, 40, 20);
+            immediate.snapshot = synth(882, circle(0.3, 110.0, std::f32::consts::FRAC_PI_2));
+            immediate.observe(window_level(&immediate.snapshot), 40, 20);
+            immediate.rasterize();
+            assert!(
+                (immediate.scale_peak - 0.3).abs() < 1.0e-3,
+                "new PCM samples after reset recalibrate before drawing"
+            );
+        }
+    }
+
     /// 缩放基准 = 本曲开播以来的最大峰值：只增不减；更响的段落把基准
     /// 上调、更安静的段落不拉低；环重置→样本重现（切歌）后从零重新累积。
     #[test]
@@ -1440,7 +1472,7 @@ mod tests {
         let st = circle_state(0.8);
         assert_eq!(st.phase, Phase::Active);
         assert!(st.grid.iter().any(|&bits| bits != 0));
-        assert!(st.pixel_alpha.iter().any(|&alpha| alpha == 1.0));
+        assert!(st.pixel_alpha.contains(&1.0));
     }
 
     /// 粒子上限：高密度图形孵化时按步长抽样，粒子数不超过上限。
@@ -1473,7 +1505,7 @@ mod tests {
             .filter(|p| !matches!(p.twinkle, Twinkle::Dying { .. }))
             .count();
         assert!(
-            kept <= MAX_PARTICLES && kept >= MAX_PARTICLES * 9 / 10,
+            (MAX_PARTICLES * 9 / 10..=MAX_PARTICLES).contains(&kept),
             "抽样保留 {kept} 应接近且不超过上限"
         );
         assert_eq!(
@@ -1645,11 +1677,11 @@ mod tests {
     /// 面板底色的中点插值，全可见粒子与示波器同色。
     #[test]
     fn fading_particles_blend_colors_toward_background() {
-        use crate::tmplayer::ui::theme::{ColorCapability, Theme, ThemeName, ThemePalette};
+        use crate::ui::theme::{ColorCapability, Theme, ThemePalette};
         use ratatui::buffer::Buffer;
 
         let theme = Theme {
-            name: ThemeName::System,
+            name: "system".to_string(),
             capability: ColorCapability::TrueColor,
             palette: ThemePalette {
                 text: (200, 200, 200),
@@ -1711,11 +1743,11 @@ mod tests {
     /// 纯粒子格仍按自身透明度渐变。
     #[test]
     fn recovering_trace_cells_stay_full_bright() {
-        use crate::tmplayer::ui::theme::{ColorCapability, Theme, ThemeName, ThemePalette};
+        use crate::ui::theme::{ColorCapability, Theme, ThemePalette};
         use ratatui::buffer::Buffer;
 
         let theme = Theme {
-            name: ThemeName::System,
+            name: "system".to_string(),
             capability: ColorCapability::TrueColor,
             palette: ThemePalette {
                 text: (200, 200, 200),

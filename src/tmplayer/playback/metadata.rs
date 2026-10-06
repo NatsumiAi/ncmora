@@ -1,49 +1,4 @@
-use crate::tmplayer::app::state::{LyricLine, LyricWord};
-use std::collections::hash_map::DefaultHasher;
-use std::fs;
-use std::hash::{Hash, Hasher};
-use std::path::Path;
-
-const MAX_LOCAL_COVER_BYTES: u64 = 8 * 1024 * 1024;
-
-pub fn read_cover_from_folder(dir: &Path) -> Option<(Vec<u8>, u64)> {
-    // Common filenames used by many players.
-    // Keep this list small and predictable.
-    let candidates = [
-        "cover", "folder", "front", "album", "artwork", "Cover", "Folder", "Front",
-    ];
-    let exts = ["jpg", "jpeg", "png"];
-
-    for base in candidates {
-        for ext in exts {
-            let p = dir.join(format!("{base}.{ext}"));
-            if let Some(cover) = read_cover_file(&p) {
-                return Some(cover);
-            }
-        }
-    }
-    None
-}
-
-fn read_cover_file(path: &Path) -> Option<(Vec<u8>, u64)> {
-    let metadata = fs::metadata(path).ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
-
-    let len = metadata.len();
-    if len == 0 || len > MAX_LOCAL_COVER_BYTES {
-        return None;
-    }
-
-    let bytes = fs::read(path).ok()?;
-    if bytes.is_empty() {
-        return None;
-    }
-
-    let hash = hash_bytes(&bytes);
-    Some((bytes, hash))
-}
+use crate::tmplayer::app::state::LyricLine;
 
 pub fn parse_lrc(content: &str) -> Option<Vec<LyricLine>> {
     let mut out: Vec<LyricLine> = Vec::new();
@@ -112,158 +67,56 @@ pub fn parse_plain_lyrics(content: &str) -> Option<Vec<LyricLine>> {
     Some(out)
 }
 
-/// Parse NetEase YRC data. Each word is encoded as `[start,duration]text`.
-/// The parser is intentionally lenient because responses contain occasional
-/// metadata lines and may use either millisecond or centisecond timestamps.
-pub fn parse_yrc(content: &str) -> Option<Vec<LyricLine>> {
-    let mut out = Vec::new();
-    for raw in content.lines() {
-        let line_start = raw
-            .strip_prefix('[')
-            .and_then(|rest| rest.find(']').map(|end| &rest[..end]))
-            .and_then(|tag| {
-                tag.split_once(',')
-                    .and_then(|(start, _)| start.parse::<u64>().ok())
+/// Parse the newline-delimited JSON lyric format returned by NetEase's
+/// `lyric/new` endpoint. Each entry contains an absolute timestamp and text
+/// fragments in `c[].tx`.
+pub fn parse_netease_json_lyrics(content: &str) -> Option<Vec<LyricLine>> {
+    fn parse_entry(value: &serde_json::Value) -> Option<LyricLine> {
+        let start_ms = value.get("t").and_then(|value| {
+            value.as_u64().or_else(|| {
+                value
+                    .as_i64()
+                    .filter(|timestamp| *timestamp >= 0)
+                    .map(|timestamp| timestamp as u64)
             })
-            .unwrap_or(0);
-        let mut words = Vec::new();
-        let mut cursor = 0usize;
-        while let Some(open_rel) = raw[cursor..].find('(') {
-            let open = cursor + open_rel;
-            let Some(close_rel) = raw[open + 1..].find(')') else {
-                break;
-            };
-            let close = open + 1 + close_rel;
-            let mut fields = raw[open + 1..close].split(',');
-            let Some(offset_s) = fields.next() else {
-                cursor = close + 1;
-                continue;
-            };
-            let Some(duration_s) = fields.next() else {
-                cursor = close + 1;
-                continue;
-            };
-            let Ok(offset_ms) = offset_s.trim().parse::<u64>() else {
-                cursor = close + 1;
-                continue;
-            };
-            let Ok(duration_ms) = duration_s.trim().parse::<u64>() else {
-                cursor = close + 1;
-                continue;
-            };
-            let text_start = close + 1;
-            let text_end = raw[text_start..]
-                .find('(')
-                .map(|offset| text_start + offset)
-                .unwrap_or(raw.len());
-            let text = raw[text_start..text_end].to_string();
-            if !text.is_empty() {
-                words.push(LyricWord {
-                    start_ms: line_start.saturating_add(offset_ms),
-                    end_ms: line_start
-                        .saturating_add(offset_ms)
-                        .saturating_add(duration_ms),
-                    text,
-                });
-            }
-            cursor = text_end;
+        })?;
+        let text = value
+            .get("c")?
+            .as_array()?
+            .iter()
+            .filter_map(|fragment| fragment.get("tx").and_then(serde_json::Value::as_str))
+            .collect::<String>();
+        if text.trim().is_empty() {
+            return None;
         }
-
-        // Some servers return the simplified `[start,duration]word` form.
-        if words.is_empty() {
-            let mut fallback_cursor = 0usize;
-            while let Some(open_rel) = raw[fallback_cursor..].find('[') {
-                let open = fallback_cursor + open_rel;
-                let Some(close_rel) = raw[open + 1..].find(']') else {
-                    break;
-                };
-                let close = open + 1 + close_rel;
-                let Some((start_s, duration_s)) = raw[open + 1..close].split_once(',') else {
-                    fallback_cursor = close + 1;
-                    continue;
-                };
-                let (Ok(start_ms), Ok(duration_ms)) = (
-                    start_s.trim().parse::<u64>(),
-                    duration_s.trim().parse::<u64>(),
-                ) else {
-                    fallback_cursor = close + 1;
-                    continue;
-                };
-                let text_start = close + 1;
-                let text_end = raw[text_start..]
-                    .find('[')
-                    .map(|offset| text_start + offset)
-                    .unwrap_or(raw.len());
-                let text = raw[text_start..text_end].to_string();
-                if !text.is_empty() {
-                    words.push(LyricWord {
-                        start_ms,
-                        end_ms: start_ms.saturating_add(duration_ms),
-                        text,
-                    });
-                }
-                fallback_cursor = text_end;
-            }
-        }
-
-        if let Some(first) = words.first() {
-            let text = words
-                .iter()
-                .map(|word| word.text.as_str())
-                .collect::<String>();
-            out.push(LyricLine {
-                start_ms: first.start_ms,
-                text,
-                translation: None,
-                words,
-            });
-        }
+        Some(LyricLine {
+            start_ms,
+            text,
+            translation: None,
+            words: Vec::new(),
+        })
     }
+
+    let mut out: Vec<LyricLine> = match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(serde_json::Value::Array(entries)) => entries.iter().filter_map(parse_entry).collect(),
+        Ok(value @ serde_json::Value::Object(_)) => parse_entry(&value).into_iter().collect(),
+        _ => content
+            .lines()
+            .filter_map(|line| serde_json::from_str(line.trim()).ok())
+            .filter_map(|value| parse_entry(&value))
+            .collect(),
+    };
     if out.is_empty() {
-        None
-    } else {
-        out.sort_by_key(|line| line.start_ms);
-        Some(out)
+        return None;
     }
+    out.sort_by_key(|line| line.start_ms);
+    Some(out)
 }
 
-/// Attach translated lines and word timing to the regular LRC lines.
-pub fn enrich_lyrics(
-    mut lines: Vec<LyricLine>,
-    translated: Option<&str>,
-    yrc: Option<&str>,
-) -> Vec<LyricLine> {
-    if let Some(translated) = translated
-        .and_then(parse_lrc)
-        .or_else(|| translated.and_then(parse_plain_lyrics))
-    {
-        for (index, line) in lines.iter_mut().enumerate() {
-            let match_line = translated
-                .iter()
-                .find(|candidate| candidate.start_ms == line.start_ms)
-                .or_else(|| translated.get(index));
-            if let Some(match_line) = match_line {
-                if !match_line.text.trim().is_empty() && match_line.text != line.text {
-                    line.translation = Some(match_line.text.clone());
-                }
-            }
-        }
-    }
-
-    if let Some(word_lines) = yrc.and_then(parse_yrc) {
-        for (index, line) in lines.iter_mut().enumerate() {
-            let word_line = word_lines
-                .iter()
-                .min_by_key(|candidate| candidate.start_ms.abs_diff(line.start_ms))
-                .or_else(|| word_lines.get(index));
-            if let Some(word_line) = word_line {
-                if word_line.start_ms.abs_diff(line.start_ms) <= 5_000 {
-                    line.words = word_line.words.clone();
-                }
-            }
-        }
-    }
-    lines
+pub fn parse_lyrics(content: &str) -> Option<Vec<LyricLine>> {
+    parse_lrc(content)
+        .or_else(|| parse_netease_json_lyrics(content))
+        .or_else(|| parse_plain_lyrics(content))
 }
 
 fn parse_lrc_time_tag(tag: &str) -> Option<u64> {
@@ -306,39 +159,28 @@ fn parse_lrc_time_tag(tag: &str) -> Option<u64> {
     Some(mm * 60_000 + ss * 1_000 + ms)
 }
 
-fn hash_bytes(bytes: &[u8]) -> u64 {
-    let mut h = DefaultHasher::new();
-    bytes.hash(&mut h);
-    h.finish()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{enrich_lyrics, parse_lrc, parse_yrc};
+    use super::{parse_lyrics, parse_netease_json_lyrics};
 
     #[test]
-    fn parses_yrc_word_ranges() {
-        let lines = parse_yrc("[100,300]Hel[400,200]lo").expect("YRC line");
-        assert_eq!(lines[0].start_ms, 100);
-        assert_eq!(lines[0].text, "Hello");
-        assert_eq!(lines[0].words[0].end_ms, 400);
-        assert_eq!(lines[0].words[1].start_ms, 400);
-
-        let lines = parse_yrc("[1000,1000](0,400,0)Hel(400,600,0)lo").expect("YRC line");
-        assert_eq!(lines[0].text, "Hello");
-        assert_eq!(lines[0].words[0].start_ms, 1000);
-        assert_eq!(lines[0].words[1].end_ms, 2000);
+    fn parses_netease_json_line_lyrics() {
+        let content = concat!(
+            r#"{"t":0,"c":[{"tx":"作词："},{"tx":"柿崎ユウタ"}]}"#,
+            "\n",
+            r#"{"t":1000,"c":[{"tx":"作曲："},{"tx":"柿崎ユウタ"}]}"#,
+        );
+        let lines = parse_netease_json_lyrics(content).expect("JSON lyrics");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].start_ms, 0);
+        assert_eq!(lines[0].text, "作词：柿崎ユウタ");
+        assert_eq!(lines[1].start_ms, 1000);
+        assert_eq!(lines[1].text, "作曲：柿崎ユウタ");
     }
 
     #[test]
-    fn attaches_translation_and_word_timing() {
-        let base = parse_lrc("[00:01.00]Hello").expect("LRC line");
-        let enriched = enrich_lyrics(
-            base,
-            Some("[00:01.00]你好"),
-            Some("[1000,500]Hel[1500,500]lo"),
-        );
-        assert_eq!(enriched[0].translation.as_deref(), Some("你好"));
-        assert_eq!(enriched[0].words.len(), 2);
+    fn lyric_parser_preserves_plain_text_fallback() {
+        let lines = parse_lyrics("A plain lyric line").expect("plain lyrics");
+        assert_eq!(lines[0].text, "A plain lyric line");
     }
 }

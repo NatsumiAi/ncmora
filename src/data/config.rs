@@ -1,5 +1,5 @@
-use crate::data::assets;
-use anyhow::Result;
+use crate::data::{assets, atomic_file};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -40,7 +40,7 @@ impl GraphicsProtocol {
             GraphicsProtocol::Off => 0,
             GraphicsProtocol::Halfblocks => 1,
         };
-        let next = (current as i32 + delta).rem_euclid(Self::ALL.len() as i32) as usize;
+        let next = (current + delta).rem_euclid(Self::ALL.len() as i32) as usize;
         Self::ALL[next]
     }
 
@@ -57,7 +57,6 @@ pub struct Config {
     pub theme: String,
     pub ui_fps: u32,
     pub spectrum_hz: u32,
-    pub mpris_poll_ms: u64,
 
     #[serde(default = "default_visualize")]
     pub visualize: VisualizeMode,
@@ -74,12 +73,8 @@ pub struct Config {
     #[serde(default)]
     pub graphics_protocol: GraphicsProtocol,
 
-    #[serde(default = "default_kitty_cover_scale_percent")]
-    pub kitty_cover_scale_percent: u8,
-
     #[serde(default)]
     pub super_smooth_bar: bool,
-
     #[serde(default)]
     pub bars_gap: bool,
 
@@ -91,21 +86,6 @@ pub struct Config {
 
     #[serde(default)]
     pub bar_channel_reverse: bool,
-
-    #[serde(default)]
-    pub lyrics_cover_fetch: bool,
-
-    #[serde(default)]
-    pub lyrics_cover_download: bool,
-
-    #[serde(default)]
-    pub audio_fingerprint: bool,
-
-    #[serde(default)]
-    pub acoustid_api_key: String,
-
-    #[serde(default)]
-    pub resume_last_position: bool,
 
     #[serde(default)]
     pub default_opening_title: String,
@@ -443,10 +423,6 @@ fn default_album_border() -> bool {
     true
 }
 
-fn default_kitty_cover_scale_percent() -> u8 {
-    100
-}
-
 fn default_bar_number() -> BarNumber {
     BarNumber::Auto
 }
@@ -607,23 +583,16 @@ impl Default for Config {
             theme: "frappe".to_string(),
             ui_fps: 30,
             spectrum_hz: 30,
-            mpris_poll_ms: 100,
             visualize: default_visualize(),
             eq_bands_db: default_eq_bands_db(),
             transparent_background: true,
             album_border: default_album_border(),
             graphics_protocol: GraphicsProtocol::default(),
-            kitty_cover_scale_percent: default_kitty_cover_scale_percent(),
             super_smooth_bar: false,
             bars_gap: false,
             bar_number: default_bar_number(),
             bar_channels: default_bar_channels(),
             bar_channel_reverse: false,
-            lyrics_cover_fetch: false,
-            lyrics_cover_download: false,
-            audio_fingerprint: false,
-            acoustid_api_key: String::new(),
-            resume_last_position: false,
             default_opening_title: String::new(),
             language: default_language(),
             page_lyrics: default_page_lyrics(),
@@ -667,11 +636,14 @@ impl Default for Config {
 
 impl Config {
     pub fn load_or_default() -> Result<Self> {
-        let _ = assets::ensure_assets_ready();
-        let path = Self::default_path();
+        assets::ensure_assets_ready()?;
+        Self::load_from_path(&Self::default_path())
+    }
+
+    fn load_from_path(path: &std::path::Path) -> Result<Self> {
         if !path.exists() {
             let cfg = Self::default();
-            let _ = cfg.save();
+            cfg.save_to_path(path)?;
             return Ok(cfg);
         }
 
@@ -679,7 +651,8 @@ impl Config {
         let legacy_startup_folder_key_present = raw.contains(LEGACY_STARTUP_FOLDER_KEY_KEBAB)
             || raw.contains(LEGACY_STARTUP_FOLDER_KEY);
         let graphics_protocol_needs_save = graphics_protocol_needs_save(&raw);
-        let mut cfg: Config = toml::from_str(&raw).unwrap_or_default();
+        let mut cfg: Config =
+            toml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
 
         if cfg.ui_fps == 0 {
             cfg.ui_fps = 30;
@@ -688,13 +661,11 @@ impl Config {
             cfg.spectrum_hz = 30;
         }
 
-        // 手改配置可能越界，浮窗位置统一钳到内容区内。
         cfg.page_lyrics_pos_x = cfg.page_lyrics_pos_x.clamp(0.0, 1.0);
         cfg.page_lyrics_pos_y = cfg.page_lyrics_pos_y.clamp(0.0, 1.0);
 
         let mut forced_visualize_fallback = false;
         if !cfg.visualize.is_available() {
-            // 只有依赖 cava 的模式会落到这里；退到同样无需外部进程的示波器。
             cfg.visualize = VisualizeMode::Oscilloscope;
             forced_visualize_fallback = true;
         }
@@ -751,21 +722,20 @@ impl Config {
             || legacy_startup_folder_key_present
             || migrated_legacy_sidebar
         {
-            let _ = cfg.save();
+            cfg.save_to_path(path)?;
         }
 
         Ok(cfg)
     }
 
     pub fn save(&self) -> Result<()> {
-        let _ = assets::ensure_assets_ready();
-        let path = Self::default_path();
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let raw = toml::to_string_pretty(self).unwrap_or_default();
-        fs::write(path, raw)?;
-        Ok(())
+        assets::ensure_assets_ready()?;
+        self.save_to_path(&Self::default_path())
+    }
+
+    fn save_to_path(&self, path: &std::path::Path) -> Result<()> {
+        let raw = toml::to_string_pretty(self).context("serialize configuration")?;
+        atomic_file::write_atomic(path, raw.as_bytes())
     }
 
     fn default_path() -> PathBuf {
@@ -839,5 +809,18 @@ mod tests {
                 toml::from_str(&format!("visualize = \"{}\"", raw)).unwrap();
             assert_eq!(parsed.visualize, expected);
         }
+    }
+
+    #[test]
+    fn corrupt_config_is_rejected_without_replacement() {
+        let dir =
+            std::env::temp_dir().join(format!("cnmplayer-config-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("default.toml");
+        std::fs::write(&path, "not = [valid").unwrap();
+        assert!(super::Config::load_from_path(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not = [valid");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

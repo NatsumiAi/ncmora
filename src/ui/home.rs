@@ -74,7 +74,7 @@ pub fn draw_home(frame: &mut Frame, app: &mut App) {
     if lyrics_area.height > 0 {
         page_lyrics::draw_page_lyrics_overlay(frame, app, content_area);
     }
-    if app.home_sidebar.is_visible() {
+    if app.browse.home_sidebar.is_visible() {
         draw_home_sidebar(frame, app, rows[0]);
     }
 
@@ -96,27 +96,13 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
     let col_step = tile_w.saturating_add(2);
     let row_step = tile_h.saturating_add(1);
     let columns = usize::from((inner.width / col_step).max(1));
-    app.home.set_columns(columns);
+    app.browse.home.set_columns(columns);
 
     let visible_rows = usize::from((inner.height / row_step).max(1));
-    app.home.set_visible_rows(visible_rows);
-    let row_offset = app.home.effective_scroll_row_offset();
+    app.browse.home.set_visible_rows(visible_rows);
+    let row_offset = app.browse.home.effective_scroll_row_offset();
 
-    let mut visible_indices = Vec::new();
-    for index in 0..app.home.tiles.len() {
-        let virtual_index = home_real_to_virtual_index(index, columns);
-        let row = virtual_index / columns;
-        if row < row_offset {
-            continue;
-        }
-        let visual_row = row - row_offset;
-        if visual_row < visible_rows {
-            visible_indices.push(index);
-        }
-    }
-    app.prepare_home_tile_covers(&visible_indices);
-
-    for index in 0..app.home.tiles.len() {
+    for index in 0..app.browse.home.tiles.len() {
         let virtual_index = home_real_to_virtual_index(index, columns);
         let row = virtual_index / columns;
         if row < row_offset {
@@ -150,7 +136,7 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
             index,
         );
 
-        let focused = index == app.home.focused_idx;
+        let focused = index == app.browse.home.focused_idx;
         let tile_bg = if focused {
             app.theme.color_surface()
         } else {
@@ -208,7 +194,7 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 Style::default().fg(app.theme.color_text())
             };
-            app.home.tiles[index].cover.render(
+            app.browse.home.tiles[index].cover.render(
                 frame,
                 &mut app.graphics_picker,
                 cover_rect,
@@ -218,7 +204,7 @@ fn draw_tiles(frame: &mut Frame, app: &mut App, area: Rect) {
             );
         }
 
-        let title = app.home.tiles[index].title.clone();
+        let title = app.browse.home.tiles[index].title.clone();
 
         let title_style = if focused {
             Style::default()
@@ -290,7 +276,7 @@ fn draw_home_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let max_width = (area.width / 3).max(24).min(area.width);
     app.set_home_sidebar_anim_span_cells(max_width);
-    let progress = app.home_sidebar.anim_progress.clamp(0.0, 1.0);
+    let progress = app.browse.home_sidebar.anim_progress.clamp(0.0, 1.0);
     let width = ((max_width as f32) * progress).round() as u16;
     if width < 12 {
         return;
@@ -347,21 +333,21 @@ fn draw_home_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Length(header_height), Constraint::Min(1)])
         .split(inner);
 
-    let user_name = if app.home_sidebar.user_name.trim().is_empty() {
+    let user_name = if app.browse.home_sidebar.user_name.trim().is_empty() {
         match app.config.language {
             Language::Zh => "未识别用户".to_string(),
             Language::En => "Unknown User".to_string(),
         }
     } else {
-        app.home_sidebar.user_name.clone()
+        app.browse.home_sidebar.user_name.clone()
     };
 
-    let status = if app.home_sidebar.loading {
+    let status = if app.browse.home_sidebar.loading {
         match app.config.language {
             Language::Zh => "正在同步歌单...".to_string(),
             Language::En => "Syncing playlists...".to_string(),
         }
-    } else if app.home_sidebar.status_line.trim().is_empty() {
+    } else if app.browse.home_sidebar.status_line.trim().is_empty() {
         match app.config.language {
             Language::Zh => "Ctrl+上下切换分区 上下切换歌单 Enter进入 Esc收起".to_string(),
             Language::En => {
@@ -370,7 +356,7 @@ fn draw_home_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         }
     } else {
-        app.home_sidebar.status_line.clone()
+        app.browse.home_sidebar.status_line.clone()
     };
 
     let mut header_lines = vec![Line::from(Span::styled(
@@ -395,8 +381,8 @@ fn draw_home_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(chunks[1]);
 
-    let created_items = app.home_sidebar.created_playlists.clone();
-    let collected_items = app.home_sidebar.collected_playlists.clone();
+    let created_items = app.browse.home_sidebar.created_playlists.clone();
+    let collected_items = app.browse.home_sidebar.collected_playlists.clone();
 
     draw_home_sidebar_section(
         frame,
@@ -446,7 +432,8 @@ fn draw_home_sidebar_section(
         section,
     );
 
-    let section_focused = app.home_sidebar.expanded && app.home_sidebar.focused_section == section;
+    let section_focused =
+        app.browse.home_sidebar.expanded && app.browse.home_sidebar.focused_section == section;
     let section_title_style = if section_focused {
         Style::default()
             .fg(app.theme.color_accent2())
@@ -512,14 +499,18 @@ fn draw_home_sidebar_section(
         }
         let total = items.len();
         let focus_idx = if section_focused {
-            app.home_sidebar.focused_index.min(total.saturating_sub(1))
+            app.browse
+                .home_sidebar
+                .focused_index
+                .min(total.saturating_sub(1))
         } else {
             0
         };
         let mut start = if total <= max_rows {
             0
         } else {
-            app.home_sidebar
+            app.browse
+                .home_sidebar
                 .section_scroll_offset(section)
                 .min(total.saturating_sub(max_rows))
         };
@@ -532,7 +523,9 @@ fn draw_home_sidebar_section(
             }
             start = start.min(total.saturating_sub(max_rows));
         }
-        app.home_sidebar.set_section_scroll_offset(section, start);
+        app.browse
+            .home_sidebar
+            .set_section_scroll_offset(section, start);
 
         for (visual_idx, item) in items.iter().skip(start).take(max_rows).enumerate() {
             let idx = start + visual_idx;
@@ -551,7 +544,7 @@ fn draw_home_sidebar_section(
             let clipped_left = clip_to_display_width(&left, left_max);
             let used = display_width(&clipped_left) + display_width(&right);
             let spaces = usize::from(inner.width).saturating_sub(used).max(1);
-            let is_focused = section_focused && idx == app.home_sidebar.focused_index;
+            let is_focused = section_focused && idx == app.browse.home_sidebar.focused_index;
 
             app.push_home_sidebar_playlist_hit(
                 crate::app::HitRect {

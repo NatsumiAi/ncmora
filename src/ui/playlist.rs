@@ -1,5 +1,6 @@
 use crate::app::App;
 use crate::data::config::Language;
+use crate::data::icons::UiIcons;
 use crate::ui::page_lyrics;
 use crate::ui::player_bar;
 use ratatui::Frame;
@@ -91,7 +92,7 @@ fn draw_playlist_header(frame: &mut Frame, app: &mut App, area: Rect) {
         let bg_style = surface_bg_style(app);
         let draw_ascii = app.draw_ascii();
         let text_style = Style::default().fg(app.theme.color_text());
-        app.playlist.cover.render(
+        app.browse.playlist.cover.render(
             frame,
             &mut app.graphics_picker,
             cover_area,
@@ -120,8 +121,11 @@ fn draw_playlist_header(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let description_line_limit =
-        intro_line_limit(&app.playlist.description, info_area.width, cover_line_limit);
+    let description_line_limit = intro_line_limit(
+        &app.browse.playlist.description,
+        info_area.width,
+        cover_line_limit,
+    );
     let available_extra = info_area.height.saturating_sub(3);
     let spacer_height = u16::from(description_line_limit > 0 && available_extra >= 2);
     let description_height = available_extra
@@ -131,7 +135,7 @@ fn draw_playlist_header(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut cursor_y = info_area.y;
 
     frame.render_widget(
-        Paragraph::new(app.playlist.title.as_str()).style(
+        Paragraph::new(app.browse.playlist.title.as_str()).style(
             Style::default()
                 .fg(app.theme.color_text())
                 .add_modifier(Modifier::BOLD),
@@ -147,7 +151,7 @@ fn draw_playlist_header(frame: &mut Frame, app: &mut App, area: Rect) {
 
     if cursor_y < info_area.y + info_area.height {
         frame.render_widget(
-            Paragraph::new(app.playlist.artist.as_str())
+            Paragraph::new(app.browse.playlist.artist.as_str())
                 .style(Style::default().fg(app.theme.color_subtext())),
             Rect {
                 x: info_area.x,
@@ -165,7 +169,7 @@ fn draw_playlist_header(frame: &mut Frame, app: &mut App, area: Rect) {
 
     if description_height > 0 && cursor_y < info_area.y + info_area.height {
         frame.render_widget(
-            Paragraph::new(app.playlist.description.as_str())
+            Paragraph::new(app.browse.playlist.description.as_str())
                 .style(Style::default().fg(app.theme.color_text()))
                 .wrap(Wrap { trim: true }),
             Rect {
@@ -186,7 +190,7 @@ fn draw_playlist_header(frame: &mut Frame, app: &mut App, area: Rect) {
                     Language::Zh => "共",
                     Language::En => "Total",
                 },
-                app.playlist.tracks.len(),
+                app.browse.playlist.tracks.len(),
                 match app.config.language {
                     Language::Zh => "首",
                     Language::En => "tracks",
@@ -222,20 +226,20 @@ fn draw_playlist_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 
     let visible = inner.height as usize;
-    app.playlist.set_visible_rows(visible);
-    let offset = app.playlist.effective_scroll_offset();
+    app.browse.playlist.set_visible_rows(visible);
+    let offset = app.browse.playlist.effective_scroll_offset();
 
     // 下载图标先按可见行算好（memo：列表代/任务版本不变时只做切片索引），
     // 再逐行渲染，免得与 `app.playlist.tracks` 的不可变借用撞车。
     let download_phase = app.download_spinner_phase();
     app.refresh_playlist_downloads();
     let download_states: Vec<Option<crate::app::download::DownloadState>> = (offset
-        ..app.playlist.tracks.len())
+        ..app.browse.playlist.tracks.len())
         .take(visible)
         .map(|track_idx| app.playlist_download_state_at(track_idx))
         .collect();
 
-    for (line_idx, track_idx) in (offset..app.playlist.tracks.len())
+    for (line_idx, track_idx) in (offset..app.browse.playlist.tracks.len())
         .take(visible)
         .enumerate()
     {
@@ -257,8 +261,8 @@ fn draw_playlist_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
             track_idx,
         );
 
-        let track = &app.playlist.tracks[track_idx];
-        let focused = track_idx == app.playlist.focused_idx;
+        let track = &app.browse.playlist.tracks[track_idx];
+        let focused = track_idx == app.browse.playlist.focused_idx;
         let is_now_playing = app.is_now_playing_song(track.id.as_deref());
         let zebra_bg = if app.config.transparent_background {
             None
@@ -307,15 +311,7 @@ fn draw_playlist_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
         let download_style = if focused {
             style
         } else {
-            let download_style = match download_state {
-                Some(crate::app::download::DownloadState::Done) => {
-                    Style::default().fg(app.theme.color_accent3())
-                }
-                Some(crate::app::download::DownloadState::Downloading) => Style::default()
-                    .fg(app.theme.color_accent2())
-                    .add_modifier(Modifier::BOLD),
-                _ => Style::default().fg(app.theme.color_subtext()),
-            };
+            let download_style = Style::default().fg(app.theme.color_subtext());
             // 图标格与所在行同底色：斑马底在行样式上，这里补齐，
             // 避免图标格露出与行不同的背景。
             match zebra_bg {
@@ -352,7 +348,8 @@ fn draw_playlist_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
                 (display_width(&index_label) + 1 + display_width(&clipped_left) + space) as u16,
             );
             spans.push(Span::styled(
-                crate::app::download::state_glyph(state, download_phase).to_string(),
+                crate::app::download::state_glyph(state, download_phase, UiIcons::new())
+                    .to_string(),
                 download_style,
             ));
             spans.push(Span::styled(" ", style));

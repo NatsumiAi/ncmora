@@ -1,4 +1,4 @@
-use crate::data::assets;
+use crate::data::{assets, atomic_file};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -24,13 +24,11 @@ pub struct PlaybackSessionRecord {
     #[serde(default)]
     pub position_ms: Option<u64>,
     pub repeat_mode: Option<String>,
-    /// 队列来源列表的 id（如私人漫游的 tile id）。
-    ///
-    /// 私人漫游有「播完自动在尾部追加新歌」「封面跟随当前播放歌曲」等
-    /// 依赖来源的行为，重启后必须能还原出队列来自哪个列表。
-    /// `serde(default)` 保证旧存档（无此字段）仍可读入。
     #[serde(default)]
     pub source_playlist_id: Option<String>,
+    /// 歌单/专辑的来源封面；旧存档缺少时使用歌曲封面兜底。
+    #[serde(default)]
+    pub source_cover_url: Option<String>,
     pub updated_at: i64,
 }
 
@@ -40,8 +38,9 @@ pub fn load() -> Result<Option<PlaybackSessionRecord>> {
         return Ok(None);
     }
 
-    let raw = fs::read_to_string(&path)?;
-    let record: PlaybackSessionRecord = toml::from_str(&raw).unwrap_or_default();
+    let raw = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let record: PlaybackSessionRecord =
+        toml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
     if record.queue.is_empty() {
         return Ok(None);
     }
@@ -51,15 +50,10 @@ pub fn load() -> Result<Option<PlaybackSessionRecord>> {
 
 pub fn save(record: &PlaybackSessionRecord) -> Result<()> {
     let path = session_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
-    }
-
     let mut payload = record.clone();
     payload.updated_at = now_unix();
-    let raw = toml::to_string_pretty(&payload).unwrap_or_default();
-    fs::write(&path, raw).with_context(|| format!("write {}", path.display()))?;
-    Ok(())
+    let raw = toml::to_string_pretty(&payload).context("serialize playback session")?;
+    atomic_file::write_atomic(&path, raw.as_bytes())
 }
 
 pub fn clear() -> Result<()> {
@@ -78,12 +72,30 @@ fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_secs() as i64)
-        .unwrap_or_default()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::PlaybackSessionRecord;
+    use super::*;
+
+    #[test]
+    fn playback_memory_preserves_source_cover_and_accepts_older_records() {
+        let old = "updated_at = 0\nsource_playlist_id = 'playlist-42'\n";
+        let with_cover = format!("{old}source_cover_url = 'https://example.com/playlist.jpg'\n");
+        let record: PlaybackSessionRecord = toml::from_str(&with_cover).unwrap();
+        let saved: toml::Value = toml::from_str(&toml::to_string(&record).unwrap()).unwrap();
+        assert_eq!(
+            saved.get("source_cover_url").and_then(toml::Value::as_str),
+            Some("https://example.com/playlist.jpg"),
+        );
+        let old_record: PlaybackSessionRecord = toml::from_str(old).unwrap();
+        assert!(old_record.source_cover_url.is_none());
+        assert_eq!(
+            old_record.source_playlist_id.as_deref(),
+            Some("playlist-42")
+        );
+    }
 
     #[test]
     fn old_sessions_without_position_remain_loadable() {
